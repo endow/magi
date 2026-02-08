@@ -344,6 +344,7 @@ export default function HomePage() {
                     <p>run_id: {item.run_id}</p>
                     <p>time: {new Date(item.created_at).toLocaleTimeString()}</p>
                     <p>status: {statusSummary}</p>
+                    <p>consensus: {item.consensus?.status ?? "-"}</p>
                     <p>prompt: {item.prompt.slice(0, 80)}</p>
                   </button>
                 );
@@ -352,6 +353,23 @@ export default function HomePage() {
           </div>
         ) : null}
       </section>
+
+      {consensus ? (
+        <section className="panel mt-6 p-4">
+          <div className="flex items-center justify-between border-b border-terminal-border pb-2 text-sm">
+            <span className="font-semibold">Consensus</span>
+            <span className={statusClass(consensus.status)}>{consensus.status}</span>
+          </div>
+          <div className="mt-3 space-y-2 text-xs">
+            <p className="text-terminal-dim">model: {consensus.provider}/{consensus.model}</p>
+            <p className="text-terminal-dim">latency_ms: {consensus.latency_ms}</p>
+            {consensus.error_message ? <p className="status-error">error: {consensus.error_message}</p> : null}
+            <pre className="mt-2 whitespace-pre-wrap break-words rounded-md bg-[#02060b] p-3 text-sm leading-6">
+              {consensus.text}
+            </pre>
+          </div>
+        </section>
+      ) : null}
 
       {cards.length ? (
         <section className="mt-6 grid grid-cols-1 gap-4 md:grid-cols-3">
@@ -392,23 +410,6 @@ export default function HomePage() {
               </div>
             </article>
           ))}
-        </section>
-      ) : null}
-
-      {consensus ? (
-        <section className="panel mt-6 p-4">
-          <div className="flex items-center justify-between border-b border-terminal-border pb-2 text-sm">
-            <span className="font-semibold">Consensus</span>
-            <span className={statusClass(consensus.status)}>{consensus.status}</span>
-          </div>
-          <div className="mt-3 space-y-2 text-xs">
-            <p className="text-terminal-dim">model: {consensus.provider}/{consensus.model}</p>
-            <p className="text-terminal-dim">latency_ms: {consensus.latency_ms}</p>
-            {consensus.error_message ? <p className="status-error">error: {consensus.error_message}</p> : null}
-            <pre className="mt-2 whitespace-pre-wrap break-words rounded-md bg-[#02060b] p-3 text-sm leading-6">
-              {consensus.text}
-            </pre>
-          </div>
         </section>
       ) : null}
     </main>

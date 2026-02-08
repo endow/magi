@@ -5,9 +5,9 @@
     { "agent": "C", "provider": "gemini", "model": "gemini-2.5-flash" }
   ],
   "consensus": {
-    "provider": "openai",
-    "model": "gpt-4.1-mini",
-    "min_ok_results": 2
+    "strategy": "peer_vote",
+    "min_ok_results": 2,
+    "rounds": 1
   },
   "timeout_seconds": 20
 }

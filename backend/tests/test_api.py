@@ -53,10 +53,10 @@ def test_run_returns_partial_failure_without_failing_request(monkeypatch) -> Non
         )
 
     monkeypatch.setattr(main, "_run_single_agent", fake_runner)
-    async def fake_consensus(consensus_config, prompt, results, timeout_seconds):
+    async def fake_consensus(config_obj, prompt, results):
         return main.ConsensusResult(
-            provider=consensus_config.provider,
-            model=consensus_config.model,
+            provider=config_obj.consensus.provider or "magi",
+            model=config_obj.consensus.model or "peer_vote_v1",
             text="consensus-ok",
             status="OK",
             latency_ms=99,
@@ -138,10 +138,10 @@ def test_consensus_endpoint_recalculates(monkeypatch) -> None:
     )
 
     monkeypatch.setattr(main, "load_config", lambda: config)
-    async def fake_consensus(consensus_config, prompt, results, timeout_seconds):
+    async def fake_consensus(config_obj, prompt, results):
         return main.ConsensusResult(
-            provider=consensus_config.provider,
-            model=consensus_config.model,
+            provider=config_obj.consensus.provider or "magi",
+            model=config_obj.consensus.model or "peer_vote_v1",
             text="recalc-consensus",
             status="OK",
             latency_ms=55,

@@ -111,9 +111,9 @@ Edit `backend/config.json` to swap models without code changes.
     { "agent": "C", "provider": "gemini", "model": "gemini-2.5-flash" }
   ],
   "consensus": {
-    "provider": "openai",
-    "model": "gpt-4.1-mini",
-    "min_ok_results": 2
+    "strategy": "peer_vote",
+    "min_ok_results": 2,
+    "rounds": 1
   },
   "timeout_seconds": 20
 }
@@ -123,7 +123,7 @@ Edit `backend/config.json` to swap models without code changes.
 
 - Endpoint: `POST /api/magi/run`
 - Request body: `{ "prompt": "..." }`
-- Run response now includes `consensus` (synthesized final answer from model outputs)
+- Run response includes `consensus` (synthesized final answer from peer-vote deliberation)
 - Retry endpoint: `POST /api/magi/retry`
 - Retry body: `{ "prompt": "...", "agent": "A|B|C" }`
 - Consensus endpoint: `POST /api/magi/consensus`
@@ -146,7 +146,8 @@ Edit `backend/config.json` to swap models without code changes.
   - `Copy` response text
   - `Retry` failed card
 - Consensus panel:
-  - shows synthesized conclusion
+  - shown before the 3 result cards
+  - shows synthesized conclusion from multi-agent deliberation
   - supports `OK/ERROR` status and latency display
 - Session history panel (memory only, not persisted)
 - `run_id` display and copy button

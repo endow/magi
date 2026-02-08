@@ -1,4 +1,4 @@
-# MAGI v0.2 実装仕様（完成版プロンプト）
+# MAGI v0.3 実装仕様（完成版プロンプト）
 
 あなたはソフトウェア開発エージェントです。  
 最小のMVP「MAGI v0」を実装してください。
@@ -64,8 +64,8 @@
     }
   ],
   "consensus": {
-    "provider": "openai",
-    "model": "gpt-4.1-mini",
+    "provider": "magi",
+    "model": "peer_vote_r1",
     "text": "...",
     "status": "OK",
     "latency_ms": 1200
@@ -82,7 +82,7 @@
 - 失敗したモデルがあっても全体は落とさない。
 - タイムアウトは **各モデルごとに20秒** を適用（`asyncio.wait_for`）。
 - `run_id` はUUIDで毎回発行し、レスポンスに含める（DB保存はしない）。
-- 3モデルの結果を入力にして、**合議（consensus）** を1回実行する。
+- 3モデルの結果を入力にして、**3モデル同士の相互レビュー＋投票で合議（consensus）** を実行する。
 - 合議が失敗しても全体レスポンスは返し、`consensus.status="ERROR"` を返す。
 
 ---
@@ -102,7 +102,7 @@ messages = [{"role": "user", "content": prompt}]
 
 - LiteLLM に渡す model は `"provider/model"` 形式：
 
-- `openai/gpt-4o-mini`
+- `openai/gpt-4.1-mini`
 - `anthropic/claude-sonnet-4-20250514`
 - `gemini/gemini-2.5-flash`
 
@@ -120,9 +120,9 @@ messages = [{"role": "user", "content": prompt}]
     { "agent": "C", "provider": "gemini", "model": "gemini-2.5-flash" }
   ],
   "consensus": {
-    "provider": "openai",
-    "model": "gpt-4.1-mini",
-    "min_ok_results": 2
+    "strategy": "peer_vote",
+    "min_ok_results": 2,
+    "rounds": 1
   },
   "timeout_seconds": 20
 }
@@ -175,7 +175,7 @@ GOOGLE_API_KEY=
 
 ---
 
-### 合議再計算API（v0.2）
+### 合議再計算API（v0.3）
 
 - `POST /api/magi/consensus`
 - リクエスト:
@@ -206,6 +206,7 @@ GOOGLE_API_KEY=
 - 送信直後に3枠表示
 - `Loading...`
 - **run_id表示＋コピー可能**
+- **合議結果は3カラムより先（上部）に表示する**
 
 ### デザイン
 

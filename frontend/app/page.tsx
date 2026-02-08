@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, KeyboardEvent, useMemo, useState } from "react";
 
 type AgentId = "A" | "B" | "C";
 type AgentStatus = "OK" | "ERROR" | "LOADING";
@@ -21,6 +21,7 @@ type RunResponse = {
 };
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+const MAX_PROMPT_LENGTH = 4000;
 
 const loadingResults: AgentResult[] = [
   { agent: "A", provider: "-", model: "-", text: "Loading...", status: "LOADING", latency_ms: 0 },
@@ -36,6 +37,7 @@ function statusClass(status: AgentStatus): string {
 
 export default function HomePage() {
   const [prompt, setPrompt] = useState("");
+  const [lastRunPrompt, setLastRunPrompt] = useState("");
   const [results, setResults] = useState<AgentResult[]>([]);
   const [runId, setRunId] = useState("");
   const [error, setError] = useState("");
@@ -49,17 +51,44 @@ export default function HomePage() {
     return order.map((agent) => byAgent.get(agent)).filter((item): item is AgentResult => Boolean(item));
   }, [isLoading, results]);
 
+  function validatePrompt(input: string): string | null {
+    const trimmed = input.trim();
+    if (!trimmed) return "prompt must not be empty";
+    if (trimmed.length > MAX_PROMPT_LENGTH) return `prompt must be ${MAX_PROMPT_LENGTH} characters or fewer`;
+    return null;
+  }
+
+  async function requestRun(trimmedPrompt: string): Promise<RunResponse | null> {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/magi/run`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ prompt: trimmedPrompt })
+      });
+
+      const data = (await response.json()) as RunResponse | { detail?: string };
+
+      if (!response.ok) {
+        setError((data as { detail?: string }).detail ?? "backend request failed");
+        return null;
+      }
+
+      return data as RunResponse;
+    } catch {
+      setError("backend connection failed");
+    }
+    return null;
+  }
+
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const trimmed = prompt.trim();
+    const validationError = validatePrompt(trimmed);
 
-    if (!trimmed) {
-      setError("prompt must not be empty");
-      return;
-    }
-
-    if (trimmed.length > 4000) {
-      setError("prompt must be 4000 characters or fewer");
+    if (validationError) {
+      setError(validationError);
       return;
     }
 
@@ -67,28 +96,13 @@ export default function HomePage() {
     setRunId("");
     setIsLoading(true);
     setResults([]);
+    setLastRunPrompt(trimmed);
 
     try {
-      const response = await fetch(`${API_BASE_URL}/api/magi/run`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({ prompt: trimmed })
-      });
-
-      const data = (await response.json()) as RunResponse | { detail?: string };
-
-      if (!response.ok) {
-        setError((data as { detail?: string }).detail ?? "backend request failed");
-        return;
-      }
-
-      const success = data as RunResponse;
+      const success = await requestRun(trimmed);
+      if (!success) return;
       setRunId(success.run_id);
       setResults(success.results);
-    } catch {
-      setError("backend connection failed");
     } finally {
       setIsLoading(false);
     }
@@ -103,6 +117,45 @@ export default function HomePage() {
     }
   }
 
+  async function copyResultText(result: AgentResult) {
+    if (!result.text) return;
+    try {
+      await navigator.clipboard.writeText(result.text);
+    } catch {
+      setError(`failed to copy Agent ${result.agent} text`);
+    }
+  }
+
+  async function retryAgent(agent: AgentId) {
+    if (!lastRunPrompt || isLoading) return;
+    setError("");
+    setIsLoading(true);
+
+    try {
+      const rerun = await requestRun(lastRunPrompt);
+      if (!rerun) return;
+
+      const retried = rerun.results.find((item) => item.agent === agent);
+      if (!retried) return;
+
+      setRunId(rerun.run_id);
+      setResults((current) => {
+        const byAgent = new Map(current.map((item) => [item.agent, item]));
+        byAgent.set(agent, retried);
+        const order: AgentId[] = ["A", "B", "C"];
+        return order.map((id) => byAgent.get(id)).filter((item): item is AgentResult => Boolean(item));
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  function onTextareaKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
+    event.preventDefault();
+    event.currentTarget.form?.requestSubmit();
+  }
+
   return (
     <main className="mx-auto min-h-screen w-full max-w-7xl px-4 py-8 md:px-8">
       <section className="panel p-4 md:p-6">
@@ -115,6 +168,7 @@ export default function HomePage() {
             placeholder="Type your prompt..."
             value={prompt}
             onChange={(event) => setPrompt(event.target.value)}
+            onKeyDown={onTextareaKeyDown}
           />
           <div className="flex items-center gap-3">
             <button
@@ -124,8 +178,11 @@ export default function HomePage() {
             >
               {isLoading ? "Running..." : "Run MAGI"}
             </button>
-            <span className="text-xs text-terminal-dim">Limit: 4000 chars</span>
+            <span className="text-xs text-terminal-dim">
+              {prompt.length}/{MAX_PROMPT_LENGTH} chars
+            </span>
           </div>
+          <p className="text-xs text-terminal-dim">Enter: submit / Shift+Enter: newline</p>
         </form>
 
         {error ? <p className="mt-3 text-sm status-error">{error}</p> : null}
@@ -149,7 +206,27 @@ export default function HomePage() {
             <article key={result.agent} className="panel p-4">
               <div className="flex items-center justify-between border-b border-terminal-border pb-2 text-sm">
                 <span className="font-semibold">Agent {result.agent}</span>
-                <span className={statusClass(result.status)}>{result.status}</span>
+                <div className="flex items-center gap-2">
+                  <span className={statusClass(result.status)}>{result.status}</span>
+                  <button
+                    type="button"
+                    onClick={() => copyResultText(result)}
+                    disabled={!result.text || isLoading}
+                    className="rounded border border-terminal-border px-2 py-1 text-[11px] disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Copy
+                  </button>
+                  {result.status === "ERROR" ? (
+                    <button
+                      type="button"
+                      onClick={() => retryAgent(result.agent)}
+                      disabled={isLoading}
+                      className="rounded border border-terminal-err px-2 py-1 text-[11px] text-terminal-err disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Retry
+                    </button>
+                  ) : null}
+                </div>
               </div>
 
               <div className="mt-3 space-y-2 text-xs">

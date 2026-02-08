@@ -57,6 +57,11 @@ type ProfilesResponse = {
   profiles: string[];
 };
 
+type HistoryListResponse = {
+  total: number;
+  items: RunHistoryItem[];
+};
+
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 const MAX_PROMPT_LENGTH = 4000;
 const PHASE_VERSION = "v0.4";
@@ -85,6 +90,17 @@ export default function HomePage() {
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
 
+  async function fetchHistory() {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/magi/history?limit=20&offset=0`);
+      if (!response.ok) return;
+      const data = (await response.json()) as HistoryListResponse;
+      setHistory(data.items);
+    } catch {
+      // ignore history load errors
+    }
+  }
+
   const cards = useMemo(() => {
     if (isLoading) return loadingResults;
     if (!results.length) return [];
@@ -108,6 +124,10 @@ export default function HomePage() {
     }
 
     void loadProfiles();
+  }, []);
+
+  useEffect(() => {
+    void fetchHistory();
   }, []);
 
   function validatePrompt(input: string): string | null {
@@ -218,17 +238,7 @@ export default function HomePage() {
       setSelectedProfile(success.profile);
       setResults(success.results);
       setConsensus(success.consensus);
-      setHistory((current) => [
-        {
-          run_id: success.run_id,
-          profile: success.profile,
-          prompt: trimmed,
-          results: success.results,
-          consensus: success.consensus,
-          created_at: new Date().toISOString()
-        },
-        ...current
-      ].slice(0, 20));
+      await fetchHistory();
     } finally {
       setIsLoading(false);
     }
@@ -284,18 +294,6 @@ export default function HomePage() {
         setSelectedProfile(recalculated.profile);
         setConsensus(recalculated.consensus);
       }
-      const historyConsensus = recalculated?.consensus ?? consensus ?? null;
-      setHistory((current) => [
-        {
-          run_id: recalculated?.run_id ?? retried.run_id,
-          profile: recalculated?.profile ?? retried.profile,
-          prompt: lastRunPrompt,
-          results: updatedResults,
-          consensus: historyConsensus,
-          created_at: new Date().toISOString()
-        },
-        ...current
-      ].slice(0, 20));
     } finally {
       setIsLoading(false);
     }
@@ -384,7 +382,7 @@ export default function HomePage() {
 
         {history.length ? (
           <div className="mt-4 rounded-md border border-terminal-border bg-[#02060b] p-3">
-            <p className="text-xs font-semibold text-terminal-dim">Session history (memory only)</p>
+            <p className="text-xs font-semibold text-terminal-dim">Run history (persisted)</p>
             <div className="mt-2 space-y-2">
               {history.map((item) => {
                 const statusSummary = item.results

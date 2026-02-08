@@ -1,9 +1,12 @@
 import asyncio
 import json
 import os
+import sqlite3
 import uuid
 import warnings
 from collections import defaultdict
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Literal
@@ -129,7 +132,27 @@ class ProfilesResponse(BaseModel):
     profiles: list[str]
 
 
-app = FastAPI(title="MAGI v0 Backend")
+class HistoryItem(BaseModel):
+    run_id: str
+    profile: str
+    prompt: str
+    created_at: str
+    results: list[AgentResult]
+    consensus: ConsensusResult | None = None
+
+
+class HistoryListResponse(BaseModel):
+    total: int
+    items: list[HistoryItem]
+
+
+@asynccontextmanager
+async def app_lifespan(_: FastAPI):
+    _init_db()
+    yield
+
+
+app = FastAPI(title="MAGI v0 Backend", lifespan=app_lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -227,6 +250,195 @@ def _validate_prompt(raw_prompt: str) -> str:
     if len(prompt) > 4000:
         raise HTTPException(status_code=400, detail="prompt must be 4000 characters or fewer")
     return prompt
+
+
+def _db_path() -> Path:
+    raw_path = os.getenv("MAGI_DB_PATH")
+    if raw_path:
+        return Path(raw_path)
+    return Path(__file__).resolve().parents[1] / "data" / "magi.db"
+
+
+def _get_db_connection() -> sqlite3.Connection:
+    path = _db_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _init_db() -> None:
+    with _get_db_connection() as conn:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS runs (
+                run_id TEXT PRIMARY KEY,
+                profile TEXT NOT NULL,
+                prompt TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                consensus_provider TEXT,
+                consensus_model TEXT,
+                consensus_text TEXT,
+                consensus_status TEXT,
+                consensus_latency_ms INTEGER,
+                consensus_error_message TEXT
+            );
+            CREATE TABLE IF NOT EXISTS agent_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL,
+                agent TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                model TEXT NOT NULL,
+                text TEXT NOT NULL,
+                status TEXT NOT NULL,
+                latency_ms INTEGER NOT NULL,
+                error_message TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_agent_results_run_id ON agent_results(run_id);
+            """
+        )
+
+
+def _save_run_history(
+    run_id: str,
+    profile: str,
+    prompt: str,
+    results: list[AgentResult],
+    consensus: ConsensusResult,
+) -> None:
+    created_at = datetime.now(timezone.utc).isoformat()
+    with _get_db_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO runs (
+                run_id, profile, prompt, created_at,
+                consensus_provider, consensus_model, consensus_text, consensus_status,
+                consensus_latency_ms, consensus_error_message
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                profile,
+                prompt,
+                created_at,
+                consensus.provider,
+                consensus.model,
+                consensus.text,
+                consensus.status,
+                consensus.latency_ms,
+                consensus.error_message,
+            ),
+        )
+        conn.executemany(
+            """
+            INSERT INTO agent_results (
+                run_id, agent, provider, model, text, status, latency_ms, error_message
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    run_id,
+                    item.agent,
+                    item.provider,
+                    item.model,
+                    item.text,
+                    item.status,
+                    item.latency_ms,
+                    item.error_message,
+                )
+                for item in results
+            ],
+        )
+
+
+def _load_agent_results_map(run_ids: list[str]) -> dict[str, list[AgentResult]]:
+    if not run_ids:
+        return {}
+    placeholders = ",".join("?" for _ in run_ids)
+    query = (
+        "SELECT run_id, agent, provider, model, text, status, latency_ms, error_message "
+        f"FROM agent_results WHERE run_id IN ({placeholders}) ORDER BY id ASC"
+    )
+    by_run: dict[str, list[AgentResult]] = defaultdict(list)
+    with _get_db_connection() as conn:
+        rows = conn.execute(query, run_ids).fetchall()
+    for row in rows:
+        by_run[row["run_id"]].append(
+            AgentResult(
+                agent=row["agent"],
+                provider=row["provider"],
+                model=row["model"],
+                text=row["text"],
+                status=row["status"],
+                latency_ms=row["latency_ms"],
+                error_message=row["error_message"],
+            )
+        )
+    return by_run
+
+
+def _history_item_from_row(row: sqlite3.Row, results: list[AgentResult]) -> HistoryItem:
+    consensus_status = row["consensus_status"]
+    consensus: ConsensusResult | None = None
+    if consensus_status:
+        consensus = ConsensusResult(
+            provider=row["consensus_provider"] or "-",
+            model=row["consensus_model"] or "-",
+            text=row["consensus_text"] or "",
+            status=consensus_status,
+            latency_ms=int(row["consensus_latency_ms"] or 0),
+            error_message=row["consensus_error_message"],
+        )
+
+    return HistoryItem(
+        run_id=row["run_id"],
+        profile=row["profile"],
+        prompt=row["prompt"],
+        created_at=row["created_at"],
+        results=results,
+        consensus=consensus,
+    )
+
+
+def _list_history(limit: int, offset: int) -> HistoryListResponse:
+    with _get_db_connection() as conn:
+        total = conn.execute("SELECT COUNT(1) AS count FROM runs").fetchone()["count"]
+        rows = conn.execute(
+            """
+            SELECT run_id, profile, prompt, created_at,
+                   consensus_provider, consensus_model, consensus_text, consensus_status,
+                   consensus_latency_ms, consensus_error_message
+            FROM runs
+            ORDER BY created_at DESC
+            LIMIT ? OFFSET ?
+            """,
+            (limit, offset),
+        ).fetchall()
+
+    run_ids = [row["run_id"] for row in rows]
+    by_run = _load_agent_results_map(run_ids)
+    items = [_history_item_from_row(row, by_run.get(row["run_id"], [])) for row in rows]
+    return HistoryListResponse(total=total, items=items)
+
+
+def _get_history_item(run_id: str) -> HistoryItem | None:
+    with _get_db_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT run_id, profile, prompt, created_at,
+                   consensus_provider, consensus_model, consensus_text, consensus_status,
+                   consensus_latency_ms, consensus_error_message
+            FROM runs
+            WHERE run_id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+
+    if row is None:
+        return None
+
+    by_run = _load_agent_results_map([run_id])
+    return _history_item_from_row(row, by_run.get(run_id, []))
 
 
 def _serialize_result_for_consensus(result: AgentResult) -> str:
@@ -623,6 +835,29 @@ async def list_profiles() -> ProfilesResponse:
     return ProfilesResponse(default_profile=profile_key, profiles=[profile_key])
 
 
+@app.get("/api/magi/history", response_model=HistoryListResponse)
+async def list_history(limit: int = 20, offset: int = 0) -> HistoryListResponse:
+    if limit < 1 or limit > 100:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 100")
+    if offset < 0:
+        raise HTTPException(status_code=400, detail="offset must be 0 or greater")
+    try:
+        return _list_history(limit=limit, offset=offset)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"failed to load history: {exc}") from exc
+
+
+@app.get("/api/magi/history/{run_id}", response_model=HistoryItem)
+async def get_history_item(run_id: str) -> HistoryItem:
+    try:
+        item = _get_history_item(run_id)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"failed to load history: {exc}") from exc
+    if item is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    return item
+
+
 @app.post("/api/magi/run", response_model=RunResponse)
 async def run_magi(payload: RunRequest) -> RunResponse:
     prompt = _validate_prompt(payload.prompt)
@@ -638,8 +873,13 @@ async def run_magi(payload: RunRequest) -> RunResponse:
     tasks = [_run_single_agent(agent, prompt, profile.timeout_seconds) for agent in profile.agents]
     results = await asyncio.gather(*tasks)
     consensus = await _run_consensus(profile, prompt, results)
+    run_id = str(uuid.uuid4())
+    try:
+        _save_run_history(run_id, profile_name, prompt, results, consensus)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"failed to persist history: {exc}") from exc
 
-    return RunResponse(run_id=str(uuid.uuid4()), profile=profile_name, results=results, consensus=consensus)
+    return RunResponse(run_id=run_id, profile=profile_name, results=results, consensus=consensus)
 
 
 @app.post("/api/magi/retry", response_model=RetryResponse)

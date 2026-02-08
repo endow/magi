@@ -55,6 +55,7 @@ def test_run_rejects_too_long_prompt() -> None:
 
 def test_run_returns_partial_failure_without_failing_request(monkeypatch) -> None:
     monkeypatch.setattr(main, "load_config", _profiled_config)
+    monkeypatch.setattr(main, "_save_run_history", lambda *args, **kwargs: None)
 
     async def fake_runner(agent_config, prompt, timeout_seconds):
         if agent_config.agent == "B":
@@ -197,3 +198,96 @@ def test_consensus_endpoint_recalculates(monkeypatch) -> None:
     assert body["profile"] == "performance"
     assert body["consensus"]["status"] == "OK"
     assert body["consensus"]["text"] == "recalc-consensus"
+
+
+def test_history_list_and_get_item(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("MAGI_DB_PATH", str(tmp_path / "magi-test.db"))
+    main._init_db()
+    monkeypatch.setattr(main, "load_config", _profiled_config)
+
+    async def fake_runner(agent_config, prompt, timeout_seconds):
+        return main.AgentResult(
+            agent=agent_config.agent,
+            provider=agent_config.provider,
+            model=agent_config.model,
+            text=f"ok-{agent_config.agent}",
+            status="OK",
+            latency_ms=111,
+        )
+
+    async def fake_consensus(config_obj, prompt, results):
+        return main.ConsensusResult(
+            provider="magi",
+            model="peer_vote_v1",
+            text="consensus-ok",
+            status="OK",
+            latency_ms=55,
+        )
+
+    monkeypatch.setattr(main, "_run_single_agent", fake_runner)
+    monkeypatch.setattr(main, "_run_consensus", fake_consensus)
+
+    run_response = client.post("/api/magi/run", json={"prompt": "persist me", "profile": "cost"})
+    assert run_response.status_code == 200
+    run_id = run_response.json()["run_id"]
+
+    list_response = client.get("/api/magi/history?limit=20&offset=0")
+    assert list_response.status_code == 200
+    list_body = list_response.json()
+    assert list_body["total"] >= 1
+    assert len(list_body["items"]) >= 1
+    assert list_body["items"][0]["run_id"] == run_id
+    assert list_body["items"][0]["prompt"] == "persist me"
+
+    item_response = client.get(f"/api/magi/history/{run_id}")
+    assert item_response.status_code == 200
+    item_body = item_response.json()
+    assert item_body["run_id"] == run_id
+    assert item_body["consensus"]["status"] == "OK"
+    assert len(item_body["results"]) == 3
+
+
+def test_history_get_returns_404_for_unknown_run(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("MAGI_DB_PATH", str(tmp_path / "magi-empty.db"))
+    main._init_db()
+    response = client.get("/api/magi/history/not-found")
+    assert response.status_code == 404
+
+
+def test_history_list_rejects_invalid_query_params() -> None:
+    response = client.get("/api/magi/history?limit=0&offset=-1")
+    assert response.status_code == 400
+
+
+def test_history_persistence_failure_returns_500(monkeypatch) -> None:
+    monkeypatch.setattr(main, "load_config", _profiled_config)
+
+    async def fake_runner(agent_config, prompt, timeout_seconds):
+        return main.AgentResult(
+            agent=agent_config.agent,
+            provider=agent_config.provider,
+            model=agent_config.model,
+            text=f"ok-{agent_config.agent}",
+            status="OK",
+            latency_ms=100,
+        )
+
+    async def fake_consensus(config_obj, prompt, results):
+        return main.ConsensusResult(
+            provider="magi",
+            model="peer_vote_v1",
+            text="consensus-ok",
+            status="OK",
+            latency_ms=10,
+        )
+
+    def fail_save(*args, **kwargs):
+        raise RuntimeError("db failure")
+
+    monkeypatch.setattr(main, "_run_single_agent", fake_runner)
+    monkeypatch.setattr(main, "_run_consensus", fake_consensus)
+    monkeypatch.setattr(main, "_save_run_history", fail_save)
+
+    response = client.post("/api/magi/run", json={"prompt": "hello", "profile": "cost"})
+    assert response.status_code == 500
+    assert "failed to persist history" in response.json()["detail"]

@@ -232,10 +232,16 @@ GOOGLE_API_KEY=
 
 ---
 
-## 将来拡張
+## v0.5 追加（履歴永続化）
 
-- run_id中心設計
-- **DBなし（v0）**
+- SQLiteに `run` 結果を保存して、過去実行を見返せるようにする。
+- 保存対象:
+  - run_id / created_at / profile / prompt
+  - A/B/C 各結果（status, text, latency, error）
+  - consensus結果（status, text, latency, error）
+- 追加API:
+  - `GET /api/magi/history?limit=20&offset=0`
+  - `GET /api/magi/history/{run_id}`
 
 ---
 

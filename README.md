@@ -94,6 +94,7 @@ URLs:
 - `OPENAI_API_KEY=`
 - `ANTHROPIC_API_KEY=`
 - `GOOGLE_API_KEY=`
+- `MAGI_DB_PATH=backend/data/magi.db` (optional)
 
 `frontend/.env.local`
 
@@ -121,11 +122,14 @@ Edit `backend/config.json` to define profiles and swap models without code chang
 - Endpoint: `POST /api/magi/run`
 - Request body: `{ "prompt": "...", "profile": "cost|balance|performance" }`
 - Run response includes `consensus` (synthesized final answer from peer-vote deliberation)
+- Run responses are persisted to local SQLite history
 - Retry endpoint: `POST /api/magi/retry`
 - Retry body: `{ "prompt": "...", "agent": "A|B|C", "profile": "..." }`
 - Consensus endpoint: `POST /api/magi/consensus`
 - Consensus body: `{ "prompt": "...", "results": AgentResult[], "profile": "..." }`
 - Profiles endpoint: `GET /api/magi/profiles`
+- History list endpoint: `GET /api/magi/history?limit=20&offset=0`
+- History detail endpoint: `GET /api/magi/history/{run_id}`
 - Empty prompt or over 4000 chars returns `400`
 - Per-model timeout: 20 seconds
 - Partial failure is allowed (`status: ERROR`)
@@ -150,7 +154,7 @@ Edit `backend/config.json` to define profiles and swap models without code chang
 - Profile selector:
   - choose `cost`, `balance`, `performance`
   - selected profile is sent on run/retry/consensus
-- Session history panel (memory only, not persisted)
+- Run history panel (persisted in backend SQLite)
 - `run_id` display and copy button
 
 ## Troubleshooting (Local)

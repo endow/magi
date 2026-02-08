@@ -50,6 +50,12 @@ Frontend:
 Invoke-WebRequest -UseBasicParsing http://localhost:3000
 ```
 
+History API:
+
+```powershell
+Invoke-RestMethod -Method Get http://localhost:8000/api/magi/history?limit=5&offset=0 | ConvertTo-Json -Depth 6
+```
+
 ## Next.js Cache Recovery
 
 Use when dev server shows module/chunk inconsistencies (e.g. missing `_document`, missing chunk files).
@@ -78,3 +84,9 @@ npm run build
 - If a single agent shows `ERROR` with Gemini, check backend logs for `429` / `RESOURCE_EXHAUSTED`.
 - This indicates provider quota/rate-limit, not an app crash.
 - Wait and retry, or raise provider quota/billing limits.
+
+## History DB
+
+- Default DB path: `backend/data/magi.db`
+- Override path with `MAGI_DB_PATH` in `backend/.env`
+- If history is not needed, you can remove the DB file while backend is stopped and it will be recreated on next start.

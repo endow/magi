@@ -55,6 +55,36 @@ URLs:
 - Backend: `http://localhost:8000`
 - Health: `http://localhost:8000/health`
 
+## Docker Run (FE/BE together)
+
+Prerequisites:
+
+- Docker Desktop
+- `backend/.env` configured (copy from `backend/.env.example`)
+
+From repository root:
+
+```bash
+docker compose up --build -d
+```
+
+Check status:
+
+```bash
+docker compose ps
+```
+
+Stop:
+
+```bash
+docker compose down
+```
+
+URLs:
+
+- Frontend: `http://localhost:3000`
+- Backend: `http://localhost:8000`
+
 ## Environment Variables
 
 `backend/.env`

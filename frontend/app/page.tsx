@@ -20,6 +20,11 @@ type RunResponse = {
   results: AgentResult[];
 };
 
+type RetryResponse = {
+  run_id: string;
+  result: AgentResult;
+};
+
 type RunHistoryItem = {
   run_id: string;
   prompt: string;
@@ -90,6 +95,30 @@ export default function HomePage() {
     return null;
   }
 
+  async function requestRetry(trimmedPrompt: string, agent: AgentId): Promise<RetryResponse | null> {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/magi/retry`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ prompt: trimmedPrompt, agent })
+      });
+
+      const data = (await response.json()) as RetryResponse | { detail?: string };
+
+      if (!response.ok) {
+        setError((data as { detail?: string }).detail ?? "backend request failed");
+        return null;
+      }
+
+      return data as RetryResponse;
+    } catch {
+      setError("backend connection failed");
+    }
+    return null;
+  }
+
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const trimmed = prompt.trim();
@@ -149,24 +178,24 @@ export default function HomePage() {
     setIsLoading(true);
 
     try {
-      const rerun = await requestRun(lastRunPrompt);
-      if (!rerun) return;
-
-      const retried = rerun.results.find((item) => item.agent === agent);
+      const retried = await requestRetry(lastRunPrompt, agent);
       if (!retried) return;
 
-      setRunId(rerun.run_id);
-      setResults((current) => {
-        const byAgent = new Map(current.map((item) => [item.agent, item]));
-        byAgent.set(agent, retried);
+      setRunId(retried.run_id);
+      const updatedResults = (() => {
+        const baseResults = results.length ? results : [];
+        const byAgent = new Map(baseResults.map((item) => [item.agent, item]));
+        byAgent.set(agent, retried.result);
         const order: AgentId[] = ["A", "B", "C"];
         return order.map((id) => byAgent.get(id)).filter((item): item is AgentResult => Boolean(item));
-      });
+      })();
+
+      setResults(updatedResults);
       setHistory((current) => [
         {
-          run_id: rerun.run_id,
+          run_id: retried.run_id,
           prompt: lastRunPrompt,
-          results: rerun.results,
+          results: updatedResults,
           created_at: new Date().toISOString()
         },
         ...current

@@ -41,6 +41,11 @@ class RunRequest(BaseModel):
     prompt: str
 
 
+class RetryRequest(BaseModel):
+    prompt: str
+    agent: Literal["A", "B", "C"]
+
+
 class AgentResult(BaseModel):
     agent: str
     provider: str
@@ -54,6 +59,11 @@ class AgentResult(BaseModel):
 class RunResponse(BaseModel):
     run_id: str
     results: list[AgentResult]
+
+
+class RetryResponse(BaseModel):
+    run_id: str
+    result: AgentResult
 
 
 app = FastAPI(title="MAGI v0 Backend")
@@ -119,6 +129,15 @@ def _public_error_message(exc: Exception) -> str:
     return "provider request failed"
 
 
+def _validate_prompt(raw_prompt: str) -> str:
+    prompt = raw_prompt.strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="prompt must not be empty")
+    if len(prompt) > 4000:
+        raise HTTPException(status_code=400, detail="prompt must be 4000 characters or fewer")
+    return prompt
+
+
 async def _run_single_agent(agent_config: AgentConfig, prompt: str, timeout_seconds: int) -> AgentResult:
     full_model = f"{agent_config.provider}/{agent_config.model}"
     start = perf_counter()
@@ -176,11 +195,7 @@ async def health() -> dict[str, str]:
 
 @app.post("/api/magi/run", response_model=RunResponse)
 async def run_magi(payload: RunRequest) -> RunResponse:
-    prompt = payload.prompt.strip()
-    if not prompt:
-        raise HTTPException(status_code=400, detail="prompt must not be empty")
-    if len(prompt) > 4000:
-        raise HTTPException(status_code=400, detail="prompt must be 4000 characters or fewer")
+    prompt = _validate_prompt(payload.prompt)
 
     try:
         config = load_config()
@@ -191,3 +206,20 @@ async def run_magi(payload: RunRequest) -> RunResponse:
     results = await asyncio.gather(*tasks)
 
     return RunResponse(run_id=str(uuid.uuid4()), results=results)
+
+
+@app.post("/api/magi/retry", response_model=RetryResponse)
+async def retry_agent(payload: RetryRequest) -> RetryResponse:
+    prompt = _validate_prompt(payload.prompt)
+
+    try:
+        config = load_config()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"invalid config: {exc}") from exc
+
+    target_agent = next((agent for agent in config.agents if agent.agent == payload.agent), None)
+    if target_agent is None:
+        raise HTTPException(status_code=400, detail=f"agent {payload.agent} is not configured")
+
+    result = await _run_single_agent(target_agent, prompt, config.timeout_seconds)
+    return RetryResponse(run_id=str(uuid.uuid4()), result=result)

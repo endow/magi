@@ -88,6 +88,8 @@ Edit `backend/config.json` to swap models without code changes.
 
 - Endpoint: `POST /api/magi/run`
 - Request body: `{ "prompt": "..." }`
+- Retry endpoint: `POST /api/magi/retry`
+- Retry body: `{ "prompt": "...", "agent": "A|B|C" }`
 - Empty prompt or over 4000 chars returns `400`
 - Per-model timeout: 20 seconds
 - Partial failure is allowed (`status: ERROR`)

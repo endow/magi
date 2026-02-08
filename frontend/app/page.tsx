@@ -20,6 +20,13 @@ type RunResponse = {
   results: AgentResult[];
 };
 
+type RunHistoryItem = {
+  run_id: string;
+  prompt: string;
+  results: AgentResult[];
+  created_at: string;
+};
+
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 const MAX_PROMPT_LENGTH = 4000;
 
@@ -39,6 +46,7 @@ export default function HomePage() {
   const [prompt, setPrompt] = useState("");
   const [lastRunPrompt, setLastRunPrompt] = useState("");
   const [results, setResults] = useState<AgentResult[]>([]);
+  const [history, setHistory] = useState<RunHistoryItem[]>([]);
   const [runId, setRunId] = useState("");
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -103,6 +111,15 @@ export default function HomePage() {
       if (!success) return;
       setRunId(success.run_id);
       setResults(success.results);
+      setHistory((current) => [
+        {
+          run_id: success.run_id,
+          prompt: trimmed,
+          results: success.results,
+          created_at: new Date().toISOString()
+        },
+        ...current
+      ].slice(0, 20));
     } finally {
       setIsLoading(false);
     }
@@ -145,6 +162,15 @@ export default function HomePage() {
         const order: AgentId[] = ["A", "B", "C"];
         return order.map((id) => byAgent.get(id)).filter((item): item is AgentResult => Boolean(item));
       });
+      setHistory((current) => [
+        {
+          run_id: rerun.run_id,
+          prompt: lastRunPrompt,
+          results: rerun.results,
+          created_at: new Date().toISOString()
+        },
+        ...current
+      ].slice(0, 20));
     } finally {
       setIsLoading(false);
     }
@@ -154,6 +180,15 @@ export default function HomePage() {
     if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
     event.preventDefault();
     event.currentTarget.form?.requestSubmit();
+  }
+
+  function restoreHistory(item: RunHistoryItem) {
+    if (isLoading) return;
+    setError("");
+    setPrompt(item.prompt);
+    setLastRunPrompt(item.prompt);
+    setRunId(item.run_id);
+    setResults(item.results);
   }
 
   return (
@@ -198,6 +233,32 @@ export default function HomePage() {
             Copy
           </button>
         </div>
+
+        {history.length ? (
+          <div className="mt-4 rounded-md border border-terminal-border bg-[#02060b] p-3">
+            <p className="text-xs font-semibold text-terminal-dim">Session history (memory only)</p>
+            <div className="mt-2 space-y-2">
+              {history.map((item) => {
+                const statusSummary = item.results
+                  .map((result) => `${result.agent}:${result.status}`)
+                  .join(" ");
+                return (
+                  <button
+                    key={item.run_id}
+                    type="button"
+                    onClick={() => restoreHistory(item)}
+                    className="w-full rounded border border-terminal-border px-2 py-2 text-left text-xs text-terminal-dim hover:border-terminal-accent hover:text-terminal-text"
+                  >
+                    <p>run_id: {item.run_id}</p>
+                    <p>time: {new Date(item.created_at).toLocaleTimeString()}</p>
+                    <p>status: {statusSummary}</p>
+                    <p>prompt: {item.prompt.slice(0, 80)}</p>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ) : null}
       </section>
 
       {cards.length ? (

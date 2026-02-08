@@ -1,7 +1,7 @@
 {
   "agents": [
-    { "agent": "A", "provider": "openai", "model": "gpt-4o-mini" },
-    { "agent": "B", "provider": "anthropic", "model": "claude-haiku-4-5-20251001" },
+    { "agent": "A", "provider": "openai", "model": "gpt-4.1-mini" },
+    { "agent": "B", "provider": "anthropic", "model": "claude-sonnet-4-20250514" },
     { "agent": "C", "provider": "gemini", "model": "gemini-2.5-flash" }
   ],
   "timeout_seconds": 20

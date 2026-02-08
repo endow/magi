@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "MAGI v0",
+  title: "MAGI",
   description: "Send one prompt to three LLMs in parallel",
   icons: {
     icon: "/favicon.png"

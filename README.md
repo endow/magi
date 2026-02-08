@@ -7,6 +7,8 @@ One prompt goes to three LLMs in parallel and the outputs are displayed side-by-
 - `backend/`: FastAPI + LiteLLM
 - `frontend/`: Next.js (App Router) + Tailwind CSS
 - `SPEC.md`: implementation spec
+- `AGENTS.md`: coding-agent working rules
+- `RUNBOOK.md`: operational commands and troubleshooting
 
 ## Prerequisites
 

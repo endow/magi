@@ -59,6 +59,7 @@ type ProfilesResponse = {
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 const MAX_PROMPT_LENGTH = 4000;
+const PHASE_VERSION = "v0.4";
 
 const loadingResults: AgentResult[] = [
   { agent: "A", provider: "-", model: "-", text: "Loading...", status: "LOADING", latency_ms: 0 },
@@ -320,7 +321,12 @@ export default function HomePage() {
   return (
     <main className="mx-auto min-h-screen w-full max-w-7xl px-4 py-8 md:px-8">
       <section className="panel p-4 md:p-6">
-        <h1 className="text-xl font-semibold tracking-wide text-terminal-accent md:text-2xl">MAGI v0</h1>
+        <div className="flex items-center gap-2">
+          <h1 className="text-xl font-semibold tracking-wide text-terminal-accent md:text-2xl">MAGI</h1>
+          <span className="rounded border border-terminal-border px-2 py-0.5 text-[11px] text-terminal-dim">
+            phase {PHASE_VERSION}
+          </span>
+        </div>
         <p className="mt-2 text-sm text-terminal-dim">Single prompt. 3 parallel models. Side-by-side outputs.</p>
 
         <form className="mt-4 space-y-3" onSubmit={onSubmit}>

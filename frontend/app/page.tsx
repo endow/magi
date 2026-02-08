@@ -1,0 +1,169 @@
+"use client";
+
+import { FormEvent, useMemo, useState } from "react";
+
+type AgentId = "A" | "B" | "C";
+type AgentStatus = "OK" | "ERROR" | "LOADING";
+
+type AgentResult = {
+  agent: AgentId;
+  provider: string;
+  model: string;
+  text: string;
+  status: AgentStatus;
+  latency_ms: number;
+  error_message?: string | null;
+};
+
+type RunResponse = {
+  run_id: string;
+  results: AgentResult[];
+};
+
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+
+const loadingResults: AgentResult[] = [
+  { agent: "A", provider: "-", model: "-", text: "Loading...", status: "LOADING", latency_ms: 0 },
+  { agent: "B", provider: "-", model: "-", text: "Loading...", status: "LOADING", latency_ms: 0 },
+  { agent: "C", provider: "-", model: "-", text: "Loading...", status: "LOADING", latency_ms: 0 }
+];
+
+function statusClass(status: AgentStatus): string {
+  if (status === "OK") return "status-ok";
+  if (status === "ERROR") return "status-error";
+  return "status-loading";
+}
+
+export default function HomePage() {
+  const [prompt, setPrompt] = useState("");
+  const [results, setResults] = useState<AgentResult[]>([]);
+  const [runId, setRunId] = useState("");
+  const [error, setError] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+
+  const cards = useMemo(() => {
+    if (isLoading) return loadingResults;
+    if (!results.length) return [];
+    const order: AgentId[] = ["A", "B", "C"];
+    const byAgent = new Map(results.map((item) => [item.agent, item]));
+    return order.map((agent) => byAgent.get(agent)).filter((item): item is AgentResult => Boolean(item));
+  }, [isLoading, results]);
+
+  async function onSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const trimmed = prompt.trim();
+
+    if (!trimmed) {
+      setError("prompt must not be empty");
+      return;
+    }
+
+    if (trimmed.length > 4000) {
+      setError("prompt must be 4000 characters or fewer");
+      return;
+    }
+
+    setError("");
+    setRunId("");
+    setIsLoading(true);
+    setResults([]);
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/magi/run`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ prompt: trimmed })
+      });
+
+      const data = (await response.json()) as RunResponse | { detail?: string };
+
+      if (!response.ok) {
+        setError((data as { detail?: string }).detail ?? "backend request failed");
+        return;
+      }
+
+      const success = data as RunResponse;
+      setRunId(success.run_id);
+      setResults(success.results);
+    } catch {
+      setError("backend connection failed");
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  async function copyRunId() {
+    if (!runId) return;
+    try {
+      await navigator.clipboard.writeText(runId);
+    } catch {
+      setError("failed to copy run_id");
+    }
+  }
+
+  return (
+    <main className="mx-auto min-h-screen w-full max-w-7xl px-4 py-8 md:px-8">
+      <section className="panel p-4 md:p-6">
+        <h1 className="text-xl font-semibold tracking-wide text-terminal-accent md:text-2xl">MAGI v0</h1>
+        <p className="mt-2 text-sm text-terminal-dim">Single prompt. 3 parallel models. Side-by-side outputs.</p>
+
+        <form className="mt-4 space-y-3" onSubmit={onSubmit}>
+          <textarea
+            className="h-40 w-full resize-y rounded-md border border-terminal-border bg-[#02060b] p-3 text-sm outline-none ring-terminal-accent focus:ring"
+            placeholder="Type your prompt..."
+            value={prompt}
+            onChange={(event) => setPrompt(event.target.value)}
+          />
+          <div className="flex items-center gap-3">
+            <button
+              type="submit"
+              disabled={isLoading}
+              className="rounded-md border border-terminal-accent bg-[#0d1d2a] px-4 py-2 text-sm text-terminal-accent disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {isLoading ? "Running..." : "Run MAGI"}
+            </button>
+            <span className="text-xs text-terminal-dim">Limit: 4000 chars</span>
+          </div>
+        </form>
+
+        {error ? <p className="mt-3 text-sm status-error">{error}</p> : null}
+
+        <div className="mt-4 flex items-center gap-2 text-xs text-terminal-dim">
+          <span>run_id: {runId || "-"}</span>
+          <button
+            type="button"
+            onClick={copyRunId}
+            disabled={!runId}
+            className="rounded border border-terminal-border px-2 py-1 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            Copy
+          </button>
+        </div>
+      </section>
+
+      {cards.length ? (
+        <section className="mt-6 grid grid-cols-1 gap-4 md:grid-cols-3">
+          {cards.map((result) => (
+            <article key={result.agent} className="panel p-4">
+              <div className="flex items-center justify-between border-b border-terminal-border pb-2 text-sm">
+                <span className="font-semibold">Agent {result.agent}</span>
+                <span className={statusClass(result.status)}>{result.status}</span>
+              </div>
+
+              <div className="mt-3 space-y-2 text-xs">
+                <p className="text-terminal-dim">model: {result.provider}/{result.model}</p>
+                <p className="text-terminal-dim">latency_ms: {result.latency_ms}</p>
+                {result.error_message ? <p className="status-error">error: {result.error_message}</p> : null}
+                <pre className="mt-2 whitespace-pre-wrap break-words rounded-md bg-[#02060b] p-3 text-sm leading-6">
+                  {result.text}
+                </pre>
+              </div>
+            </article>
+          ))}
+        </section>
+      ) : null}
+    </main>
+  );
+}

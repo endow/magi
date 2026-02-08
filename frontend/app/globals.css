@@ -1,0 +1,28 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  @apply bg-terminal-bg text-terminal-text antialiased;
+  font-family: "IBM Plex Mono", "Consolas", "Menlo", monospace;
+}
+
+.panel {
+  @apply rounded-lg border border-terminal-border bg-terminal-panel;
+}
+
+.status-ok {
+  @apply text-terminal-ok;
+}
+
+.status-error {
+  @apply text-terminal-err;
+}
+
+.status-loading {
+  @apply text-terminal-accent;
+}

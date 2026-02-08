@@ -89,6 +89,7 @@ export default function HomePage() {
   const [runId, setRunId] = useState("");
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const isStrictDebate = selectedProfile === "performance";
 
   async function fetchHistory() {
     try {
@@ -361,6 +362,11 @@ export default function HomePage() {
                 ))}
               </select>
             </label>
+            {isStrictDebate ? (
+              <span className="rounded border border-terminal-accent px-2 py-1 text-[11px] text-terminal-accent">
+                strict debate
+              </span>
+            ) : null}
           </div>
           <p className="text-xs text-terminal-dim">Enter: submit / Shift+Enter: newline</p>
         </form>
@@ -412,7 +418,14 @@ export default function HomePage() {
       {consensus ? (
         <section className="panel mt-6 p-4">
           <div className="flex items-center justify-between border-b border-terminal-border pb-2 text-sm">
-            <span className="font-semibold">Consensus</span>
+            <div className="flex items-center gap-2">
+              <span className="font-semibold">Consensus</span>
+              {isStrictDebate ? (
+                <span className="rounded border border-terminal-accent px-2 py-0.5 text-[11px] text-terminal-accent">
+                  strict debate
+                </span>
+              ) : null}
+            </div>
             <span className={statusClass(consensus.status)}>{consensus.status}</span>
           </div>
           <div className="mt-3 space-y-2 text-xs">

@@ -3,7 +3,10 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "MAGI v0",
-  description: "Send one prompt to three LLMs in parallel"
+  description: "Send one prompt to three LLMs in parallel",
+  icons: {
+    icon: "/favicon.png"
+  }
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

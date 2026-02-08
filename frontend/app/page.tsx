@@ -1,9 +1,10 @@
 "use client";
 
-import { FormEvent, KeyboardEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 
 type AgentId = "A" | "B" | "C";
 type AgentStatus = "OK" | "ERROR" | "LOADING";
+type NodeState = "IDLE" | "BLINK" | "ON" | "ERROR";
 
 type AgentResult = {
   agent: AgentId;
@@ -89,7 +90,18 @@ export default function HomePage() {
   const [runId, setRunId] = useState("");
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [nodeStates, setNodeStates] = useState<Record<AgentId, NodeState>>({
+    A: "IDLE",
+    B: "IDLE",
+    C: "IDLE"
+  });
+  const [showConclusion, setShowConclusion] = useState(false);
   const isStrictDebate = selectedProfile === "performance";
+  const chamberRef = useRef<HTMLDivElement | null>(null);
+  const nodeRefs = useRef<Record<AgentId, HTMLDivElement | null>>({ A: null, B: null, C: null });
+  const [linkPaths, setLinkPaths] = useState<string[]>([]);
+  const [linkViewBox, setLinkViewBox] = useState("0 0 100 100");
+  const nodeTimerRefs = useRef<number[]>([]);
 
   async function fetchHistory() {
     try {
@@ -109,6 +121,53 @@ export default function HomePage() {
     const byAgent = new Map(results.map((item) => [item.agent, item]));
     return order.map((agent) => byAgent.get(agent)).filter((item): item is AgentResult => Boolean(item));
   }, [isLoading, results]);
+  const displayNodes = cards.length ? cards : loadingResults;
+  const nodePositionClass: Record<AgentId, string> = {
+    A: "magi-node-a",
+    B: "magi-node-b",
+    C: "magi-node-c"
+  };
+  const chamberActive = Object.values(nodeStates).some((state) => state === "BLINK");
+
+  function clearNodeTimers() {
+    nodeTimerRefs.current.forEach((id) => window.clearTimeout(id));
+    nodeTimerRefs.current = [];
+  }
+
+  function nodeStatesFromResults(items: AgentResult[]): Record<AgentId, NodeState> {
+    const base: Record<AgentId, NodeState> = { A: "IDLE", B: "IDLE", C: "IDLE" };
+    for (const item of items) {
+      base[item.agent] = item.status === "OK" ? "ON" : "ERROR";
+    }
+    return base;
+  }
+
+  function runNodeTransition(items: AgentResult[], consensusStatus: "OK" | "ERROR" | "LOADING") {
+    clearNodeTimers();
+    setShowConclusion(false);
+    setNodeStates({ A: "BLINK", B: "BLINK", C: "BLINK" });
+
+    const maxLatency = Math.max(...items.map((item) => Math.max(1, item.latency_ms)), 1);
+    const maxDelay = 1800;
+    let doneAt = 0;
+
+    for (const item of items) {
+      const delay = Math.max(260, Math.round((item.latency_ms / maxLatency) * maxDelay));
+      doneAt = Math.max(doneAt, delay);
+      const timer = window.setTimeout(() => {
+        setNodeStates((prev) => ({
+          ...prev,
+          [item.agent]: item.status === "OK" ? "ON" : "ERROR"
+        }));
+      }, delay);
+      nodeTimerRefs.current.push(timer);
+    }
+
+    const endTimer = window.setTimeout(() => {
+      setShowConclusion(consensusStatus === "OK");
+    }, doneAt + 200);
+    nodeTimerRefs.current.push(endTimer);
+  }
 
   useEffect(() => {
     async function loadProfiles() {
@@ -130,6 +189,54 @@ export default function HomePage() {
   useEffect(() => {
     void fetchHistory();
   }, []);
+
+  useEffect(() => {
+    return () => {
+      clearNodeTimers();
+    };
+  }, []);
+
+  useEffect(() => {
+    function updateLinks() {
+      const chamber = chamberRef.current;
+      const nodeA = nodeRefs.current.A;
+      const nodeB = nodeRefs.current.B;
+      const nodeC = nodeRefs.current.C;
+      if (!chamber || !nodeA || !nodeB || !nodeC) return;
+
+      const chamberRect = chamber.getBoundingClientRect();
+      if (window.innerWidth < 768) {
+        setLinkPaths([]);
+        return;
+      }
+
+      function centerOf(el: HTMLDivElement) {
+        const rect = el.getBoundingClientRect();
+        return {
+          x: rect.left - chamberRect.left + rect.width / 2,
+          y: rect.top - chamberRect.top + rect.height / 2
+        };
+      }
+
+      const a = centerOf(nodeA);
+      const b = centerOf(nodeB);
+      const c = centerOf(nodeC);
+
+      setLinkViewBox(`0 0 ${Math.max(1, chamberRect.width)} ${Math.max(1, chamberRect.height)}`);
+      setLinkPaths([
+        `M ${a.x} ${a.y} L ${b.x} ${b.y}`,
+        `M ${b.x} ${b.y} L ${c.x} ${c.y}`,
+        `M ${a.x} ${a.y} L ${c.x} ${c.y}`
+      ]);
+    }
+
+    const id = window.requestAnimationFrame(updateLinks);
+    window.addEventListener("resize", updateLinks);
+    return () => {
+      window.cancelAnimationFrame(id);
+      window.removeEventListener("resize", updateLinks);
+    };
+  }, [cards, isLoading]);
 
   function validatePrompt(input: string): string | null {
     const trimmed = input.trim();
@@ -222,6 +329,9 @@ export default function HomePage() {
     setError("");
     setRunId("");
     setIsLoading(true);
+    clearNodeTimers();
+    setShowConclusion(false);
+    setNodeStates({ A: "BLINK", B: "BLINK", C: "BLINK" });
     setResults([]);
     setConsensus({
       provider: "-",
@@ -234,11 +344,15 @@ export default function HomePage() {
 
     try {
       const success = await requestRun(trimmed);
-      if (!success) return;
+      if (!success) {
+        setNodeStates({ A: "IDLE", B: "IDLE", C: "IDLE" });
+        return;
+      }
       setRunId(success.run_id);
       setSelectedProfile(success.profile);
       setResults(success.results);
       setConsensus(success.consensus);
+      runNodeTransition(success.results, success.consensus.status);
       await fetchHistory();
     } finally {
       setIsLoading(false);
@@ -267,10 +381,16 @@ export default function HomePage() {
     if (!lastRunPrompt || isLoading) return;
     setError("");
     setIsLoading(true);
+    clearNodeTimers();
+    setShowConclusion(false);
+    setNodeStates((prev) => ({ ...prev, [agent]: "BLINK" }));
 
     try {
       const retried = await requestRetry(lastRunPrompt, agent);
-      if (!retried) return;
+      if (!retried) {
+        setNodeStates(nodeStatesFromResults(results));
+        return;
+      }
 
       setRunId(retried.run_id);
       setSelectedProfile(retried.profile);
@@ -294,6 +414,9 @@ export default function HomePage() {
       if (recalculated) {
         setSelectedProfile(recalculated.profile);
         setConsensus(recalculated.consensus);
+        runNodeTransition(updatedResults, recalculated.consensus.status);
+      } else {
+        setNodeStates(nodeStatesFromResults(updatedResults));
       }
     } finally {
       setIsLoading(false);
@@ -315,18 +438,58 @@ export default function HomePage() {
     setSelectedProfile(item.profile);
     setResults(item.results);
     setConsensus(item.consensus);
+    clearNodeTimers();
+    setNodeStates(nodeStatesFromResults(item.results));
+    setShowConclusion(item.consensus?.status === "OK");
   }
 
   return (
-    <main className="mx-auto min-h-screen w-full max-w-7xl px-4 py-8 md:px-8">
+    <main className="magi-grid magi-scan mx-auto min-h-screen w-full max-w-7xl px-4 py-8 md:px-8">
       <section className="panel p-4 md:p-6">
         <div className="flex items-center gap-2">
-          <h1 className="text-xl font-semibold tracking-wide text-terminal-accent md:text-2xl">MAGI</h1>
+          <h1 className="text-xl font-semibold tracking-[0.2em] text-terminal-accent md:text-2xl">MAGI</h1>
           <span className="rounded border border-terminal-border px-2 py-0.5 text-[11px] text-terminal-dim">
             phase {PHASE_VERSION}
           </span>
         </div>
-        <p className="mt-2 text-sm text-terminal-dim">Single prompt. 3 parallel models. Side-by-side outputs.</p>
+        <p className="mt-2 text-sm text-terminal-dim">Command chamber: one prompt, three models, one consensus core.</p>
+
+        <div className="magi-wire mt-4 rounded-md p-3">
+          <div ref={chamberRef} className="magi-chamber grid grid-cols-1 gap-3 md:block">
+            <svg
+              className={`magi-links ${chamberActive ? "is-active" : ""}`}
+              viewBox={linkViewBox}
+              preserveAspectRatio="xMidYMid meet"
+              aria-hidden="true"
+            >
+              {linkPaths.map((path, index) => (
+                <path key={`link-${index}`} className="magi-link-path" d={path} />
+              ))}
+            </svg>
+            {displayNodes.map((node) => (
+              <div
+                key={`node-${node.agent}`}
+                ref={(el) => {
+                  nodeRefs.current[node.agent] = el;
+                }}
+                className={`magi-node-wrap ${nodePositionClass[node.agent]}`}
+              >
+                <div className={`magi-node min-h-24 p-4 magi-node-${nodeStates[node.agent].toLowerCase()}`}>
+                  <p className="magi-node-label text-[11px] font-semibold">NODE-{node.agent}</p>
+                  <p className="mt-2 truncate text-sm font-semibold">
+                    {node.provider === "-" ? `AGENT ${node.agent}` : `${node.provider}/${node.model}`}
+                  </p>
+                  {nodeStates[node.agent] === "BLINK" ? (
+                    <div className="mt-2 w-full px-6">
+                      <div className="magi-node-progress" />
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            ))}
+            {showConclusion ? <div className="magi-conclusion">Conclusion</div> : null}
+          </div>
+        </div>
 
         <form className="mt-4 space-y-3" onSubmit={onSubmit}>
           <textarea
@@ -348,7 +511,7 @@ export default function HomePage() {
               {prompt.length}/{MAX_PROMPT_LENGTH} chars
             </span>
             <label className="text-xs text-terminal-dim">
-              profile:
+              mode:
               <select
                 className="ml-2 rounded border border-terminal-border bg-[#02060b] px-2 py-1 text-xs"
                 value={selectedProfile}
@@ -375,7 +538,7 @@ export default function HomePage() {
 
         <div className="mt-4 flex items-center gap-2 text-xs text-terminal-dim">
           <span>run_id: {runId || "-"}</span>
-          <span>profile: {selectedProfile}</span>
+          <span>mode: {selectedProfile}</span>
           <button
             type="button"
             onClick={copyRunId}
@@ -402,7 +565,7 @@ export default function HomePage() {
                     className="w-full rounded border border-terminal-border px-2 py-2 text-left text-xs text-terminal-dim hover:border-terminal-accent hover:text-terminal-text"
                   >
                     <p>run_id: {item.run_id}</p>
-                    <p>profile: {item.profile}</p>
+                    <p>mode: {item.profile}</p>
                     <p>time: {new Date(item.created_at).toLocaleTimeString()}</p>
                     <p>status: {statusSummary}</p>
                     <p>consensus: {item.consensus?.status ?? "-"}</p>
@@ -419,7 +582,7 @@ export default function HomePage() {
         <section className="panel mt-6 p-4">
           <div className="flex items-center justify-between border-b border-terminal-border pb-2 text-sm">
             <div className="flex items-center gap-2">
-              <span className="font-semibold">Consensus</span>
+              <span className="font-semibold tracking-wide text-terminal-accent">Consensus Core</span>
               {isStrictDebate ? (
                 <span className="rounded border border-terminal-accent px-2 py-0.5 text-[11px] text-terminal-accent">
                   strict debate
@@ -444,7 +607,10 @@ export default function HomePage() {
           {cards.map((result) => (
             <article key={result.agent} className="panel p-4">
               <div className="flex items-center justify-between border-b border-terminal-border pb-2 text-sm">
-                <span className="font-semibold">Agent {result.agent}</span>
+                <div className="flex items-center gap-2">
+                  <span className="font-semibold text-terminal-accent">{result.provider}/{result.model}</span>
+                  <span className="text-[11px] text-terminal-dim">Agent {result.agent}</span>
+                </div>
                 <div className="flex items-center gap-2">
                   <span className={statusClass(result.status)}>{result.status}</span>
                   <button
@@ -469,7 +635,6 @@ export default function HomePage() {
               </div>
 
               <div className="mt-3 space-y-2 text-xs">
-                <p className="text-terminal-dim">model: {result.provider}/{result.model}</p>
                 <p className="text-terminal-dim">latency_ms: {result.latency_ms}</p>
                 {result.error_message ? <p className="status-error">error: {result.error_message}</p> : null}
                 <pre className="mt-2 whitespace-pre-wrap break-words rounded-md bg-[#02060b] p-3 text-sm leading-6">

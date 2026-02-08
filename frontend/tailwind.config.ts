@@ -6,14 +6,14 @@ const config: Config = {
     extend: {
       colors: {
         terminal: {
-          bg: "#05080d",
-          panel: "#0a1119",
-          border: "#203040",
-          text: "#d6e1ee",
-          dim: "#8ca0b3",
-          ok: "#74f58a",
-          err: "#ff7070",
-          accent: "#4fc3f7"
+          bg: "#04070c",
+          panel: "#09111a",
+          border: "#1a3248",
+          text: "#d5e7f7",
+          dim: "#89a4bc",
+          ok: "#72f0a0",
+          err: "#ff6f7f",
+          accent: "#ff8a5c"
         }
       }
     }

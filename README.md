@@ -110,8 +110,8 @@ Edit `backend/config.json` to define profiles and swap models without code chang
   "default_profile": "cost",
   "profiles": {
     "cost": { "...": "..." },
-    "creative": { "...": "..." },
-    "logical": { "...": "..." }
+    "balance": { "...": "..." },
+    "performance": { "...": "..." }
   }
 }
 ```
@@ -119,7 +119,7 @@ Edit `backend/config.json` to define profiles and swap models without code chang
 ## API Notes
 
 - Endpoint: `POST /api/magi/run`
-- Request body: `{ "prompt": "...", "profile": "cost|creative|logical" }`
+- Request body: `{ "prompt": "...", "profile": "cost|balance|performance" }`
 - Run response includes `consensus` (synthesized final answer from peer-vote deliberation)
 - Retry endpoint: `POST /api/magi/retry`
 - Retry body: `{ "prompt": "...", "agent": "A|B|C", "profile": "..." }`
@@ -148,7 +148,7 @@ Edit `backend/config.json` to define profiles and swap models without code chang
   - shows synthesized conclusion from multi-agent deliberation
   - supports `OK/ERROR` status and latency display
 - Profile selector:
-  - choose `cost`, `creative`, `logical`
+  - choose `cost`, `balance`, `performance`
   - selected profile is sent on run/retry/consensus
 - Session history panel (memory only, not persisted)
 - `run_id` display and copy button

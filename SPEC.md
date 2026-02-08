@@ -29,14 +29,14 @@
 
 #### リクエスト
 ```json
-{ "prompt": "string", "profile": "cost|creative|logical" }
+{ "prompt": "string", "profile": "cost|balance|performance" }
 ```
 
 #### レスポンス（成功時）
 ```json
 {
   "run_id": "uuid-string",
-  "profile": "logical",
+  "profile": "performance",
   "results": [
     {
       "agent": "A",
@@ -118,8 +118,8 @@ messages = [{"role": "user", "content": prompt}]
   "default_profile": "cost",
   "profiles": {
     "cost": { "...": "..." },
-    "creative": { "...": "..." },
-    "logical": { "...": "..." }
+    "balance": { "...": "..." },
+    "performance": { "...": "..." }
   }
 }
 ```

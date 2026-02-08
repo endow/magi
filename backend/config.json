@@ -14,7 +14,7 @@
       },
       "timeout_seconds": 20
     },
-    "creative": {
+    "balance": {
       "agents": [
         { "agent": "A", "provider": "openai", "model": "gpt-4.1" },
         { "agent": "B", "provider": "anthropic", "model": "claude-sonnet-4-20250514" },
@@ -27,7 +27,7 @@
       },
       "timeout_seconds": 25
     },
-    "logical": {
+    "performance": {
       "agents": [
         { "agent": "A", "provider": "openai", "model": "gpt-4.1-mini" },
         { "agent": "B", "provider": "anthropic", "model": "claude-sonnet-4-20250514" },

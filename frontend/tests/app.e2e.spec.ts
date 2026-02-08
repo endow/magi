@@ -9,7 +9,7 @@ test("submit with Enter and restore from history", async ({ page }) => {
       contentType: "application/json",
       body: JSON.stringify({
         default_profile: "cost",
-        profiles: ["cost", "creative", "logical"]
+        profiles: ["cost", "balance", "performance"]
       })
     });
   });

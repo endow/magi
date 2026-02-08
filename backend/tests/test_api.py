@@ -19,7 +19,7 @@ def _profiled_config() -> main.AppConfig:
                 consensus=main.ConsensusConfig(strategy="peer_vote", min_ok_results=2, rounds=1),
                 timeout_seconds=20,
             ),
-            "logical": main.ProfileConfig(
+            "performance": main.ProfileConfig(
                 agents=[
                     main.AgentConfig(agent="A", provider="openai", model="gpt-4.1-mini"),
                     main.AgentConfig(agent="B", provider="anthropic", model="claude-sonnet-4-20250514"),
@@ -38,7 +38,7 @@ def test_profiles_endpoint_returns_profile_list(monkeypatch) -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["default_profile"] == "cost"
-    assert body["profiles"] == ["cost", "logical"]
+    assert body["profiles"] == ["cost", "performance"]
 
 
 def test_run_rejects_empty_prompt() -> None:
@@ -89,12 +89,12 @@ def test_run_returns_partial_failure_without_failing_request(monkeypatch) -> Non
 
     monkeypatch.setattr(main, "_run_consensus", fake_consensus)
 
-    response = client.post("/api/magi/run", json={"prompt": "hello", "profile": "logical"})
+    response = client.post("/api/magi/run", json={"prompt": "hello", "profile": "performance"})
     assert response.status_code == 200
 
     body = response.json()
     assert isinstance(body.get("run_id"), str) and body["run_id"]
-    assert body["profile"] == "logical"
+    assert body["profile"] == "performance"
     assert len(body["results"]) == 3
 
     by_agent = {item["agent"]: item for item in body["results"]}
@@ -132,12 +132,12 @@ def test_retry_runs_only_target_agent(monkeypatch) -> None:
 
     monkeypatch.setattr(main, "_run_single_agent", fake_runner)
 
-    response = client.post("/api/magi/retry", json={"prompt": "hello", "agent": "B", "profile": "logical"})
+    response = client.post("/api/magi/retry", json={"prompt": "hello", "agent": "B", "profile": "performance"})
     assert response.status_code == 200
 
     body = response.json()
     assert isinstance(body.get("run_id"), str) and body["run_id"]
-    assert body["profile"] == "logical"
+    assert body["profile"] == "performance"
     assert body["result"]["agent"] == "B"
     assert body["result"]["status"] == "OK"
     assert body["result"]["text"] == "retry-B"
@@ -189,11 +189,11 @@ def test_consensus_endpoint_recalculates(monkeypatch) -> None:
         ],
     }
 
-    payload["profile"] = "logical"
+    payload["profile"] = "performance"
 
     response = client.post("/api/magi/consensus", json=payload)
     assert response.status_code == 200
     body = response.json()
-    assert body["profile"] == "logical"
+    assert body["profile"] == "performance"
     assert body["consensus"]["status"] == "OK"
     assert body["consensus"]["text"] == "recalc-consensus"

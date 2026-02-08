@@ -73,3 +73,8 @@ npm run build
 - `trio._core._multierror RuntimeWarning` can appear depending on environment hooks.
 - The app suppresses this warning in code; if seen in ad-hoc scripts, it is usually non-fatal.
 
+## Provider Quota Errors
+
+- If a single agent shows `ERROR` with Gemini, check backend logs for `429` / `RESOURCE_EXHAUSTED`.
+- This indicates provider quota/rate-limit, not an app crash.
+- Wait and retry, or raise provider quota/billing limits.

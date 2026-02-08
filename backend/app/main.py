@@ -209,6 +209,8 @@ def _public_error_message(exc: Exception) -> str:
     message = str(exc).lower()
     if "credit balance is too low" in message:
         return "provider account has insufficient credits"
+    if "quota exceeded" in message or "resource_exhausted" in message or "429" in message:
+        return "provider quota exceeded (try later or upgrade plan)"
     if "api key" in message or "authentication" in message:
         return "provider authentication failed (check API key)"
     if "not found" in message and "model" in message:
@@ -344,6 +346,7 @@ async def _call_model_text(full_model: str, prompt: str, timeout_seconds: int) -
 
 async def _run_single_agent(agent_config: AgentConfig, prompt: str, timeout_seconds: int) -> AgentResult:
     full_model = f"{agent_config.provider}/{agent_config.model}"
+    start = perf_counter()
     print(f"[magi] agent={agent_config.agent} start model={full_model}")
 
     try:
@@ -365,7 +368,7 @@ async def _run_single_agent(agent_config: AgentConfig, prompt: str, timeout_seco
             model=agent_config.model,
             text="",
             status="ERROR",
-            latency_ms=int(timeout_seconds * 1000),
+            latency_ms=int((perf_counter() - start) * 1000),
             error_message="timeout",
         )
     except Exception as exc:  # noqa: BLE001
@@ -376,7 +379,7 @@ async def _run_single_agent(agent_config: AgentConfig, prompt: str, timeout_seco
             model=agent_config.model,
             text="",
             status="ERROR",
-            latency_ms=0,
+            latency_ms=int((perf_counter() - start) * 1000),
             error_message=_public_error_message(exc),
         )
 
@@ -390,6 +393,7 @@ async def _run_deliberation_turn(
     timeout_seconds: int,
 ) -> DeliberationTurn:
     full_model = f"{agent_config.provider}/{agent_config.model}"
+    start = perf_counter()
     print(f"[magi] deliberation round={round_index} agent={agent_config.agent} start")
 
     try:
@@ -405,7 +409,7 @@ async def _run_deliberation_turn(
             provider=agent_config.provider,
             model=agent_config.model,
             status="ERROR",
-            latency_ms=int(timeout_seconds * 1000),
+            latency_ms=int((perf_counter() - start) * 1000),
             raw_text="",
             revised_answer="",
             error_message="timeout",
@@ -417,7 +421,7 @@ async def _run_deliberation_turn(
             provider=agent_config.provider,
             model=agent_config.model,
             status="ERROR",
-            latency_ms=0,
+            latency_ms=int((perf_counter() - start) * 1000),
             raw_text="",
             revised_answer="",
             error_message=_public_error_message(exc),

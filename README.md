@@ -106,10 +106,15 @@ Edit `backend/config.json` to swap models without code changes.
 ```json
 {
   "agents": [
-    { "agent": "A", "provider": "openai", "model": "gpt-4o-mini" },
-    { "agent": "B", "provider": "anthropic", "model": "claude-haiku-4-5-20251001" },
+    { "agent": "A", "provider": "openai", "model": "gpt-4.1-mini" },
+    { "agent": "B", "provider": "anthropic", "model": "claude-sonnet-4-20250514" },
     { "agent": "C", "provider": "gemini", "model": "gemini-2.5-flash" }
   ],
+  "consensus": {
+    "provider": "openai",
+    "model": "gpt-4.1-mini",
+    "min_ok_results": 2
+  },
   "timeout_seconds": 20
 }
 ```
@@ -118,8 +123,11 @@ Edit `backend/config.json` to swap models without code changes.
 
 - Endpoint: `POST /api/magi/run`
 - Request body: `{ "prompt": "..." }`
+- Run response now includes `consensus` (synthesized final answer from model outputs)
 - Retry endpoint: `POST /api/magi/retry`
 - Retry body: `{ "prompt": "...", "agent": "A|B|C" }`
+- Consensus endpoint: `POST /api/magi/consensus`
+- Consensus body: `{ "prompt": "...", "results": AgentResult[] }`
 - Empty prompt or over 4000 chars returns `400`
 - Per-model timeout: 20 seconds
 - Partial failure is allowed (`status: ERROR`)
@@ -137,6 +145,9 @@ Edit `backend/config.json` to swap models without code changes.
 - Per-card actions:
   - `Copy` response text
   - `Retry` failed card
+- Consensus panel:
+  - shows synthesized conclusion
+  - supports `OK/ERROR` status and latency display
 - Session history panel (memory only, not persisted)
 - `run_id` display and copy button
 

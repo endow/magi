@@ -18,6 +18,7 @@ type AgentResult = {
 type RunResponse = {
   run_id: string;
   results: AgentResult[];
+  consensus: ConsensusResult;
 };
 
 type RetryResponse = {
@@ -29,7 +30,22 @@ type RunHistoryItem = {
   run_id: string;
   prompt: string;
   results: AgentResult[];
+  consensus: ConsensusResult | null;
   created_at: string;
+};
+
+type ConsensusResult = {
+  provider: string;
+  model: string;
+  text: string;
+  status: "OK" | "ERROR" | "LOADING";
+  latency_ms: number;
+  error_message?: string | null;
+};
+
+type ConsensusResponse = {
+  run_id: string;
+  consensus: ConsensusResult;
 };
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
@@ -51,6 +67,7 @@ export default function HomePage() {
   const [prompt, setPrompt] = useState("");
   const [lastRunPrompt, setLastRunPrompt] = useState("");
   const [results, setResults] = useState<AgentResult[]>([]);
+  const [consensus, setConsensus] = useState<ConsensusResult | null>(null);
   const [history, setHistory] = useState<RunHistoryItem[]>([]);
   const [runId, setRunId] = useState("");
   const [error, setError] = useState("");
@@ -119,6 +136,29 @@ export default function HomePage() {
     return null;
   }
 
+  async function requestConsensus(trimmedPrompt: string, latestResults: AgentResult[]): Promise<ConsensusResponse | null> {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/magi/consensus`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ prompt: trimmedPrompt, results: latestResults })
+      });
+
+      const data = (await response.json()) as ConsensusResponse | { detail?: string };
+      if (!response.ok) {
+        setError((data as { detail?: string }).detail ?? "backend request failed");
+        return null;
+      }
+
+      return data as ConsensusResponse;
+    } catch {
+      setError("backend connection failed");
+    }
+    return null;
+  }
+
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const trimmed = prompt.trim();
@@ -133,6 +173,13 @@ export default function HomePage() {
     setRunId("");
     setIsLoading(true);
     setResults([]);
+    setConsensus({
+      provider: "-",
+      model: "-",
+      text: "Loading...",
+      status: "LOADING",
+      latency_ms: 0
+    });
     setLastRunPrompt(trimmed);
 
     try {
@@ -140,11 +187,13 @@ export default function HomePage() {
       if (!success) return;
       setRunId(success.run_id);
       setResults(success.results);
+      setConsensus(success.consensus);
       setHistory((current) => [
         {
           run_id: success.run_id,
           prompt: trimmed,
           results: success.results,
+          consensus: success.consensus,
           created_at: new Date().toISOString()
         },
         ...current
@@ -182,6 +231,13 @@ export default function HomePage() {
       if (!retried) return;
 
       setRunId(retried.run_id);
+      setConsensus({
+        provider: consensus?.provider ?? "-",
+        model: consensus?.model ?? "-",
+        text: "Loading...",
+        status: "LOADING",
+        latency_ms: 0
+      });
       const updatedResults = (() => {
         const baseResults = results.length ? results : [];
         const byAgent = new Map(baseResults.map((item) => [item.agent, item]));
@@ -191,11 +247,17 @@ export default function HomePage() {
       })();
 
       setResults(updatedResults);
+      const recalculated = await requestConsensus(lastRunPrompt, updatedResults);
+      if (recalculated) {
+        setConsensus(recalculated.consensus);
+      }
+      const historyConsensus = recalculated?.consensus ?? consensus ?? null;
       setHistory((current) => [
         {
-          run_id: retried.run_id,
+          run_id: recalculated?.run_id ?? retried.run_id,
           prompt: lastRunPrompt,
           results: updatedResults,
+          consensus: historyConsensus,
           created_at: new Date().toISOString()
         },
         ...current
@@ -218,6 +280,7 @@ export default function HomePage() {
     setLastRunPrompt(item.prompt);
     setRunId(item.run_id);
     setResults(item.results);
+    setConsensus(item.consensus);
   }
 
   return (
@@ -329,6 +392,23 @@ export default function HomePage() {
               </div>
             </article>
           ))}
+        </section>
+      ) : null}
+
+      {consensus ? (
+        <section className="panel mt-6 p-4">
+          <div className="flex items-center justify-between border-b border-terminal-border pb-2 text-sm">
+            <span className="font-semibold">Consensus</span>
+            <span className={statusClass(consensus.status)}>{consensus.status}</span>
+          </div>
+          <div className="mt-3 space-y-2 text-xs">
+            <p className="text-terminal-dim">model: {consensus.provider}/{consensus.model}</p>
+            <p className="text-terminal-dim">latency_ms: {consensus.latency_ms}</p>
+            {consensus.error_message ? <p className="status-error">error: {consensus.error_message}</p> : null}
+            <pre className="mt-2 whitespace-pre-wrap break-words rounded-md bg-[#02060b] p-3 text-sm leading-6">
+              {consensus.text}
+            </pre>
+          </div>
         </section>
       ) : null}
     </main>

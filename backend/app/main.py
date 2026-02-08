@@ -32,8 +32,15 @@ class AgentConfig(BaseModel):
     model: str
 
 
+class ConsensusConfig(BaseModel):
+    provider: str
+    model: str
+    min_ok_results: int = 2
+
+
 class AppConfig(BaseModel):
     agents: list[AgentConfig]
+    consensus: ConsensusConfig
     timeout_seconds: int = 20
 
 
@@ -44,6 +51,11 @@ class RunRequest(BaseModel):
 class RetryRequest(BaseModel):
     prompt: str
     agent: Literal["A", "B", "C"]
+
+
+class ConsensusRequest(BaseModel):
+    prompt: str
+    results: list["AgentResult"]
 
 
 class AgentResult(BaseModel):
@@ -59,11 +71,26 @@ class AgentResult(BaseModel):
 class RunResponse(BaseModel):
     run_id: str
     results: list[AgentResult]
+    consensus: "ConsensusResult"
 
 
 class RetryResponse(BaseModel):
     run_id: str
     result: AgentResult
+
+
+class ConsensusResult(BaseModel):
+    provider: str
+    model: str
+    text: str
+    status: Literal["OK", "ERROR"]
+    latency_ms: int
+    error_message: str | None = None
+
+
+class ConsensusResponse(BaseModel):
+    run_id: str
+    consensus: ConsensusResult
 
 
 app = FastAPI(title="MAGI v0 Backend")
@@ -129,6 +156,33 @@ def _public_error_message(exc: Exception) -> str:
     return "provider request failed"
 
 
+def _serialize_result_for_consensus(result: AgentResult) -> str:
+    return (
+        f"agent={result.agent}\n"
+        f"provider={result.provider}\n"
+        f"model={result.model}\n"
+        f"status={result.status}\n"
+        f"text={result.text.strip() if result.text else ''}"
+    )
+
+
+def _build_consensus_prompt(prompt: str, results: list[AgentResult]) -> str:
+    joined = "\n\n---\n\n".join(_serialize_result_for_consensus(item) for item in results)
+    return (
+        "You are MAGI Consensus.\n"
+        "Given the user question and multiple model outputs, produce a concise final answer.\n"
+        "You must weigh agreement and disagreement between models.\n"
+        "Output format:\n"
+        "- Conclusion: <one paragraph>\n"
+        "- Evidence:\n"
+        "  1) ...\n"
+        "  2) ...\n"
+        "- Confidence: <low|medium|high>\n\n"
+        f"User question:\n{prompt}\n\n"
+        f"Model outputs:\n{joined}\n"
+    )
+
+
 def _validate_prompt(raw_prompt: str) -> str:
     prompt = raw_prompt.strip()
     if not prompt:
@@ -188,6 +242,69 @@ async def _run_single_agent(agent_config: AgentConfig, prompt: str, timeout_seco
         )
 
 
+async def _run_consensus(
+    consensus_config: ConsensusConfig,
+    prompt: str,
+    results: list[AgentResult],
+    timeout_seconds: int,
+) -> ConsensusResult:
+    ok_results = [item for item in results if item.status == "OK" and item.text.strip()]
+    if len(ok_results) < consensus_config.min_ok_results:
+        return ConsensusResult(
+            provider=consensus_config.provider,
+            model=consensus_config.model,
+            text="",
+            status="ERROR",
+            latency_ms=0,
+            error_message=f"consensus needs at least {consensus_config.min_ok_results} successful results",
+        )
+
+    full_model = f"{consensus_config.provider}/{consensus_config.model}"
+    start = perf_counter()
+    print(f"[magi] consensus start model={full_model}")
+
+    try:
+        response = await asyncio.wait_for(
+            acompletion(
+                model=full_model,
+                messages=[{"role": "user", "content": _build_consensus_prompt(prompt, ok_results)}],
+            ),
+            timeout=timeout_seconds,
+        )
+        text = _extract_text(response)
+        latency_ms = int((perf_counter() - start) * 1000)
+        print(f"[magi] consensus success latency_ms={latency_ms}")
+        return ConsensusResult(
+            provider=consensus_config.provider,
+            model=consensus_config.model,
+            text=text,
+            status="OK",
+            latency_ms=latency_ms,
+        )
+    except asyncio.TimeoutError:
+        latency_ms = int((perf_counter() - start) * 1000)
+        print(f"[magi] consensus error=timeout latency_ms={latency_ms}")
+        return ConsensusResult(
+            provider=consensus_config.provider,
+            model=consensus_config.model,
+            text="",
+            status="ERROR",
+            latency_ms=latency_ms,
+            error_message="timeout",
+        )
+    except Exception as exc:  # noqa: BLE001
+        latency_ms = int((perf_counter() - start) * 1000)
+        print(f"[magi] consensus error={type(exc).__name__}: {exc} latency_ms={latency_ms}")
+        return ConsensusResult(
+            provider=consensus_config.provider,
+            model=consensus_config.model,
+            text="",
+            status="ERROR",
+            latency_ms=latency_ms,
+            error_message=_public_error_message(exc),
+        )
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -204,8 +321,9 @@ async def run_magi(payload: RunRequest) -> RunResponse:
 
     tasks = [_run_single_agent(agent, prompt, config.timeout_seconds) for agent in config.agents]
     results = await asyncio.gather(*tasks)
+    consensus = await _run_consensus(config.consensus, prompt, results, config.timeout_seconds)
 
-    return RunResponse(run_id=str(uuid.uuid4()), results=results)
+    return RunResponse(run_id=str(uuid.uuid4()), results=results, consensus=consensus)
 
 
 @app.post("/api/magi/retry", response_model=RetryResponse)
@@ -223,3 +341,16 @@ async def retry_agent(payload: RetryRequest) -> RetryResponse:
 
     result = await _run_single_agent(target_agent, prompt, config.timeout_seconds)
     return RetryResponse(run_id=str(uuid.uuid4()), result=result)
+
+
+@app.post("/api/magi/consensus", response_model=ConsensusResponse)
+async def recalc_consensus(payload: ConsensusRequest) -> ConsensusResponse:
+    prompt = _validate_prompt(payload.prompt)
+
+    try:
+        config = load_config()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"invalid config: {exc}") from exc
+
+    consensus = await _run_consensus(config.consensus, prompt, payload.results, config.timeout_seconds)
+    return ConsensusResponse(run_id=str(uuid.uuid4()), consensus=consensus)

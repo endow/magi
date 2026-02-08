@@ -12,7 +12,14 @@ test("submit with Enter and restore from history", async ({ page }) => {
             { agent: "A", provider: "openai", model: "gpt-4.1-mini", text: "A-first", status: "OK", latency_ms: 100 },
             { agent: "B", provider: "anthropic", model: "claude-sonnet-4-20250514", text: "B-first", status: "OK", latency_ms: 110 },
             { agent: "C", provider: "gemini", model: "gemini-2.5-flash", text: "C-first", status: "OK", latency_ms: 120 }
-          ]
+          ],
+          consensus: {
+            provider: "openai",
+            model: "gpt-4.1-mini",
+            text: "consensus-first",
+            status: "OK",
+            latency_ms: 90
+          }
         }
       : {
           run_id: "run-2",
@@ -20,7 +27,14 @@ test("submit with Enter and restore from history", async ({ page }) => {
             { agent: "A", provider: "openai", model: "gpt-4.1-mini", text: "A-second", status: "OK", latency_ms: 130 },
             { agent: "B", provider: "anthropic", model: "claude-sonnet-4-20250514", text: "B-second", status: "OK", latency_ms: 140 },
             { agent: "C", provider: "gemini", model: "gemini-2.5-flash", text: "C-second", status: "OK", latency_ms: 150 }
-          ]
+          ],
+          consensus: {
+            provider: "openai",
+            model: "gpt-4.1-mini",
+            text: "consensus-second",
+            status: "OK",
+            latency_ms: 95
+          }
         };
 
     await route.fulfill({

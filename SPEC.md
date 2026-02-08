@@ -1,4 +1,4 @@
-# MAGI v0.1 実装仕様（完成版プロンプト）
+# MAGI v0.2 実装仕様（完成版プロンプト）
 
 あなたはソフトウェア開発エージェントです。  
 最小のMVP「MAGI v0」を実装してください。
@@ -40,7 +40,7 @@
     {
       "agent": "A",
       "provider": "openai",
-      "model": "gpt-4o-mini",
+      "model": "gpt-4.1-mini",
       "text": "...",
       "status": "OK",
       "latency_ms": 1234
@@ -48,7 +48,7 @@
     {
       "agent": "B",
       "provider": "anthropic",
-      "model": "claude-haiku-4-5-20251001",
+      "model": "claude-sonnet-4-20250514",
       "text": "...",
       "status": "ERROR",
       "latency_ms": 20012,
@@ -62,7 +62,14 @@
       "status": "OK",
       "latency_ms": 980
     }
-  ]
+  ],
+  "consensus": {
+    "provider": "openai",
+    "model": "gpt-4.1-mini",
+    "text": "...",
+    "status": "OK",
+    "latency_ms": 1200
+  }
 }
 ```
 
@@ -75,6 +82,8 @@
 - 失敗したモデルがあっても全体は落とさない。
 - タイムアウトは **各モデルごとに20秒** を適用（`asyncio.wait_for`）。
 - `run_id` はUUIDで毎回発行し、レスポンスに含める（DB保存はしない）。
+- 3モデルの結果を入力にして、**合議（consensus）** を1回実行する。
+- 合議が失敗しても全体レスポンスは返し、`consensus.status="ERROR"` を返す。
 
 ---
 
@@ -94,7 +103,7 @@ messages = [{"role": "user", "content": prompt}]
 - LiteLLM に渡す model は `"provider/model"` 形式：
 
 - `openai/gpt-4o-mini`
-- `anthropic/claude-haiku-4-5-20251001`
+- `anthropic/claude-sonnet-4-20250514`
 - `gemini/gemini-2.5-flash`
 
 ---
@@ -106,10 +115,15 @@ messages = [{"role": "user", "content": prompt}]
 ```json
 {
   "agents": [
-    { "agent": "A", "provider": "openai", "model": "gpt-4o-mini" },
-    { "agent": "B", "provider": "anthropic", "model": "claude-haiku-4-5-20251001" },
+    { "agent": "A", "provider": "openai", "model": "gpt-4.1-mini" },
+    { "agent": "B", "provider": "anthropic", "model": "claude-sonnet-4-20250514" },
     { "agent": "C", "provider": "gemini", "model": "gemini-2.5-flash" }
   ],
+  "consensus": {
+    "provider": "openai",
+    "model": "gpt-4.1-mini",
+    "min_ok_results": 2
+  },
   "timeout_seconds": 20
 }
 ```
@@ -157,6 +171,18 @@ GOOGLE_API_KEY=
 ### ログ
 
 - 各エージェントの開始・成功・エラーを標準出力へ。
+- 合議（consensus）の開始・成功・エラーを標準出力へ。
+
+---
+
+### 合議再計算API（v0.2）
+
+- `POST /api/magi/consensus`
+- リクエスト:
+  - `prompt`
+  - `results`（A/B/Cの結果配列）
+- 用途:
+  - フロント側の単体Retry後に、最新結果で合議を再計算するため
 
 ---
 
@@ -173,6 +199,7 @@ GOOGLE_API_KEY=
 - text
 - latency_ms
 - error_message
+- consensus（合議結果）
 
 ### UI
 

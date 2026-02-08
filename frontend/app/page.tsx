@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, KeyboardEvent, useMemo, useState } from "react";
+import { FormEvent, KeyboardEvent, useEffect, useMemo, useState } from "react";
 
 type AgentId = "A" | "B" | "C";
 type AgentStatus = "OK" | "ERROR" | "LOADING";
@@ -17,17 +17,20 @@ type AgentResult = {
 
 type RunResponse = {
   run_id: string;
+  profile: string;
   results: AgentResult[];
   consensus: ConsensusResult;
 };
 
 type RetryResponse = {
   run_id: string;
+  profile: string;
   result: AgentResult;
 };
 
 type RunHistoryItem = {
   run_id: string;
+  profile: string;
   prompt: string;
   results: AgentResult[];
   consensus: ConsensusResult | null;
@@ -45,7 +48,13 @@ type ConsensusResult = {
 
 type ConsensusResponse = {
   run_id: string;
+  profile: string;
   consensus: ConsensusResult;
+};
+
+type ProfilesResponse = {
+  default_profile: string;
+  profiles: string[];
 };
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
@@ -66,6 +75,8 @@ function statusClass(status: AgentStatus): string {
 export default function HomePage() {
   const [prompt, setPrompt] = useState("");
   const [lastRunPrompt, setLastRunPrompt] = useState("");
+  const [selectedProfile, setSelectedProfile] = useState("default");
+  const [availableProfiles, setAvailableProfiles] = useState<string[]>(["default"]);
   const [results, setResults] = useState<AgentResult[]>([]);
   const [consensus, setConsensus] = useState<ConsensusResult | null>(null);
   const [history, setHistory] = useState<RunHistoryItem[]>([]);
@@ -81,6 +92,23 @@ export default function HomePage() {
     return order.map((agent) => byAgent.get(agent)).filter((item): item is AgentResult => Boolean(item));
   }, [isLoading, results]);
 
+  useEffect(() => {
+    async function loadProfiles() {
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/magi/profiles`);
+        if (!response.ok) return;
+        const data = (await response.json()) as ProfilesResponse;
+        if (!data.profiles.length) return;
+        setAvailableProfiles(data.profiles);
+        setSelectedProfile(data.default_profile);
+      } catch {
+        // ignore and fallback to default
+      }
+    }
+
+    void loadProfiles();
+  }, []);
+
   function validatePrompt(input: string): string | null {
     const trimmed = input.trim();
     if (!trimmed) return "prompt must not be empty";
@@ -95,7 +123,7 @@ export default function HomePage() {
         headers: {
           "Content-Type": "application/json"
         },
-        body: JSON.stringify({ prompt: trimmedPrompt })
+        body: JSON.stringify({ prompt: trimmedPrompt, profile: selectedProfile })
       });
 
       const data = (await response.json()) as RunResponse | { detail?: string };
@@ -119,7 +147,7 @@ export default function HomePage() {
         headers: {
           "Content-Type": "application/json"
         },
-        body: JSON.stringify({ prompt: trimmedPrompt, agent })
+        body: JSON.stringify({ prompt: trimmedPrompt, agent, profile: selectedProfile })
       });
 
       const data = (await response.json()) as RetryResponse | { detail?: string };
@@ -143,7 +171,7 @@ export default function HomePage() {
         headers: {
           "Content-Type": "application/json"
         },
-        body: JSON.stringify({ prompt: trimmedPrompt, results: latestResults })
+        body: JSON.stringify({ prompt: trimmedPrompt, results: latestResults, profile: selectedProfile })
       });
 
       const data = (await response.json()) as ConsensusResponse | { detail?: string };
@@ -186,11 +214,13 @@ export default function HomePage() {
       const success = await requestRun(trimmed);
       if (!success) return;
       setRunId(success.run_id);
+      setSelectedProfile(success.profile);
       setResults(success.results);
       setConsensus(success.consensus);
       setHistory((current) => [
         {
           run_id: success.run_id,
+          profile: success.profile,
           prompt: trimmed,
           results: success.results,
           consensus: success.consensus,
@@ -231,6 +261,7 @@ export default function HomePage() {
       if (!retried) return;
 
       setRunId(retried.run_id);
+      setSelectedProfile(retried.profile);
       setConsensus({
         provider: consensus?.provider ?? "-",
         model: consensus?.model ?? "-",
@@ -249,12 +280,14 @@ export default function HomePage() {
       setResults(updatedResults);
       const recalculated = await requestConsensus(lastRunPrompt, updatedResults);
       if (recalculated) {
+        setSelectedProfile(recalculated.profile);
         setConsensus(recalculated.consensus);
       }
       const historyConsensus = recalculated?.consensus ?? consensus ?? null;
       setHistory((current) => [
         {
           run_id: recalculated?.run_id ?? retried.run_id,
+          profile: recalculated?.profile ?? retried.profile,
           prompt: lastRunPrompt,
           results: updatedResults,
           consensus: historyConsensus,
@@ -279,6 +312,7 @@ export default function HomePage() {
     setPrompt(item.prompt);
     setLastRunPrompt(item.prompt);
     setRunId(item.run_id);
+    setSelectedProfile(item.profile);
     setResults(item.results);
     setConsensus(item.consensus);
   }
@@ -308,6 +342,21 @@ export default function HomePage() {
             <span className="text-xs text-terminal-dim">
               {prompt.length}/{MAX_PROMPT_LENGTH} chars
             </span>
+            <label className="text-xs text-terminal-dim">
+              profile:
+              <select
+                className="ml-2 rounded border border-terminal-border bg-[#02060b] px-2 py-1 text-xs"
+                value={selectedProfile}
+                onChange={(event) => setSelectedProfile(event.target.value)}
+                disabled={isLoading}
+              >
+                {availableProfiles.map((profile) => (
+                  <option key={profile} value={profile}>
+                    {profile}
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
           <p className="text-xs text-terminal-dim">Enter: submit / Shift+Enter: newline</p>
         </form>
@@ -316,6 +365,7 @@ export default function HomePage() {
 
         <div className="mt-4 flex items-center gap-2 text-xs text-terminal-dim">
           <span>run_id: {runId || "-"}</span>
+          <span>profile: {selectedProfile}</span>
           <button
             type="button"
             onClick={copyRunId}
@@ -342,6 +392,7 @@ export default function HomePage() {
                     className="w-full rounded border border-terminal-border px-2 py-2 text-left text-xs text-terminal-dim hover:border-terminal-accent hover:text-terminal-text"
                   >
                     <p>run_id: {item.run_id}</p>
+                    <p>profile: {item.profile}</p>
                     <p>time: {new Date(item.created_at).toLocaleTimeString()}</p>
                     <p>status: {statusSummary}</p>
                     <p>consensus: {item.consensus?.status ?? "-"}</p>

@@ -21,7 +21,7 @@
 
 ---
 
-## 要件（v0）
+## 要件（v0.3）
 
 ### 1) バックエンド
 
@@ -29,13 +29,14 @@
 
 #### リクエスト
 ```json
-{ "prompt": "string" }
+{ "prompt": "string", "profile": "cost|creative|logical" }
 ```
 
 #### レスポンス（成功時）
 ```json
 {
   "run_id": "uuid-string",
+  "profile": "logical",
   "results": [
     {
       "agent": "A",
@@ -114,19 +115,16 @@ messages = [{"role": "user", "content": prompt}]
 
 ```json
 {
-  "agents": [
-    { "agent": "A", "provider": "openai", "model": "gpt-4.1-mini" },
-    { "agent": "B", "provider": "anthropic", "model": "claude-sonnet-4-20250514" },
-    { "agent": "C", "provider": "gemini", "model": "gemini-2.5-flash" }
-  ],
-  "consensus": {
-    "strategy": "peer_vote",
-    "min_ok_results": 2,
-    "rounds": 1
-  },
-  "timeout_seconds": 20
+  "default_profile": "cost",
+  "profiles": {
+    "cost": { "...": "..." },
+    "creative": { "...": "..." },
+    "logical": { "...": "..." }
+  }
 }
 ```
+
+- `GET /api/magi/profiles` で利用可能profile一覧を返す。
 
 ---
 

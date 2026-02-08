@@ -3,11 +3,23 @@ import { expect, test } from "@playwright/test";
 test("submit with Enter and restore from history", async ({ page }) => {
   let runCount = 0;
 
+  await page.route("**/api/magi/profiles", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        default_profile: "cost",
+        profiles: ["cost", "creative", "logical"]
+      })
+    });
+  });
+
   await page.route("**/api/magi/run", async (route) => {
     runCount += 1;
     const payload = runCount === 1
       ? {
           run_id: "run-1",
+          profile: "cost",
           results: [
             { agent: "A", provider: "openai", model: "gpt-4.1-mini", text: "A-first", status: "OK", latency_ms: 100 },
             { agent: "B", provider: "anthropic", model: "claude-sonnet-4-20250514", text: "B-first", status: "OK", latency_ms: 110 },
@@ -23,6 +35,7 @@ test("submit with Enter and restore from history", async ({ page }) => {
         }
       : {
           run_id: "run-2",
+          profile: "cost",
           results: [
             { agent: "A", provider: "openai", model: "gpt-4.1-mini", text: "A-second", status: "OK", latency_ms: 130 },
             { agent: "B", provider: "anthropic", model: "claude-sonnet-4-20250514", text: "B-second", status: "OK", latency_ms: 140 },

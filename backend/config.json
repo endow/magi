@@ -1,13 +1,44 @@
 {
-  "agents": [
-    { "agent": "A", "provider": "openai", "model": "gpt-4.1-mini" },
-    { "agent": "B", "provider": "anthropic", "model": "claude-sonnet-4-20250514" },
-    { "agent": "C", "provider": "gemini", "model": "gemini-2.5-flash" }
-  ],
-  "consensus": {
-    "strategy": "peer_vote",
-    "min_ok_results": 2,
-    "rounds": 1
-  },
-  "timeout_seconds": 20
+  "default_profile": "cost",
+  "profiles": {
+    "cost": {
+      "agents": [
+        { "agent": "A", "provider": "openai", "model": "gpt-4o-mini" },
+        { "agent": "B", "provider": "anthropic", "model": "claude-haiku-4-5-20251001" },
+        { "agent": "C", "provider": "gemini", "model": "gemini-2.5-flash" }
+      ],
+      "consensus": {
+        "strategy": "peer_vote",
+        "min_ok_results": 2,
+        "rounds": 1
+      },
+      "timeout_seconds": 20
+    },
+    "creative": {
+      "agents": [
+        { "agent": "A", "provider": "openai", "model": "gpt-4.1" },
+        { "agent": "B", "provider": "anthropic", "model": "claude-sonnet-4-20250514" },
+        { "agent": "C", "provider": "gemini", "model": "gemini-2.5-flash" }
+      ],
+      "consensus": {
+        "strategy": "peer_vote",
+        "min_ok_results": 2,
+        "rounds": 1
+      },
+      "timeout_seconds": 25
+    },
+    "logical": {
+      "agents": [
+        { "agent": "A", "provider": "openai", "model": "gpt-4.1-mini" },
+        { "agent": "B", "provider": "anthropic", "model": "claude-sonnet-4-20250514" },
+        { "agent": "C", "provider": "gemini", "model": "gemini-2.5-flash" }
+      ],
+      "consensus": {
+        "strategy": "peer_vote",
+        "min_ok_results": 2,
+        "rounds": 2
+      },
+      "timeout_seconds": 30
+    }
+  }
 }

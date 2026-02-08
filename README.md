@@ -101,33 +101,29 @@ Note: backend maps `GOOGLE_API_KEY` to `GEMINI_API_KEY` for LiteLLM compatibilit
 
 ## Model Configuration
 
-Edit `backend/config.json` to swap models without code changes.
+Edit `backend/config.json` to define profiles and swap models without code changes.
 
 ```json
 {
-  "agents": [
-    { "agent": "A", "provider": "openai", "model": "gpt-4.1-mini" },
-    { "agent": "B", "provider": "anthropic", "model": "claude-sonnet-4-20250514" },
-    { "agent": "C", "provider": "gemini", "model": "gemini-2.5-flash" }
-  ],
-  "consensus": {
-    "strategy": "peer_vote",
-    "min_ok_results": 2,
-    "rounds": 1
-  },
-  "timeout_seconds": 20
+  "default_profile": "cost",
+  "profiles": {
+    "cost": { "...": "..." },
+    "creative": { "...": "..." },
+    "logical": { "...": "..." }
+  }
 }
 ```
 
 ## API Notes
 
 - Endpoint: `POST /api/magi/run`
-- Request body: `{ "prompt": "..." }`
+- Request body: `{ "prompt": "...", "profile": "cost|creative|logical" }`
 - Run response includes `consensus` (synthesized final answer from peer-vote deliberation)
 - Retry endpoint: `POST /api/magi/retry`
-- Retry body: `{ "prompt": "...", "agent": "A|B|C" }`
+- Retry body: `{ "prompt": "...", "agent": "A|B|C", "profile": "..." }`
 - Consensus endpoint: `POST /api/magi/consensus`
-- Consensus body: `{ "prompt": "...", "results": AgentResult[] }`
+- Consensus body: `{ "prompt": "...", "results": AgentResult[], "profile": "..." }`
+- Profiles endpoint: `GET /api/magi/profiles`
 - Empty prompt or over 4000 chars returns `400`
 - Per-model timeout: 20 seconds
 - Partial failure is allowed (`status: ERROR`)
@@ -149,6 +145,9 @@ Edit `backend/config.json` to swap models without code changes.
   - shown before the 3 result cards
   - shows synthesized conclusion from multi-agent deliberation
   - supports `OK/ERROR` status and latency display
+- Profile selector:
+  - choose `cost`, `creative`, `logical`
+  - selected profile is sent on run/retry/consensus
 - Session history panel (memory only, not persisted)
 - `run_id` display and copy button
 

@@ -41,19 +41,29 @@ class ConsensusConfig(BaseModel):
     rounds: int = 1
 
 
-class AppConfig(BaseModel):
+class ProfileConfig(BaseModel):
     agents: list[AgentConfig]
     consensus: ConsensusConfig
     timeout_seconds: int = 20
 
 
+class AppConfig(BaseModel):
+    default_profile: str | None = None
+    profiles: dict[str, ProfileConfig] | None = None
+    agents: list[AgentConfig] | None = None
+    consensus: ConsensusConfig | None = None
+    timeout_seconds: int | None = None
+
+
 class RunRequest(BaseModel):
     prompt: str
+    profile: str | None = None
 
 
 class RetryRequest(BaseModel):
     prompt: str
     agent: Literal["A", "B", "C"]
+    profile: str | None = None
 
 
 class AgentResult(BaseModel):
@@ -69,6 +79,7 @@ class AgentResult(BaseModel):
 class ConsensusRequest(BaseModel):
     prompt: str
     results: list[AgentResult]
+    profile: str | None = None
 
 
 class ConsensusResult(BaseModel):
@@ -96,18 +107,26 @@ class DeliberationTurn(BaseModel):
 
 class RunResponse(BaseModel):
     run_id: str
+    profile: str
     results: list[AgentResult]
     consensus: ConsensusResult
 
 
 class RetryResponse(BaseModel):
     run_id: str
+    profile: str
     result: AgentResult
 
 
 class ConsensusResponse(BaseModel):
     run_id: str
+    profile: str
     consensus: ConsensusResult
+
+
+class ProfilesResponse(BaseModel):
+    default_profile: str
+    profiles: list[str]
 
 
 app = FastAPI(title="MAGI v0 Backend")
@@ -125,10 +144,36 @@ def load_config() -> AppConfig:
     config_path = Path(__file__).resolve().parents[1] / "config.json"
     with config_path.open("r", encoding="utf-8") as fp:
         data = json.load(fp)
-    config = AppConfig.model_validate(data)
-    if len(config.agents) != 3:
-        raise ValueError("config.json must define exactly 3 agents")
-    return config
+    return AppConfig.model_validate(data)
+
+
+def _validate_profile(profile: ProfileConfig) -> None:
+    if len(profile.agents) != 3:
+        raise ValueError("each profile must define exactly 3 agents")
+
+
+def _resolve_profile(config: AppConfig, requested_profile: str | None) -> tuple[str, ProfileConfig]:
+    if config.profiles:
+        if not config.default_profile:
+            raise ValueError("default_profile is required when profiles are configured")
+
+        profile_key = requested_profile or config.default_profile
+        profile = config.profiles.get(profile_key)
+        if profile is None:
+            raise HTTPException(status_code=400, detail=f"unknown profile: {profile_key}")
+        _validate_profile(profile)
+        return profile_key, profile
+
+    # Backward compatibility for legacy single-profile config.json
+    if not config.agents or not config.consensus:
+        raise ValueError("config.json must define either profiles or legacy agents/consensus")
+    profile = ProfileConfig(
+        agents=config.agents,
+        consensus=config.consensus,
+        timeout_seconds=config.timeout_seconds or 20,
+    )
+    _validate_profile(profile)
+    return "default", profile
 
 
 def _extract_text(response: Any) -> str:
@@ -537,16 +582,16 @@ async def _run_peer_vote_consensus(
     )
 
 
-async def _run_consensus(config: AppConfig, prompt: str, results: list[AgentResult]) -> ConsensusResult:
-    if config.consensus.strategy == "single_model":
-        return await _run_single_model_consensus(config.consensus, prompt, results, config.timeout_seconds)
+async def _run_consensus(profile: ProfileConfig, prompt: str, results: list[AgentResult]) -> ConsensusResult:
+    if profile.consensus.strategy == "single_model":
+        return await _run_single_model_consensus(profile.consensus, prompt, results, profile.timeout_seconds)
 
     return await _run_peer_vote_consensus(
-        config.consensus,
+        profile.consensus,
         prompt,
         results,
-        config.agents,
-        config.timeout_seconds,
+        profile.agents,
+        profile.timeout_seconds,
     )
 
 
@@ -555,20 +600,42 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/api/magi/profiles", response_model=ProfilesResponse)
+async def list_profiles() -> ProfilesResponse:
+    try:
+        config = load_config()
+        profile_key, _ = _resolve_profile(config, None)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"invalid config: {exc}") from exc
+
+    if config.profiles:
+        return ProfilesResponse(
+            default_profile=config.default_profile or profile_key,
+            profiles=sorted(config.profiles.keys()),
+        )
+
+    return ProfilesResponse(default_profile=profile_key, profiles=[profile_key])
+
+
 @app.post("/api/magi/run", response_model=RunResponse)
 async def run_magi(payload: RunRequest) -> RunResponse:
     prompt = _validate_prompt(payload.prompt)
 
     try:
         config = load_config()
+        profile_name, profile = _resolve_profile(config, payload.profile)
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"invalid config: {exc}") from exc
 
-    tasks = [_run_single_agent(agent, prompt, config.timeout_seconds) for agent in config.agents]
+    tasks = [_run_single_agent(agent, prompt, profile.timeout_seconds) for agent in profile.agents]
     results = await asyncio.gather(*tasks)
-    consensus = await _run_consensus(config, prompt, results)
+    consensus = await _run_consensus(profile, prompt, results)
 
-    return RunResponse(run_id=str(uuid.uuid4()), results=results, consensus=consensus)
+    return RunResponse(run_id=str(uuid.uuid4()), profile=profile_name, results=results, consensus=consensus)
 
 
 @app.post("/api/magi/retry", response_model=RetryResponse)
@@ -577,15 +644,18 @@ async def retry_agent(payload: RetryRequest) -> RetryResponse:
 
     try:
         config = load_config()
+        profile_name, profile = _resolve_profile(config, payload.profile)
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"invalid config: {exc}") from exc
 
-    target_agent = next((agent for agent in config.agents if agent.agent == payload.agent), None)
+    target_agent = next((agent for agent in profile.agents if agent.agent == payload.agent), None)
     if target_agent is None:
         raise HTTPException(status_code=400, detail=f"agent {payload.agent} is not configured")
 
-    result = await _run_single_agent(target_agent, prompt, config.timeout_seconds)
-    return RetryResponse(run_id=str(uuid.uuid4()), result=result)
+    result = await _run_single_agent(target_agent, prompt, profile.timeout_seconds)
+    return RetryResponse(run_id=str(uuid.uuid4()), profile=profile_name, result=result)
 
 
 @app.post("/api/magi/consensus", response_model=ConsensusResponse)
@@ -594,8 +664,11 @@ async def recalc_consensus(payload: ConsensusRequest) -> ConsensusResponse:
 
     try:
         config = load_config()
+        profile_name, profile = _resolve_profile(config, payload.profile)
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"invalid config: {exc}") from exc
 
-    consensus = await _run_consensus(config, prompt, payload.results)
-    return ConsensusResponse(run_id=str(uuid.uuid4()), consensus=consensus)
+    consensus = await _run_consensus(profile, prompt, payload.results)
+    return ConsensusResponse(run_id=str(uuid.uuid4()), profile=profile_name, consensus=consensus)

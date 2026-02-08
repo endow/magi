@@ -6,6 +6,41 @@ import backend.app.main as main
 client = TestClient(main.app)
 
 
+def _profiled_config() -> main.AppConfig:
+    return main.AppConfig(
+        default_profile="cost",
+        profiles={
+            "cost": main.ProfileConfig(
+                agents=[
+                    main.AgentConfig(agent="A", provider="openai", model="gpt-4o-mini"),
+                    main.AgentConfig(agent="B", provider="anthropic", model="claude-haiku-4-5-20251001"),
+                    main.AgentConfig(agent="C", provider="gemini", model="gemini-2.5-flash"),
+                ],
+                consensus=main.ConsensusConfig(strategy="peer_vote", min_ok_results=2, rounds=1),
+                timeout_seconds=20,
+            ),
+            "logical": main.ProfileConfig(
+                agents=[
+                    main.AgentConfig(agent="A", provider="openai", model="gpt-4.1-mini"),
+                    main.AgentConfig(agent="B", provider="anthropic", model="claude-sonnet-4-20250514"),
+                    main.AgentConfig(agent="C", provider="gemini", model="gemini-2.5-flash"),
+                ],
+                consensus=main.ConsensusConfig(strategy="peer_vote", min_ok_results=2, rounds=2),
+                timeout_seconds=30,
+            ),
+        },
+    )
+
+
+def test_profiles_endpoint_returns_profile_list(monkeypatch) -> None:
+    monkeypatch.setattr(main, "load_config", _profiled_config)
+    response = client.get("/api/magi/profiles")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["default_profile"] == "cost"
+    assert body["profiles"] == ["cost", "logical"]
+
+
 def test_run_rejects_empty_prompt() -> None:
     response = client.post("/api/magi/run", json={"prompt": "   "})
     assert response.status_code == 400
@@ -19,17 +54,7 @@ def test_run_rejects_too_long_prompt() -> None:
 
 
 def test_run_returns_partial_failure_without_failing_request(monkeypatch) -> None:
-    config = main.AppConfig(
-        agents=[
-            main.AgentConfig(agent="A", provider="openai", model="gpt-4o-mini"),
-            main.AgentConfig(agent="B", provider="anthropic", model="claude-haiku-4-5-20251001"),
-            main.AgentConfig(agent="C", provider="gemini", model="gemini-2.5-flash"),
-        ],
-        consensus=main.ConsensusConfig(provider="openai", model="gpt-4o-mini", min_ok_results=2),
-        timeout_seconds=20,
-    )
-
-    monkeypatch.setattr(main, "load_config", lambda: config)
+    monkeypatch.setattr(main, "load_config", _profiled_config)
 
     async def fake_runner(agent_config, prompt, timeout_seconds):
         if agent_config.agent == "B":
@@ -64,11 +89,12 @@ def test_run_returns_partial_failure_without_failing_request(monkeypatch) -> Non
 
     monkeypatch.setattr(main, "_run_consensus", fake_consensus)
 
-    response = client.post("/api/magi/run", json={"prompt": "hello"})
+    response = client.post("/api/magi/run", json={"prompt": "hello", "profile": "logical"})
     assert response.status_code == 200
 
     body = response.json()
     assert isinstance(body.get("run_id"), str) and body["run_id"]
+    assert body["profile"] == "logical"
     assert len(body["results"]) == 3
 
     by_agent = {item["agent"]: item for item in body["results"]}
@@ -92,17 +118,7 @@ def test_retry_rejects_invalid_agent() -> None:
 
 
 def test_retry_runs_only_target_agent(monkeypatch) -> None:
-    config = main.AppConfig(
-        agents=[
-            main.AgentConfig(agent="A", provider="openai", model="gpt-4.1-mini"),
-            main.AgentConfig(agent="B", provider="anthropic", model="claude-sonnet-4-20250514"),
-            main.AgentConfig(agent="C", provider="gemini", model="gemini-2.5-flash"),
-        ],
-        consensus=main.ConsensusConfig(provider="openai", model="gpt-4.1-mini", min_ok_results=2),
-        timeout_seconds=20,
-    )
-
-    monkeypatch.setattr(main, "load_config", lambda: config)
+    monkeypatch.setattr(main, "load_config", _profiled_config)
 
     async def fake_runner(agent_config, prompt, timeout_seconds):
         return main.AgentResult(
@@ -116,28 +132,19 @@ def test_retry_runs_only_target_agent(monkeypatch) -> None:
 
     monkeypatch.setattr(main, "_run_single_agent", fake_runner)
 
-    response = client.post("/api/magi/retry", json={"prompt": "hello", "agent": "B"})
+    response = client.post("/api/magi/retry", json={"prompt": "hello", "agent": "B", "profile": "logical"})
     assert response.status_code == 200
 
     body = response.json()
     assert isinstance(body.get("run_id"), str) and body["run_id"]
+    assert body["profile"] == "logical"
     assert body["result"]["agent"] == "B"
     assert body["result"]["status"] == "OK"
     assert body["result"]["text"] == "retry-B"
 
 
 def test_consensus_endpoint_recalculates(monkeypatch) -> None:
-    config = main.AppConfig(
-        agents=[
-            main.AgentConfig(agent="A", provider="openai", model="gpt-4.1-mini"),
-            main.AgentConfig(agent="B", provider="anthropic", model="claude-sonnet-4-20250514"),
-            main.AgentConfig(agent="C", provider="gemini", model="gemini-2.5-flash"),
-        ],
-        consensus=main.ConsensusConfig(provider="openai", model="gpt-4.1-mini", min_ok_results=2),
-        timeout_seconds=20,
-    )
-
-    monkeypatch.setattr(main, "load_config", lambda: config)
+    monkeypatch.setattr(main, "load_config", _profiled_config)
     async def fake_consensus(config_obj, prompt, results):
         return main.ConsensusResult(
             provider=config_obj.consensus.provider or "magi",
@@ -182,8 +189,11 @@ def test_consensus_endpoint_recalculates(monkeypatch) -> None:
         ],
     }
 
+    payload["profile"] = "logical"
+
     response = client.post("/api/magi/consensus", json=payload)
     assert response.status_code == 200
     body = response.json()
+    assert body["profile"] == "logical"
     assert body["consensus"]["status"] == "OK"
     assert body["consensus"]["text"] == "recalc-consensus"

@@ -93,6 +93,21 @@ Edit `backend/config.json` to swap models without code changes.
 - Partial failure is allowed (`status: ERROR`)
 - Backend returns `run_id` as UUID
 
+## Current UI Features
+
+- Enter to submit (`Shift+Enter` for newline)
+- Prompt character counter (`0/4000`)
+- 3-column result cards with:
+  - status
+  - model id
+  - latency
+  - response text
+- Per-card actions:
+  - `Copy` response text
+  - `Retry` failed card
+- Session history panel (memory only, not persisted)
+- `run_id` display and copy button
+
 ## Troubleshooting (Local)
 
 - `localhost:3000 refused to connect`: start frontend (`.\start-frontend.ps1`).

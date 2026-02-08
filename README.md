@@ -1,4 +1,4 @@
-# MAGI v0
+# MAGI v0 (Local Use)
 
 One prompt goes to three LLMs in parallel and the outputs are displayed side-by-side.
 
@@ -6,15 +6,17 @@ One prompt goes to three LLMs in parallel and the outputs are displayed side-by-
 
 - `backend/`: FastAPI + LiteLLM
 - `frontend/`: Next.js (App Router) + Tailwind CSS
-- `SPEC.md`: implementation spec used for this project
+- `SPEC.md`: implementation spec
 
 ## Prerequisites
 
-- Python 3.11+
+- Python 3.10+
 - Node.js 20+
 - npm 10+
 
-## Backend Setup
+## One-Time Setup
+
+### Backend
 
 ```bash
 cd backend
@@ -23,28 +25,35 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 copy .env.example .env
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Backend URL: `http://localhost:8000`
-
-### Backend Notes
-
-- Endpoint: `POST /api/magi/run`
-- Request body: `{ "prompt": "..." }`
-- Empty prompt or over 4000 chars returns `400`
-- CORS allows `http://localhost:3000`
-
-## Frontend Setup
+### Frontend
 
 ```bash
 cd frontend
 npm install
 copy .env.example .env.local
-npm run dev
 ```
 
-Frontend URL: `http://localhost:3000`
+## Local Run
+
+From repository root:
+
+```bash
+.\start-backend.ps1
+```
+
+Open another terminal:
+
+```bash
+.\start-frontend.ps1
+```
+
+URLs:
+
+- Frontend: `http://localhost:3000`
+- Backend: `http://localhost:8000`
+- Health: `http://localhost:8000/health`
 
 ## Environment Variables
 
@@ -57,6 +66,8 @@ Frontend URL: `http://localhost:3000`
 `frontend/.env.local`
 
 - `NEXT_PUBLIC_API_BASE_URL=http://localhost:8000`
+
+Note: backend maps `GOOGLE_API_KEY` to `GEMINI_API_KEY` for LiteLLM compatibility.
 
 ## Model Configuration
 
@@ -73,11 +84,17 @@ Edit `backend/config.json` to swap models without code changes.
 }
 ```
 
-Note: backend maps `GOOGLE_API_KEY` to `GEMINI_API_KEY` internally for LiteLLM compatibility.
+## API Notes
 
-## Behavior Summary
+- Endpoint: `POST /api/magi/run`
+- Request body: `{ "prompt": "..." }`
+- Empty prompt or over 4000 chars returns `400`
+- Per-model timeout: 20 seconds
+- Partial failure is allowed (`status: ERROR`)
+- Backend returns `run_id` as UUID
 
-- Three agents run concurrently with `asyncio.gather`
-- Each agent call has per-call timeout via `asyncio.wait_for`
-- Partial failure is allowed (`status: ERROR` with `error_message`)
-- Backend returns a UUID `run_id`
+## Troubleshooting (Local)
+
+- `localhost:3000 refused to connect`: start frontend (`.\start-frontend.ps1`).
+- `status=ERROR` for one model: verify API key and model name in `backend/config.json`.
+- Anthropic/Gemini errors while others work: usually provider-side quota/credits.

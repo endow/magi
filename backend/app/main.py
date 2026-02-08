@@ -98,6 +98,19 @@ def _extract_text(response: Any) -> str:
     return "" if content is None else str(content)
 
 
+def _public_error_message(exc: Exception) -> str:
+    message = str(exc).lower()
+    if "credit balance is too low" in message:
+        return "provider account has insufficient credits"
+    if "api key" in message or "authentication" in message:
+        return "provider authentication failed (check API key)"
+    if "not found" in message and "model" in message:
+        return "model not found (check config.json model name)"
+    if "rate limit" in message or "too many requests" in message:
+        return "provider rate limit reached"
+    return "provider request failed"
+
+
 async def _run_single_agent(agent_config: AgentConfig, prompt: str, timeout_seconds: int) -> AgentResult:
     full_model = f"{agent_config.provider}/{agent_config.model}"
     start = perf_counter()
@@ -144,7 +157,7 @@ async def _run_single_agent(agent_config: AgentConfig, prompt: str, timeout_seco
             text="",
             status="ERROR",
             latency_ms=latency_ms,
-            error_message=str(exc),
+            error_message=_public_error_message(exc),
         )
 
 

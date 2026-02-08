@@ -243,6 +243,13 @@ GOOGLE_API_KEY=
   - `GET /api/magi/history?limit=20&offset=0`
   - `GET /api/magi/history/{run_id}`
 
+## v0.6 追加（strict debate consensus）
+
+- `performance` profile のみ、合議を strict debate モードで実行する。
+- 各エージェントは投票時に `criticisms`（他案の具体的弱点）を最低2件返す。
+- `criticisms` 不足のターンは `ERROR` 扱いにして無効票とする。
+- 勝者選定は「票数 + 信頼度 + 批判品質スコア」で重み付けする。
+
 ---
 
 ## Definition of Done

@@ -154,6 +154,7 @@ Edit `backend/config.json` to define profiles and swap models without code chang
 - Profile selector:
   - choose `cost`, `balance`, `performance`
   - selected profile is sent on run/retry/consensus
+  - `performance` enables strict debate consensus (requires concrete cross-agent criticisms)
 - Run history panel (persisted in backend SQLite)
 - `run_id` display and copy button
 

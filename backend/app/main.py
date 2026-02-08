@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from litellm import acompletion
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 warnings.filterwarnings(
     "ignore",
@@ -42,6 +42,8 @@ class ConsensusConfig(BaseModel):
     model: str | None = None
     min_ok_results: int = 2
     rounds: int = 1
+    debate_mode: Literal["normal", "strict"] = "normal"
+    min_criticisms: int = 0
 
 
 class ProfileConfig(BaseModel):
@@ -105,6 +107,7 @@ class DeliberationTurn(BaseModel):
     preferred_agent: Literal["A", "B", "C"] | None = None
     reason: str | None = None
     confidence: int | None = None
+    criticisms: list[str] = Field(default_factory=list)
     error_message: str | None = None
 
 
@@ -479,28 +482,44 @@ def _build_peer_vote_prompt(
     peer_answers: dict[str, str],
     agent_id: str,
     round_index: int,
+    consensus_config: ConsensusConfig,
 ) -> str:
     base_section = "\n\n".join(_serialize_result_for_consensus(item) for item in base_results)
     peer_section = "\n".join(
         f"{key}: {value.strip() if value.strip() else '[NO ANSWER]'}" for key, value in sorted(peer_answers.items())
     )
 
+    strict_rules = ""
+    if consensus_config.debate_mode == "strict":
+        min_criticisms = max(1, consensus_config.min_criticisms)
+        strict_rules = (
+            f"- criticisms must include at least {min_criticisms} concrete weaknesses from other agents.\n"
+            "- each criticism should reference a specific weakness (logic gap, missing assumption, or evidence issue).\n"
+            "- empty criticisms are invalid.\n"
+        )
+
     return (
         f"You are Agent {agent_id} in MAGI deliberation round {round_index}.\n"
         "Task: read all answers, improve your own answer, and vote the best current answer.\n"
         "Return ONLY JSON with this schema:\n"
-        '{"revised_answer":"...","preferred_agent":"A|B|C","reason":"...","confidence":0}\n'
+        '{"revised_answer":"...","preferred_agent":"A|B|C","reason":"...","confidence":0,"criticisms":["..."]}\n'
         "Rules:\n"
         "- revised_answer must be one concise final answer to the user question.\n"
         "- preferred_agent is the agent you think currently has the strongest final answer.\n"
         "- confidence is 0-100 integer.\n\n"
+        f"{strict_rules}"
         f"User question:\n{prompt}\n\n"
         f"Initial model outputs:\n{base_section}\n\n"
         f"Current peer answers:\n{peer_section}\n"
     )
 
 
-def _parse_deliberation_turn(text: str, agent_config: AgentConfig, latency_ms: int) -> DeliberationTurn:
+def _parse_deliberation_turn(
+    text: str,
+    agent_config: AgentConfig,
+    latency_ms: int,
+    consensus_config: ConsensusConfig,
+) -> DeliberationTurn:
     stripped = text.strip()
     parsed: dict[str, Any] = {}
 
@@ -517,6 +536,7 @@ def _parse_deliberation_turn(text: str, agent_config: AgentConfig, latency_ms: i
     preferred_agent = parsed.get("preferred_agent") if parsed else None
     reason = str(parsed.get("reason", "")).strip() if parsed else ""
     confidence_raw = parsed.get("confidence") if parsed else None
+    criticisms_raw = parsed.get("criticisms") if parsed else None
 
     confidence: int | None = None
     if isinstance(confidence_raw, (int, float)):
@@ -527,6 +547,28 @@ def _parse_deliberation_turn(text: str, agent_config: AgentConfig, latency_ms: i
 
     if not revised_answer:
         revised_answer = stripped
+
+    criticisms: list[str] = []
+    if isinstance(criticisms_raw, list):
+        for item in criticisms_raw:
+            if isinstance(item, str):
+                value = item.strip()
+                if value:
+                    criticisms.append(value)
+
+    if consensus_config.debate_mode == "strict":
+        min_criticisms = max(1, consensus_config.min_criticisms)
+        if len(criticisms) < min_criticisms:
+            return DeliberationTurn(
+                agent=agent_config.agent,
+                provider=agent_config.provider,
+                model=agent_config.model,
+                status="ERROR",
+                latency_ms=latency_ms,
+                raw_text=stripped,
+                revised_answer=revised_answer,
+                error_message=f"strict debate requires at least {min_criticisms} criticisms",
+            )
 
     return DeliberationTurn(
         agent=agent_config.agent,
@@ -539,7 +581,17 @@ def _parse_deliberation_turn(text: str, agent_config: AgentConfig, latency_ms: i
         preferred_agent=preferred_agent,
         reason=reason or None,
         confidence=confidence,
+        criticisms=criticisms,
     )
+
+
+def _criticism_quality_score(criticisms: list[str]) -> int:
+    # Favor specific critiques while capping impact to avoid overweighting verbosity.
+    score = 0
+    for item in criticisms:
+        words = len(item.split())
+        score += min(20, words)
+    return min(60, score)
 
 
 async def _call_model_text(full_model: str, prompt: str, timeout_seconds: int) -> tuple[str, int]:
@@ -602,6 +654,7 @@ async def _run_deliberation_turn(
     base_results: list[AgentResult],
     peer_answers: dict[str, str],
     round_index: int,
+    consensus_config: ConsensusConfig,
     timeout_seconds: int,
 ) -> DeliberationTurn:
     full_model = f"{agent_config.provider}/{agent_config.model}"
@@ -609,9 +662,16 @@ async def _run_deliberation_turn(
     print(f"[magi] deliberation round={round_index} agent={agent_config.agent} start")
 
     try:
-        turn_prompt = _build_peer_vote_prompt(prompt, base_results, peer_answers, agent_config.agent, round_index)
+        turn_prompt = _build_peer_vote_prompt(
+            prompt,
+            base_results,
+            peer_answers,
+            agent_config.agent,
+            round_index,
+            consensus_config,
+        )
         text, latency_ms = await _call_model_text(full_model, turn_prompt, timeout_seconds)
-        turn = _parse_deliberation_turn(text, agent_config, latency_ms)
+        turn = _parse_deliberation_turn(text, agent_config, latency_ms, consensus_config)
         print(f"[magi] deliberation round={round_index} agent={agent_config.agent} success latency_ms={latency_ms}")
         return turn
     except asyncio.TimeoutError:
@@ -729,7 +789,7 @@ async def _run_peer_vote_consensus(
 
     for round_idx in range(1, rounds + 1):
         tasks = [
-            _run_deliberation_turn(agent, prompt, results, peer_answers, round_idx, timeout_seconds)
+            _run_deliberation_turn(agent, prompt, results, peer_answers, round_idx, consensus_config, timeout_seconds)
             for agent in agents
         ]
         turns = await asyncio.gather(*tasks)
@@ -757,12 +817,18 @@ async def _run_peer_vote_consensus(
 
     vote_count: dict[str, int] = defaultdict(int)
     vote_conf: dict[str, int] = defaultdict(int)
+    vote_crit: dict[str, int] = defaultdict(int)
     for turn in valid_votes:
         assert turn.preferred_agent is not None
         vote_count[turn.preferred_agent] += 1
         vote_conf[turn.preferred_agent] += turn.confidence if turn.confidence is not None else 50
+        vote_crit[turn.preferred_agent] += _criticism_quality_score(turn.criticisms)
 
-    ranked = sorted(vote_count.keys(), key=lambda key: (vote_count[key], vote_conf[key], key), reverse=True)
+    ranked = sorted(
+        vote_count.keys(),
+        key=lambda key: (vote_count[key], vote_conf[key], vote_crit[key], key),
+        reverse=True,
+    )
     winner = ranked[0]
 
     winner_answer = peer_answers.get(winner, "")
@@ -778,12 +844,15 @@ async def _run_peer_vote_consensus(
                 f" (confidence={turn.confidence if turn.confidence is not None else 'n/a'}): "
                 f"{turn.reason or 'no reason'}"
             )
+            if turn.criticisms:
+                vote_lines.append("  criticisms: " + " | ".join(turn.criticisms))
         else:
             vote_lines.append(f"- Agent {turn.agent} failed in deliberation: {turn.error_message or 'unknown error'}")
 
     text = (
         f"Consensus winner: Agent {winner} "
-        f"({vote_count[winner]}/{len(last_turns)} votes, total_confidence={vote_conf[winner]}).\n\n"
+        f"({vote_count[winner]}/{len(last_turns)} votes, total_confidence={vote_conf[winner]}, "
+        f"critique_score={vote_crit[winner]}).\n\n"
         f"Final answer:\n{winner_answer}\n\n"
         "Vote details:\n"
         + "\n".join(vote_lines)

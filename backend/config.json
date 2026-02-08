@@ -36,7 +36,9 @@
       "consensus": {
         "strategy": "peer_vote",
         "min_ok_results": 2,
-        "rounds": 2
+        "rounds": 2,
+        "debate_mode": "strict",
+        "min_criticisms": 2
       },
       "timeout_seconds": 30
     }

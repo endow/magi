@@ -25,7 +25,13 @@ def _profiled_config() -> main.AppConfig:
                     main.AgentConfig(agent="B", provider="anthropic", model="claude-sonnet-4-20250514"),
                     main.AgentConfig(agent="C", provider="gemini", model="gemini-2.5-flash"),
                 ],
-                consensus=main.ConsensusConfig(strategy="peer_vote", min_ok_results=2, rounds=2),
+                consensus=main.ConsensusConfig(
+                    strategy="peer_vote",
+                    min_ok_results=2,
+                    rounds=2,
+                    debate_mode="strict",
+                    min_criticisms=2,
+                ),
                 timeout_seconds=30,
             ),
         },
@@ -291,3 +297,33 @@ def test_history_persistence_failure_returns_500(monkeypatch) -> None:
     response = client.post("/api/magi/run", json={"prompt": "hello", "profile": "cost"})
     assert response.status_code == 500
     assert "failed to persist history" in response.json()["detail"]
+
+
+def test_parse_deliberation_turn_strict_requires_criticisms() -> None:
+    cfg = main.ConsensusConfig(strategy="peer_vote", debate_mode="strict", min_criticisms=2)
+    text = '{"revised_answer":"x","preferred_agent":"A","reason":"ok","confidence":80,"criticisms":["only one"]}'
+    turn = main._parse_deliberation_turn(
+        text=text,
+        agent_config=main.AgentConfig(agent="A", provider="openai", model="gpt-4o-mini"),
+        latency_ms=10,
+        consensus_config=cfg,
+    )
+    assert turn.status == "ERROR"
+    assert "at least 2 criticisms" in (turn.error_message or "")
+
+
+def test_parse_deliberation_turn_strict_accepts_valid_criticisms() -> None:
+    cfg = main.ConsensusConfig(strategy="peer_vote", debate_mode="strict", min_criticisms=2)
+    text = (
+        '{"revised_answer":"x","preferred_agent":"B","reason":"ok","confidence":81,'
+        '"criticisms":["A misses assumptions","C lacks evidence"]}'
+    )
+    turn = main._parse_deliberation_turn(
+        text=text,
+        agent_config=main.AgentConfig(agent="B", provider="anthropic", model="claude"),
+        latency_ms=10,
+        consensus_config=cfg,
+    )
+    assert turn.status == "OK"
+    assert turn.preferred_agent == "B"
+    assert len(turn.criticisms) == 2

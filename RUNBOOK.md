@@ -90,3 +90,9 @@ npm run build
 - Default DB path: `backend/data/magi.db`
 - Override path with `MAGI_DB_PATH` in `backend/.env`
 - If history is not needed, you can remove the DB file while backend is stopped and it will be recreated on next start.
+
+## Consensus Modes
+
+- `cost` / `balance`: normal peer-vote consensus.
+- `performance`: strict debate consensus (`min_criticisms=2`).
+- If strict mode yields consensus errors, inspect backend logs for `strict debate requires at least ... criticisms`.

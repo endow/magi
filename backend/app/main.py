@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import uuid
+import warnings
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Literal
@@ -11,6 +12,13 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from litellm import acompletion
 from pydantic import BaseModel
+
+warnings.filterwarnings(
+    "ignore",
+    message="You seem to already have a custom sys.excepthook handler installed.*",
+    category=RuntimeWarning,
+    module="trio._core._multierror",
+)
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 # LiteLLM Gemini adapter expects GEMINI_API_KEY in many environments.

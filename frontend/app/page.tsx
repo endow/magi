@@ -112,6 +112,17 @@ function buildLlmLabel(provider: string, model: string, fallbackAgent: AgentId):
   return `${compact.slice(0, 17)}...`;
 }
 
+function splitConsensusText(text: string | null | undefined): { main: string; voteDetails: string | null } {
+  if (!text) return { main: "", voteDetails: null };
+  const marker = "\n\nVote details:";
+  const markerIndex = text.indexOf(marker);
+  if (markerIndex < 0) return { main: text, voteDetails: null };
+  return {
+    main: text.slice(0, markerIndex),
+    voteDetails: text.slice(markerIndex + marker.length).trim()
+  };
+}
+
 export default function HomePage() {
   const [prompt, setPrompt] = useState("");
   const [lastRunPrompt, setLastRunPrompt] = useState("");
@@ -185,6 +196,7 @@ export default function HomePage() {
     () => parseWinnerAgent(consensus?.status === "OK" ? consensus.text : ""),
     [consensus]
   );
+  const parsedConsensus = useMemo(() => splitConsensusText(consensus?.text), [consensus?.text]);
   const nodePositionClass: Record<AgentId, string> = {
     A: "magi-node-a",
     B: "magi-node-b",
@@ -725,8 +737,14 @@ export default function HomePage() {
             <p className="text-terminal-dim">latency_ms: {consensus.latency_ms}</p>
             {consensus.error_message ? <p className="status-error">error: {consensus.error_message}</p> : null}
             <pre className="mt-2 whitespace-pre-wrap break-words rounded-md bg-[#02060b] p-3 text-sm leading-6">
-              {consensus.text}
+              {parsedConsensus.main}
             </pre>
+            {parsedConsensus.voteDetails ? (
+              <details className="rounded-md border border-terminal-border bg-[#02060b] p-3">
+                <summary className="cursor-pointer text-sm font-semibold text-terminal-dim">Vote details</summary>
+                <pre className="mt-2 whitespace-pre-wrap break-words text-sm leading-6">{parsedConsensus.voteDetails}</pre>
+              </details>
+            ) : null}
           </div>
         </section>
       ) : null}

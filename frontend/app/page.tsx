@@ -5,6 +5,7 @@ import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "
 type AgentId = "A" | "B" | "C";
 type AgentStatus = "OK" | "ERROR" | "LOADING";
 type NodeState = "IDLE" | "BLINK" | "ON" | "ERROR";
+type ConfidenceMap = Record<AgentId, number | null>;
 
 type AgentResult = {
   agent: AgentId;
@@ -79,6 +80,30 @@ function statusClass(status: AgentStatus): string {
   return "status-loading";
 }
 
+function parseConfidenceMap(text: string | null | undefined): ConfidenceMap {
+  const map: ConfidenceMap = { A: null, B: null, C: null };
+  if (!text) return map;
+  const pattern = /Agent ([ABC]).*?\(confidence=(\d+|n\/a)\)/g;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(text)) !== null) {
+    const agent = match[1] as AgentId;
+    const raw = match[2];
+    if (raw.toLowerCase() !== "n/a") {
+      map[agent] = Math.max(0, Math.min(100, Number.parseInt(raw, 10)));
+    }
+  }
+  return map;
+}
+
+function parseWinnerAgent(text: string | null | undefined): AgentId | null {
+  if (!text) return null;
+  const match = text.match(/Consensus winner:\s*Agent\s*([ABC])/i);
+  if (!match) return null;
+  const value = match[1].toUpperCase();
+  if (value === "A" || value === "B" || value === "C") return value;
+  return null;
+}
+
 export default function HomePage() {
   const [prompt, setPrompt] = useState("");
   const [lastRunPrompt, setLastRunPrompt] = useState("");
@@ -122,6 +147,14 @@ export default function HomePage() {
     return order.map((agent) => byAgent.get(agent)).filter((item): item is AgentResult => Boolean(item));
   }, [isLoading, results]);
   const displayNodes = cards.length ? cards : loadingResults;
+  const confidenceMap = useMemo(
+    () => parseConfidenceMap(consensus?.status === "OK" ? consensus.text : ""),
+    [consensus]
+  );
+  const winnerAgent = useMemo(
+    () => parseWinnerAgent(consensus?.status === "OK" ? consensus.text : ""),
+    [consensus]
+  );
   const nodePositionClass: Record<AgentId, string> = {
     A: "magi-node-a",
     B: "magi-node-b",
@@ -213,6 +246,7 @@ export default function HomePage() {
       function centerOf(el: HTMLDivElement) {
         const rect = el.getBoundingClientRect();
         return {
+          rect,
           x: rect.left - chamberRect.left + rect.width / 2,
           y: rect.top - chamberRect.top + rect.height / 2
         };
@@ -222,11 +256,35 @@ export default function HomePage() {
       const b = centerOf(nodeB);
       const c = centerOf(nodeC);
 
+      function edgePoint(
+        from: { x: number; y: number; rect: DOMRect },
+        to: { x: number; y: number; rect: DOMRect }
+      ): { x: number; y: number } {
+        const dx = to.x - from.x;
+        const dy = to.y - from.y;
+        const absDx = Math.abs(dx) || 0.0001;
+        const absDy = Math.abs(dy) || 0.0001;
+        const halfW = from.rect.width / 2;
+        const halfH = from.rect.height / 2;
+        const scale = Math.min(halfW / absDx, halfH / absDy);
+        return {
+          x: from.x + dx * scale,
+          y: from.y + dy * scale
+        };
+      }
+
+      const ab1 = edgePoint(a, b);
+      const ab2 = edgePoint(b, a);
+      const bc1 = edgePoint(b, c);
+      const bc2 = edgePoint(c, b);
+      const ac1 = edgePoint(a, c);
+      const ac2 = edgePoint(c, a);
+
       setLinkViewBox(`0 0 ${Math.max(1, chamberRect.width)} ${Math.max(1, chamberRect.height)}`);
       setLinkPaths([
-        `M ${a.x} ${a.y} L ${b.x} ${b.y}`,
-        `M ${b.x} ${b.y} L ${c.x} ${c.y}`,
-        `M ${a.x} ${a.y} L ${c.x} ${c.y}`
+        `M ${ab1.x} ${ab1.y} L ${ab2.x} ${ab2.y}`,
+        `M ${bc1.x} ${bc1.y} L ${bc2.x} ${bc2.y}`,
+        `M ${ac1.x} ${ac1.y} L ${ac2.x} ${ac2.y}`
       ]);
     }
 
@@ -443,8 +501,59 @@ export default function HomePage() {
     setShowConclusion(item.consensus?.status === "OK");
   }
 
+  function startNewChat() {
+    if (isLoading) return;
+    clearNodeTimers();
+    setError("");
+    setRunId("");
+    setPrompt("");
+    setLastRunPrompt("");
+    setResults([]);
+    setConsensus(null);
+    setNodeStates({ A: "IDLE", B: "IDLE", C: "IDLE" });
+    setShowConclusion(false);
+  }
+
   return (
     <main className="magi-grid magi-scan mx-auto min-h-screen w-full max-w-7xl px-4 py-8 md:px-8">
+      <div className="grid items-start grid-cols-1 gap-6 md:grid-cols-[280px_1fr]">
+        <aside className="panel p-3 md:max-h-[calc(100vh-3rem)] md:overflow-auto">
+          <button
+            type="button"
+            onClick={startNewChat}
+            disabled={isLoading}
+            className="w-full rounded border border-terminal-accent bg-[#1f120b] px-3 py-2 text-xs font-semibold text-terminal-accent disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            Start New Chat
+          </button>
+          <p className="mt-3 text-xs font-semibold text-terminal-dim">Run history</p>
+          <div className="mt-2 space-y-2">
+            {history.length ? (
+              history.map((item) => {
+                const statusSummary = item.results
+                  .map((result) => `${result.agent}:${result.status}`)
+                  .join(" ");
+                return (
+                  <button
+                    key={item.run_id}
+                    type="button"
+                    onClick={() => restoreHistory(item)}
+                    className="w-full rounded border border-terminal-border px-2 py-2 text-left text-xs text-terminal-dim hover:border-terminal-accent hover:text-terminal-text"
+                  >
+                    <p>{new Date(item.created_at).toLocaleString()}</p>
+                    <p>mode: {item.profile}</p>
+                    <p>status: {statusSummary}</p>
+                    <p className="truncate">prompt: {item.prompt}</p>
+                  </button>
+                );
+              })
+            ) : (
+              <p className="text-xs text-terminal-dim">No history yet.</p>
+            )}
+          </div>
+        </aside>
+
+        <div>
       <section className="panel p-4 md:p-6">
         <div className="flex items-center gap-2">
           <h1 className="text-xl font-semibold tracking-[0.2em] text-terminal-accent md:text-2xl">MAGI</h1>
@@ -474,16 +583,32 @@ export default function HomePage() {
                 }}
                 className={`magi-node-wrap ${nodePositionClass[node.agent]}`}
               >
-                <div className={`magi-node min-h-24 p-4 magi-node-${nodeStates[node.agent].toLowerCase()}`}>
-                  <p className="magi-node-label text-[11px] font-semibold">NODE-{node.agent}</p>
+                <div
+                  className={`magi-node p-4 magi-node-${nodeStates[node.agent].toLowerCase()} ${
+                    winnerAgent && nodeStates[node.agent] === "ON" && node.agent !== winnerAgent
+                      ? "magi-node-rejected"
+                      : ""
+                  }`}
+                >
+                  <p className="magi-node-label">NODE-{node.agent}</p>
                   <p className="mt-2 truncate text-sm font-semibold">
                     {node.provider === "-" ? `AGENT ${node.agent}` : `${node.provider}/${node.model}`}
                   </p>
-                  {nodeStates[node.agent] === "BLINK" ? (
-                    <div className="mt-2 w-full px-6">
+                  <div className="magi-node-status-slot mt-2 w-full px-6">
+                    {confidenceMap[node.agent] !== null ? (
+                      <div className="magi-confidence-track">
+                        <div className="magi-confidence-fill" style={{ width: `${confidenceMap[node.agent]}%` }} />
+                      </div>
+                    ) : null}
+                    {confidenceMap[node.agent] !== null ? (
+                      <p className="mt-1 text-[11px] font-semibold">confidence {confidenceMap[node.agent]}</p>
+                    ) : (
+                      <p className="mt-1 text-[11px] font-semibold opacity-0">confidence --</p>
+                    )}
+                    {nodeStates[node.agent] === "BLINK" ? (
                       <div className="magi-node-progress" />
-                    </div>
-                  ) : null}
+                    ) : null}
+                  </div>
                 </div>
               </div>
             ))}
@@ -549,33 +674,6 @@ export default function HomePage() {
           </button>
         </div>
 
-        {history.length ? (
-          <div className="mt-4 rounded-md border border-terminal-border bg-[#02060b] p-3">
-            <p className="text-xs font-semibold text-terminal-dim">Run history (persisted)</p>
-            <div className="mt-2 space-y-2">
-              {history.map((item) => {
-                const statusSummary = item.results
-                  .map((result) => `${result.agent}:${result.status}`)
-                  .join(" ");
-                return (
-                  <button
-                    key={item.run_id}
-                    type="button"
-                    onClick={() => restoreHistory(item)}
-                    className="w-full rounded border border-terminal-border px-2 py-2 text-left text-xs text-terminal-dim hover:border-terminal-accent hover:text-terminal-text"
-                  >
-                    <p>run_id: {item.run_id}</p>
-                    <p>mode: {item.profile}</p>
-                    <p>time: {new Date(item.created_at).toLocaleTimeString()}</p>
-                    <p>status: {statusSummary}</p>
-                    <p>consensus: {item.consensus?.status ?? "-"}</p>
-                    <p>prompt: {item.prompt.slice(0, 80)}</p>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        ) : null}
       </section>
 
       {consensus ? (
@@ -645,6 +743,8 @@ export default function HomePage() {
           ))}
         </section>
       ) : null}
+        </div>
+      </div>
     </main>
   );
 }

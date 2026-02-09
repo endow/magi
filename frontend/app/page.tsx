@@ -57,6 +57,7 @@ type ConsensusResponse = {
 type ProfilesResponse = {
   default_profile: string;
   profiles: string[];
+  profile_agents: Record<string, Array<{ agent: AgentId; provider: string; model: string }>>;
 };
 
 type HistoryListResponse = {
@@ -104,11 +105,19 @@ function parseWinnerAgent(text: string | null | undefined): AgentId | null {
   return null;
 }
 
+function buildLlmLabel(provider: string, model: string, fallbackAgent: AgentId): string {
+  if (provider === "-" || model === "-") return `LLM-${fallbackAgent}`;
+  const compact = `${provider}/${model}`.replace(/[\s_]+/g, "-");
+  if (compact.length <= 20) return compact;
+  return `${compact.slice(0, 17)}...`;
+}
+
 export default function HomePage() {
   const [prompt, setPrompt] = useState("");
   const [lastRunPrompt, setLastRunPrompt] = useState("");
   const [selectedProfile, setSelectedProfile] = useState("default");
   const [availableProfiles, setAvailableProfiles] = useState<string[]>(["default"]);
+  const [profileAgents, setProfileAgents] = useState<ProfilesResponse["profile_agents"]>({});
   const [results, setResults] = useState<AgentResult[]>([]);
   const [consensus, setConsensus] = useState<ConsensusResult | null>(null);
   const [history, setHistory] = useState<RunHistoryItem[]>([]);
@@ -146,7 +155,28 @@ export default function HomePage() {
     const byAgent = new Map(results.map((item) => [item.agent, item]));
     return order.map((agent) => byAgent.get(agent)).filter((item): item is AgentResult => Boolean(item));
   }, [isLoading, results]);
-  const displayNodes = cards.length ? cards : loadingResults;
+  const displayNodes = useMemo(() => {
+    if (cards.length) return cards;
+    const configured = profileAgents[selectedProfile] ?? [];
+    if (configured.length) {
+      const order: AgentId[] = ["A", "B", "C"];
+      const byAgent = new Map(configured.map((item) => [item.agent, item]));
+      return order
+        .map((agent) => byAgent.get(agent))
+        .filter((item): item is { agent: AgentId; provider: string; model: string } => Boolean(item))
+        .map(
+          (item): AgentResult => ({
+            agent: item.agent,
+            provider: item.provider,
+            model: item.model,
+            text: "",
+            status: "LOADING",
+            latency_ms: 0
+          })
+        );
+    }
+    return loadingResults;
+  }, [cards, profileAgents, selectedProfile]);
   const confidenceMap = useMemo(
     () => parseConfidenceMap(consensus?.status === "OK" ? consensus.text : ""),
     [consensus]
@@ -211,6 +241,7 @@ export default function HomePage() {
         if (!data.profiles.length) return;
         setAvailableProfiles(data.profiles);
         setSelectedProfile(data.default_profile);
+        setProfileAgents(data.profile_agents ?? {});
       } catch {
         // ignore and fallback to default
       }
@@ -590,7 +621,7 @@ export default function HomePage() {
                       : ""
                   }`}
                 >
-                  <p className="magi-node-label">NODE-{node.agent}</p>
+                  <p className="magi-node-label">{buildLlmLabel(node.provider, node.model, node.agent)}</p>
                   <p className="mt-2 truncate text-sm font-semibold">
                     {node.provider === "-" ? `AGENT ${node.agent}` : `${node.provider}/${node.model}`}
                   </p>

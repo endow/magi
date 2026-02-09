@@ -94,7 +94,7 @@ URLs:
 - `OPENAI_API_KEY=`
 - `ANTHROPIC_API_KEY=`
 - `GOOGLE_API_KEY=`
-- `MAGI_DB_PATH=backend/data/magi.db` (optional)
+- `MAGI_DB_PATH=data/magi.db` (optional, Docker/Local 共通推奨)
 
 `frontend/.env.local`
 
@@ -164,3 +164,4 @@ Edit `backend/config.json` to define profiles and swap models without code chang
 - `localhost:3000 refused to connect`: start frontend (`.\start-frontend.ps1`).
 - `status=ERROR` for one model: verify API key and model name in `backend/config.json`.
 - Anthropic/Gemini errors while others work: usually provider-side quota/credits.
+- Docker で履歴が消える: `docker-compose.yml` で `./backend/data:/app/data` がマウントされていること、かつ `MAGI_DB_PATH` は未設定または `data/magi.db` を使用する。

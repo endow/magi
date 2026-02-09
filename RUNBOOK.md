@@ -89,6 +89,8 @@ npm run build
 
 - Default DB path: `backend/data/magi.db`
 - Override path with `MAGI_DB_PATH` in `backend/.env`
+- Recommended override (Docker/Local共通): `MAGI_DB_PATH=data/magi.db`
+- Docker uses bind mount `./backend/data:/app/data`; if this mount is absent, history can be lost on container recreation.
 - If history is not needed, you can remove the DB file while backend is stopped and it will be recreated on next start.
 
 ## Consensus Modes

@@ -133,6 +133,7 @@ class ConsensusResponse(BaseModel):
 class ProfilesResponse(BaseModel):
     default_profile: str
     profiles: list[str]
+    profile_agents: dict[str, list[AgentConfig]]
 
 
 class HistoryItem(BaseModel):
@@ -896,12 +897,22 @@ async def list_profiles() -> ProfilesResponse:
         raise HTTPException(status_code=500, detail=f"invalid config: {exc}") from exc
 
     if config.profiles:
+        profile_keys = sorted(config.profiles.keys())
+        profile_agents = {key: config.profiles[key].agents for key in profile_keys}
         return ProfilesResponse(
             default_profile=config.default_profile or profile_key,
-            profiles=sorted(config.profiles.keys()),
+            profiles=profile_keys,
+            profile_agents=profile_agents,
         )
 
-    return ProfilesResponse(default_profile=profile_key, profiles=[profile_key])
+    fallback_agents: list[AgentConfig] = []
+    if config.agents:
+        fallback_agents = config.agents
+    return ProfilesResponse(
+        default_profile=profile_key,
+        profiles=[profile_key],
+        profile_agents={profile_key: fallback_agents},
+    )
 
 
 @app.get("/api/magi/history", response_model=HistoryListResponse)

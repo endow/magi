@@ -5,6 +5,8 @@ services:
     container_name: magi-backend
     env_file:
       - ./backend/.env
+    volumes:
+      - ./backend/data:/app/data
     ports:
       - "8000:8000"
     restart: unless-stopped

@@ -1,14 +1,14 @@
-# MAGI v0.3 実装仕様（完成版プロンプト）
+# MAGI v0.6 実装仕様（現行）
 
 あなたはソフトウェア開発エージェントです。  
-最小のMVP「MAGI v0」を実装してください。
+MVPから拡張された現行版「MAGI」を実装・維持してください。
 
 ---
 
 ## 目的（最重要）
 
 - ユーザーが1回プロンプトを入力するだけで、同じ質問を3つのLLMに同時に投げ、3つの回答を並べて見られるようにする。
-- まだ「合議」や「人格」や「DB」は不要。まずは **“コピペの面倒” を消す。**
+- 3モデル回答に加え、合議結果（consensus）を返し、履歴として保存・再参照できるようにする。
 
 ---
 
@@ -17,11 +17,11 @@
 - backend: FastAPI + LiteLLM  
 - frontend: Next.js（App Router）+ Tailwind CSS  
 - 1つのリポジトリに `backend/` と `frontend/` を置く（monorepoでOK）  
-- ローカル開発最優先。Dockerは不要（後で追加しやすい構成にする）
+- ローカル開発最優先。Docker Composeでも同等に起動できる構成にする。
 
 ---
 
-## 要件（v0.3）
+## 要件（v0.6）
 
 ### 1) バックエンド
 
@@ -82,7 +82,7 @@
 - **各タスク内で try/except を行い、必ず結果オブジェクトを返す**。
 - 失敗したモデルがあっても全体は落とさない。
 - タイムアウトは **各モデルごとに20秒** を適用（`asyncio.wait_for`）。
-- `run_id` はUUIDで毎回発行し、レスポンスに含める（DB保存はしない）。
+- `run_id` はUUIDで毎回発行し、レスポンスに含める（履歴はSQLiteに保存する）。
 - 3モデルの結果を入力にして、**3モデル同士の相互レビュー＋投票で合議（consensus）** を実行する。
 - 合議が失敗しても全体レスポンスは返し、`consensus.status="ERROR"` を返す。
 
@@ -173,7 +173,7 @@ GOOGLE_API_KEY=
 
 ---
 
-### 合議再計算API（v0.3）
+### 合議再計算API（v0.6）
 
 - `POST /api/magi/consensus`
 - リクエスト:
@@ -208,8 +208,8 @@ GOOGLE_API_KEY=
 
 ### デザイン
 
-- 黒ターミナル風
-- 過剰装飾なし
+- 黒基調ターミナル風をベースに、MAGIライクな可視化（ノード、接続線、状態表示）を許容
+- 合議結果（Conclusion）を視覚的に優先表示
 - lucide-react可
 
 ---
@@ -232,7 +232,7 @@ GOOGLE_API_KEY=
 
 ---
 
-## v0.5 追加（履歴永続化）
+## 実装済み拡張: v0.5（履歴永続化）
 
 - SQLiteに `run` 結果を保存して、過去実行を見返せるようにする。
 - 保存対象:
@@ -243,7 +243,7 @@ GOOGLE_API_KEY=
   - `GET /api/magi/history?limit=20&offset=0`
   - `GET /api/magi/history/{run_id}`
 
-## v0.6 追加（strict debate consensus）
+## 実装済み拡張: v0.6（strict debate consensus）
 
 - `performance` profile のみ、合議を strict debate モードで実行する。
 - 各エージェントは投票時に `criticisms`（他案の具体的弱点）を最低2件返す。

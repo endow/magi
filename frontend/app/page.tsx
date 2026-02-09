@@ -67,7 +67,7 @@ type HistoryListResponse = {
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 const MAX_PROMPT_LENGTH = 4000;
-const PHASE_VERSION = "v0.4";
+const PHASE_VERSION = "v0.6";
 
 const loadingResults: AgentResult[] = [
   { agent: "A", provider: "-", model: "-", text: "Loading...", status: "LOADING", latency_ms: 0 },

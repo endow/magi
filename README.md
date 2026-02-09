@@ -1,4 +1,4 @@
-# MAGI v0 (Local Use)
+# MAGI v0.6 (Local Use)
 
 One prompt goes to three LLMs in parallel and the outputs are displayed side-by-side.
 

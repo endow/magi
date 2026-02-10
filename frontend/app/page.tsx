@@ -190,6 +190,7 @@ export default function HomePage() {
   const [showConclusion, setShowConclusion] = useState(false);
   const [freshMode, setFreshMode] = useState(true);
   const isStrictDebate = selectedProfile === "performance";
+  const isUltra = selectedProfile === "ultra";
   const chamberRef = useRef<HTMLDivElement | null>(null);
   const nodeRefs = useRef<Record<AgentId, HTMLDivElement | null>>({ A: null, B: null, C: null });
   const [linkPaths, setLinkPaths] = useState<string[]>([]);
@@ -721,6 +722,11 @@ export default function HomePage() {
                 strict debate
               </span>
             ) : null}
+            {isUltra ? (
+              <span className="rounded border border-terminal-err px-2 py-1 text-[11px] text-terminal-err">
+                high cost
+              </span>
+            ) : null}
           </div>
           <p className="text-xs text-terminal-dim">Enter: submit / Shift+Enter: newline</p>
         </form>
@@ -751,6 +757,11 @@ export default function HomePage() {
               {isStrictDebate ? (
                 <span className="rounded border border-terminal-accent px-2 py-0.5 text-[11px] text-terminal-accent">
                   strict debate
+                </span>
+              ) : null}
+              {isUltra ? (
+                <span className="rounded border border-terminal-err px-2 py-0.5 text-[11px] text-terminal-err">
+                  high cost
                 </span>
               ) : null}
             </div>

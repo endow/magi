@@ -29,9 +29,9 @@
     },
     "performance": {
       "agents": [
-        { "agent": "A", "provider": "openai", "model": "gpt-4.1-mini" },
-        { "agent": "B", "provider": "anthropic", "model": "claude-sonnet-4-20250514" },
-        { "agent": "C", "provider": "gemini", "model": "gemini-2.5-flash" }
+        { "agent": "A", "provider": "openai", "model": "gpt-5.1" },
+        { "agent": "B", "provider": "anthropic", "model": "claude-opus-4-1-20250805" },
+        { "agent": "C", "provider": "gemini", "model": "gemini-2.5-pro" }
       ],
       "consensus": {
         "strategy": "peer_vote",

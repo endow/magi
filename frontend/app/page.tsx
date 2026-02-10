@@ -120,11 +120,18 @@ function parseWinnerAgent(text: string | null | undefined): AgentId | null {
   return null;
 }
 
+function providerDisplayName(provider: string): string {
+  const normalized = provider.trim().toLowerCase();
+  if (normalized === "openai") return "OpenAI";
+  if (normalized === "anthropic") return "Claude";
+  if (normalized === "gemini" || normalized === "google") return "Gemini";
+  if (!normalized || normalized === "-") return "-";
+  return provider;
+}
+
 function buildLlmLabel(provider: string, model: string, fallbackAgent: AgentId): string {
   if (provider === "-" || model === "-") return `LLM-${fallbackAgent}`;
-  const compact = `${provider}/${model}`.replace(/[\s_]+/g, "-");
-  if (compact.length <= 20) return compact;
-  return `${compact.slice(0, 17)}...`;
+  return providerDisplayName(provider);
 }
 
 function splitConsensusText(text: string | null | undefined): { main: string; voteDetails: string | null } {
@@ -772,7 +779,9 @@ export default function HomePage() {
             <article key={result.agent} className="panel p-4">
               <div className="flex items-center justify-between border-b border-terminal-border pb-2 text-sm">
                 <div className="flex items-center gap-2">
-                  <span className="font-semibold text-terminal-accent">{result.provider}/{result.model}</span>
+                  <span className="font-semibold text-terminal-accent">
+                    {providerDisplayName(result.provider)}/{result.model}
+                  </span>
                   <span className="text-[11px] text-terminal-dim">Agent {result.agent}</span>
                 </div>
                 <div className="flex items-center gap-2">

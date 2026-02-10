@@ -189,7 +189,7 @@ export default function HomePage() {
   });
   const [showConclusion, setShowConclusion] = useState(false);
   const [freshMode, setFreshMode] = useState(true);
-  const isStrictDebate = selectedProfile === "performance";
+  const isStrictDebate = selectedProfile === "performance" || selectedProfile === "ultra";
   const isUltra = selectedProfile === "ultra";
   const chamberRef = useRef<HTMLDivElement | null>(null);
   const nodeRefs = useRef<Record<AgentId, HTMLDivElement | null>>({ A: null, B: null, C: null });

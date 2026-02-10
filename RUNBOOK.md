@@ -106,5 +106,5 @@ npm run build
 ## Consensus Modes
 
 - `cost` / `balance`: normal peer-vote consensus.
-- `performance`: strict debate consensus (`min_criticisms=2`).
+- `performance` / `ultra`: strict debate consensus (`min_criticisms=2`).
 - If strict mode yields consensus errors, inspect backend logs for `strict debate requires at least ... criticisms`.

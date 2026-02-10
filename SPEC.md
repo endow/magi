@@ -29,7 +29,7 @@ MVPから拡張された現行版「MAGI」を実装・維持してください�
 
 #### リクエスト
 ```json
-{ "prompt": "string", "profile": "cost|balance|performance", "fresh_mode": false }
+{ "prompt": "string", "profile": "cost|balance|performance|ultra", "fresh_mode": false }
 ```
 
 #### レスポンス（成功時）
@@ -81,7 +81,8 @@ MVPから拡張された現行版「MAGI」を実装・維持してください�
 - 3つのモデルへ **同時並列** で問い合わせる（`asyncio.gather` を使用）。
 - **各タスク内で try/except を行い、必ず結果オブジェクトを返す**。
 - 失敗したモデルがあっても全体は落とさない。
-- タイムアウトは **各モデルごとに20秒** を適用（`asyncio.wait_for`）。
+- タイムアウトは **profileごとに `backend/config.json` の `timeout_seconds`** を適用（`asyncio.wait_for`）。
+- 現行設定は `cost: 25s / balance: 35s / performance: 45s / ultra: 60s`。
 - `run_id` はUUIDで毎回発行し、レスポンスに含める（履歴はSQLiteに保存する）。
 - 3モデルの結果を入力にして、**3モデル同士の相互レビュー＋投票で合議（consensus）** を実行する。
 - 合議が失敗しても全体レスポンスは返し、`consensus.status="ERROR"` を返す。
@@ -115,11 +116,12 @@ messages = [{"role": "user", "content": prompt}]
 
 ```json
 {
-  "default_profile": "cost",
+  "default_profile": "balance",
   "profiles": {
     "cost": { "...": "..." },
     "balance": { "...": "..." },
-    "performance": { "...": "..." }
+    "performance": { "...": "..." },
+    "ultra": { "...": "..." }
   }
 }
 ```
@@ -167,7 +169,10 @@ FRESH_PRIMARY_TOPIC=general
 
 - backend: http://localhost:8000  
 - frontend: http://localhost:3000  
-- CORS許可: http://localhost:3000  
+- CORS許可:
+  - http://localhost:3000
+  - http://127.0.0.1:3000
+  - http://host.docker.internal:3000
 
 ---
 
@@ -220,7 +225,7 @@ FRESH_PRIMARY_TOPIC=general
 - `Loading...`
 - **run_id表示＋コピー可能**
 - **合議結果は3カラムより先（上部）に表示する**
-- 初期値: profile は `performance`、`fresh_mode` は `true`
+- 初期値: profile は `backend/config.json` の `default_profile`（現行: `balance`）、`fresh_mode` は `true`
 
 ### デザイン
 
@@ -261,7 +266,7 @@ FRESH_PRIMARY_TOPIC=general
 
 ## 実装済み拡張: v0.7（strict debate consensus + fresh retrieval improvements）
 
-- `performance` profile のみ、合議を strict debate モードで実行する。
+- `performance` / `ultra` profile では、合議を strict debate モードで実行する。
 - 各エージェントは投票時に `criticisms`（他案の具体的弱点）を最低2件返す。
 - `criticisms` 不足のターンは `ERROR` 扱いにして無効票とする。
 - 勝者選定は「票数 + 信頼度 + 批判品質スコア」で重み付けする。

@@ -117,11 +117,12 @@ Edit `backend/config.json` to define profiles and swap models without code chang
 
 ```json
 {
-  "default_profile": "cost",
+  "default_profile": "balance",
   "profiles": {
     "cost": { "...": "..." },
     "balance": { "...": "..." },
-    "performance": { "...": "..." }
+    "performance": { "...": "..." },
+    "ultra": { "...": "..." }
   }
 }
 ```
@@ -129,7 +130,7 @@ Edit `backend/config.json` to define profiles and swap models without code chang
 ## API Notes
 
 - Endpoint: `POST /api/magi/run`
-- Request body: `{ "prompt": "...", "profile": "cost|balance|performance", "fresh_mode": false }`
+- Request body: `{ "prompt": "...", "profile": "cost|balance|performance|ultra", "fresh_mode": false }`
 - Run response includes `consensus` (synthesized final answer from peer-vote deliberation)
 - Run responses are persisted to local SQLite history
 - Retry endpoint: `POST /api/magi/retry`
@@ -140,7 +141,7 @@ Edit `backend/config.json` to define profiles and swap models without code chang
 - History list endpoint: `GET /api/magi/history?limit=20&offset=0`
 - History detail endpoint: `GET /api/magi/history/{run_id}`
 - Empty prompt or over 4000 chars returns `400`
-- Per-model timeout: profile config (`backend/config.json`) に従う（現行: cost 25s / balance 35s / performance 45s）
+- Per-model timeout: profile config (`backend/config.json`) に従う（現行: cost 25s / balance 35s / performance 45s / ultra 60s）
 - Partial failure is allowed (`status: ERROR`)
 - Backend returns `run_id` as UUID
 
@@ -161,11 +162,12 @@ Edit `backend/config.json` to define profiles and swap models without code chang
   - shows synthesized conclusion from multi-agent deliberation
   - supports `OK/ERROR` status and latency display
 - Profile selector:
-  - choose `cost`, `balance`, `performance`
+  - choose `cost`, `balance`, `performance`, `ultra`
   - selected profile is sent on run/retry/consensus
-  - default profile is `performance` (from `backend/config.json`)
-  - `performance` enables strict debate consensus (requires concrete cross-agent criticisms)
-  - UI shows a `strict debate` badge when `performance` is selected
+  - default profile is `balance` (from `backend/config.json`)
+  - `performance` and `ultra` enable strict debate consensus (requires concrete cross-agent criticisms)
+  - UI shows a `strict debate` badge when `performance` or `ultra` is selected
+  - UI shows a `high cost` badge when `ultra` is selected
 - Fresh mode toggle:
   - default is ON
   - when ON, backend retrieves recent web evidence via Tavily (if `TAVILY_API_KEY` is configured)

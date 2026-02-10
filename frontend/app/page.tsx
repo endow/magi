@@ -165,7 +165,7 @@ export default function HomePage() {
     C: "IDLE"
   });
   const [showConclusion, setShowConclusion] = useState(false);
-  const [freshMode, setFreshMode] = useState(false);
+  const [freshMode, setFreshMode] = useState(true);
   const isStrictDebate = selectedProfile === "performance";
   const chamberRef = useRef<HTMLDivElement | null>(null);
   const nodeRefs = useRef<Record<AgentId, HTMLDivElement | null>>({ A: null, B: null, C: null });
@@ -306,35 +306,18 @@ export default function HomePage() {
       const b = centerOf(nodeB);
       const c = centerOf(nodeC);
 
-      function edgePoint(
-        from: { x: number; y: number; rect: DOMRect },
-        to: { x: number; y: number; rect: DOMRect }
-      ): { x: number; y: number } {
-        const dx = to.x - from.x;
-        const dy = to.y - from.y;
-        const absDx = Math.abs(dx) || 0.0001;
-        const absDy = Math.abs(dy) || 0.0001;
-        const halfW = from.rect.width / 2;
-        const halfH = from.rect.height / 2;
-        const scale = Math.min(halfW / absDx, halfH / absDy);
-        return {
-          x: from.x + dx * scale,
-          y: from.y + dy * scale
-        };
-      }
-
-      const ab1 = edgePoint(a, b);
-      const ab2 = edgePoint(b, a);
-      const bc1 = edgePoint(b, c);
-      const bc2 = edgePoint(c, b);
-      const ac1 = edgePoint(a, c);
-      const ac2 = edgePoint(c, a);
+      const aTop = { x: a.x, y: a.y - a.rect.height / 2 };
+      const aRight = { x: a.x + a.rect.width / 2, y: a.y };
+      const bLeft = { x: b.x - b.rect.width / 2, y: b.y };
+      const bRight = { x: b.x + b.rect.width / 2, y: b.y };
+      const cTop = { x: c.x, y: c.y - c.rect.height / 2 };
+      const cLeft = { x: c.x - c.rect.width / 2, y: c.y };
 
       setLinkViewBox(`0 0 ${Math.max(1, chamberRect.width)} ${Math.max(1, chamberRect.height)}`);
       setLinkPaths([
-        `M ${ab1.x} ${ab1.y} L ${ab2.x} ${ab2.y}`,
-        `M ${bc1.x} ${bc1.y} L ${bc2.x} ${bc2.y}`,
-        `M ${ac1.x} ${ac1.y} L ${ac2.x} ${ac2.y}`
+        `M ${bLeft.x} ${bLeft.y} L ${aTop.x} ${aTop.y}`,
+        `M ${bRight.x} ${bRight.y} L ${cTop.x} ${cTop.y}`,
+        `M ${aRight.x} ${aRight.y} L ${cLeft.x} ${cLeft.y}`
       ]);
     }
 
@@ -641,7 +624,7 @@ export default function HomePage() {
                   }`}
                 >
                   <p className="magi-node-label">{buildLlmLabel(node.provider, node.model, node.agent)}</p>
-                  <p className="mt-2 truncate text-sm font-semibold">
+                  <p className="magi-node-model mt-2 text-sm font-semibold">
                     {node.provider === "-" ? `AGENT ${node.agent}` : `${node.provider}/${node.model}`}
                   </p>
                   <div className="magi-node-status-slot mt-2 w-full px-6">

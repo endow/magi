@@ -1,5 +1,5 @@
 {
-  "default_profile": "cost",
+  "default_profile": "performance",
   "profiles": {
     "cost": {
       "agents": [

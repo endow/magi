@@ -125,10 +125,26 @@ body {
 }
 
 .magi-node-label {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  padding: 0 0.4rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 1.12rem;
   font-weight: 900;
-  letter-spacing: 0.1em;
+  letter-spacing: 0.07em;
   text-shadow: 0 1px 0 rgba(255, 255, 255, 0.25);
+}
+
+.magi-node-model {
+  width: 100%;
+  max-width: 100%;
+  padding: 0 0.4rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .magi-node-progress {

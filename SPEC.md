@@ -220,6 +220,7 @@ FRESH_PRIMARY_TOPIC=general
 - `Loading...`
 - **run_id表示＋コピー可能**
 - **合議結果は3カラムより先（上部）に表示する**
+- 初期値: profile は `performance`、`fresh_mode` は `true`
 
 ### デザイン
 

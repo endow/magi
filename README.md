@@ -159,9 +159,11 @@ Edit `backend/config.json` to define profiles and swap models without code chang
 - Profile selector:
   - choose `cost`, `balance`, `performance`
   - selected profile is sent on run/retry/consensus
+  - default profile is `performance` (from `backend/config.json`)
   - `performance` enables strict debate consensus (requires concrete cross-agent criticisms)
   - UI shows a `strict debate` badge when `performance` is selected
 - Fresh mode toggle:
+  - default is ON
   - when ON, backend retrieves recent web evidence via Tavily (if `TAVILY_API_KEY` is configured)
   - retrieval uses multi-attempt fallback (`general/news` + query expansion) for non-news topics like game guides
   - if Tavily is unavailable or key is missing, it falls back to normal prompt automatically

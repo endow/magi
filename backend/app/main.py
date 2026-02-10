@@ -837,40 +837,56 @@ async def _run_single_agent(agent_config: AgentConfig, prompt: str, timeout_seco
     full_model = f"{agent_config.provider}/{agent_config.model}"
     start = perf_counter()
     print(f"[magi] agent={agent_config.agent} start model={full_model}")
+    should_retry_on_timeout = agent_config.provider.strip().lower() == "openai"
+    max_attempts = 2 if should_retry_on_timeout else 1
 
-    try:
-        text, latency_ms = await _call_model_text(full_model, prompt, timeout_seconds)
-        print(f"[magi] agent={agent_config.agent} success latency_ms={latency_ms}")
-        return AgentResult(
-            agent=agent_config.agent,
-            provider=agent_config.provider,
-            model=agent_config.model,
-            text=text,
-            status="OK",
-            latency_ms=latency_ms,
-        )
-    except asyncio.TimeoutError:
-        print(f"[magi] agent={agent_config.agent} error=timeout")
-        return AgentResult(
-            agent=agent_config.agent,
-            provider=agent_config.provider,
-            model=agent_config.model,
-            text="",
-            status="ERROR",
-            latency_ms=int((perf_counter() - start) * 1000),
-            error_message="timeout",
-        )
-    except Exception as exc:  # noqa: BLE001
-        print(f"[magi] agent={agent_config.agent} error={type(exc).__name__}: {exc}")
-        return AgentResult(
-            agent=agent_config.agent,
-            provider=agent_config.provider,
-            model=agent_config.model,
-            text="",
-            status="ERROR",
-            latency_ms=int((perf_counter() - start) * 1000),
-            error_message=_public_error_message(exc),
-        )
+    for attempt in range(1, max_attempts + 1):
+        try:
+            text, latency_ms = await _call_model_text(full_model, prompt, timeout_seconds)
+            print(f"[magi] agent={agent_config.agent} success latency_ms={latency_ms}")
+            return AgentResult(
+                agent=agent_config.agent,
+                provider=agent_config.provider,
+                model=agent_config.model,
+                text=text,
+                status="OK",
+                latency_ms=latency_ms,
+            )
+        except asyncio.TimeoutError:
+            if attempt < max_attempts:
+                print(f"[magi] agent={agent_config.agent} timeout attempt={attempt}; retrying once")
+                continue
+            print(f"[magi] agent={agent_config.agent} error=timeout")
+            return AgentResult(
+                agent=agent_config.agent,
+                provider=agent_config.provider,
+                model=agent_config.model,
+                text="",
+                status="ERROR",
+                latency_ms=int((perf_counter() - start) * 1000),
+                error_message="timeout",
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"[magi] agent={agent_config.agent} error={type(exc).__name__}: {exc}")
+            return AgentResult(
+                agent=agent_config.agent,
+                provider=agent_config.provider,
+                model=agent_config.model,
+                text="",
+                status="ERROR",
+                latency_ms=int((perf_counter() - start) * 1000),
+                error_message=_public_error_message(exc),
+            )
+
+    return AgentResult(
+        agent=agent_config.agent,
+        provider=agent_config.provider,
+        model=agent_config.model,
+        text="",
+        status="ERROR",
+        latency_ms=int((perf_counter() - start) * 1000),
+        error_message="timeout",
+    )
 
 
 async def _run_deliberation_turn(

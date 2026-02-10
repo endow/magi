@@ -386,3 +386,49 @@ def test_fresh_query_attempts_news_primary_keeps_general_fallback() -> None:
     attempts = main._fresh_query_attempts("latest ai release", "news")
     assert attempts[0] == ("latest ai release", "news")
     assert ("latest ai release", "general") in attempts
+
+
+def test_run_single_agent_retries_once_for_openai_timeout(monkeypatch) -> None:
+    calls = {"count": 0}
+
+    async def fake_call_model_text(full_model: str, prompt: str, timeout_seconds: int):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise asyncio.TimeoutError()
+        return "ok-after-retry", 123
+
+    monkeypatch.setattr(main, "_call_model_text", fake_call_model_text)
+
+    result = asyncio.run(
+        main._run_single_agent(
+            agent_config=main.AgentConfig(agent="A", provider="openai", model="gpt-5.1"),
+            prompt="hello",
+            timeout_seconds=1,
+        )
+    )
+
+    assert calls["count"] == 2
+    assert result.status == "OK"
+    assert result.text == "ok-after-retry"
+
+
+def test_run_single_agent_does_not_retry_non_openai_timeout(monkeypatch) -> None:
+    calls = {"count": 0}
+
+    async def fake_call_model_text(full_model: str, prompt: str, timeout_seconds: int):
+        calls["count"] += 1
+        raise asyncio.TimeoutError()
+
+    monkeypatch.setattr(main, "_call_model_text", fake_call_model_text)
+
+    result = asyncio.run(
+        main._run_single_agent(
+            agent_config=main.AgentConfig(agent="B", provider="anthropic", model="claude-sonnet-4-20250514"),
+            prompt="hello",
+            timeout_seconds=1,
+        )
+    )
+
+    assert calls["count"] == 1
+    assert result.status == "ERROR"
+    assert result.error_message == "timeout"

@@ -35,6 +35,8 @@ copy .env.example .env
 cd frontend
 npm install
 copy .env.example .env.local
+# Docker MCP で使う場合（任意）
+copy .env.mcp.example .env.local
 ```
 
 ## Local Run
@@ -104,6 +106,8 @@ URLs:
 `frontend/.env.local`
 
 - `NEXT_PUBLIC_API_BASE_URL=http://localhost:8000`
+- Docker MCP/コンテナ内ブラウザからアクセスする場合は `NEXT_PUBLIC_API_BASE_URL=http://host.docker.internal:8000` を使用
+- サンプルとして `frontend/.env.mcp.example` を用意（`copy .env.mcp.example .env.local`）
 
 Note: backend maps `GOOGLE_API_KEY` to `GEMINI_API_KEY` for LiteLLM compatibility.
 

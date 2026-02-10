@@ -65,9 +65,24 @@ type HistoryListResponse = {
   items: RunHistoryItem[];
 };
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+const RAW_API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 const MAX_PROMPT_LENGTH = 4000;
 const PHASE_VERSION = "v0.7";
+
+function resolveApiBaseUrl(): string {
+  if (typeof window === "undefined") return RAW_API_BASE_URL;
+  try {
+    const configured = new URL(RAW_API_BASE_URL);
+    const isLocalConfigured = configured.hostname === "localhost" || configured.hostname === "127.0.0.1";
+    if (isLocalConfigured && window.location.hostname === "host.docker.internal") {
+      configured.hostname = "host.docker.internal";
+      return configured.toString().replace(/\/$/, "");
+    }
+  } catch {
+    return RAW_API_BASE_URL;
+  }
+  return RAW_API_BASE_URL;
+}
 
 const loadingResults: AgentResult[] = [
   { agent: "A", provider: "-", model: "-", text: "Loading...", status: "LOADING", latency_ms: 0 },
@@ -148,6 +163,7 @@ function buildConfiguredLoadingCards(
 }
 
 export default function HomePage() {
+  const apiBaseUrl = useMemo(() => resolveApiBaseUrl(), []);
   const [prompt, setPrompt] = useState("");
   const [lastRunPrompt, setLastRunPrompt] = useState("");
   const [selectedProfile, setSelectedProfile] = useState("default");
@@ -175,7 +191,7 @@ export default function HomePage() {
 
   async function fetchHistory() {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/magi/history?limit=20&offset=0`);
+      const response = await fetch(`${apiBaseUrl}/api/magi/history?limit=20&offset=0`);
       if (!response.ok) return;
       const data = (await response.json()) as HistoryListResponse;
       setHistory(data.items);
@@ -254,7 +270,7 @@ export default function HomePage() {
   useEffect(() => {
     async function loadProfiles() {
       try {
-        const response = await fetch(`${API_BASE_URL}/api/magi/profiles`);
+        const response = await fetch(`${apiBaseUrl}/api/magi/profiles`);
         if (!response.ok) return;
         const data = (await response.json()) as ProfilesResponse;
         if (!data.profiles.length) return;
@@ -338,7 +354,7 @@ export default function HomePage() {
 
   async function requestRun(trimmedPrompt: string): Promise<RunResponse | null> {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/magi/run`, {
+      const response = await fetch(`${apiBaseUrl}/api/magi/run`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
@@ -362,7 +378,7 @@ export default function HomePage() {
 
   async function requestRetry(trimmedPrompt: string, agent: AgentId): Promise<RetryResponse | null> {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/magi/retry`, {
+      const response = await fetch(`${apiBaseUrl}/api/magi/retry`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
@@ -386,7 +402,7 @@ export default function HomePage() {
 
   async function requestConsensus(trimmedPrompt: string, latestResults: AgentResult[]): Promise<ConsensusResponse | null> {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/magi/consensus`, {
+      const response = await fetch(`${apiBaseUrl}/api/magi/consensus`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json"

@@ -1,4 +1,4 @@
-# MAGI v0.6 (Local Use)
+# MAGI v0.7 (Local Use)
 
 One prompt goes to three LLMs in parallel and the outputs are displayed side-by-side.
 
@@ -94,6 +94,11 @@ URLs:
 - `OPENAI_API_KEY=`
 - `ANTHROPIC_API_KEY=`
 - `GOOGLE_API_KEY=`
+- `TAVILY_API_KEY=` (optional, for Fresh mode web retrieval)
+- `FRESH_MAX_RESULTS=3` (optional, fresh mode安定化向け推奨)
+- `FRESH_CACHE_TTL_SECONDS=1800` (optional)
+- `FRESH_SEARCH_DEPTH=basic` (optional: `basic|advanced`)
+- `FRESH_PRIMARY_TOPIC=general` (optional: `general|news`)
 - `MAGI_DB_PATH=data/magi.db` (optional, Docker/Local 共通推奨)
 
 `frontend/.env.local`
@@ -120,18 +125,18 @@ Edit `backend/config.json` to define profiles and swap models without code chang
 ## API Notes
 
 - Endpoint: `POST /api/magi/run`
-- Request body: `{ "prompt": "...", "profile": "cost|balance|performance" }`
+- Request body: `{ "prompt": "...", "profile": "cost|balance|performance", "fresh_mode": false }`
 - Run response includes `consensus` (synthesized final answer from peer-vote deliberation)
 - Run responses are persisted to local SQLite history
 - Retry endpoint: `POST /api/magi/retry`
-- Retry body: `{ "prompt": "...", "agent": "A|B|C", "profile": "..." }`
+- Retry body: `{ "prompt": "...", "agent": "A|B|C", "profile": "...", "fresh_mode": false }`
 - Consensus endpoint: `POST /api/magi/consensus`
-- Consensus body: `{ "prompt": "...", "results": AgentResult[], "profile": "..." }`
+- Consensus body: `{ "prompt": "...", "results": AgentResult[], "profile": "...", "fresh_mode": false }`
 - Profiles endpoint: `GET /api/magi/profiles`
 - History list endpoint: `GET /api/magi/history?limit=20&offset=0`
 - History detail endpoint: `GET /api/magi/history/{run_id}`
 - Empty prompt or over 4000 chars returns `400`
-- Per-model timeout: 20 seconds
+- Per-model timeout: profile config (`backend/config.json`) に従う（現行: cost 25s / balance 35s / performance 45s）
 - Partial failure is allowed (`status: ERROR`)
 - Backend returns `run_id` as UUID
 
@@ -156,6 +161,10 @@ Edit `backend/config.json` to define profiles and swap models without code chang
   - selected profile is sent on run/retry/consensus
   - `performance` enables strict debate consensus (requires concrete cross-agent criticisms)
   - UI shows a `strict debate` badge when `performance` is selected
+- Fresh mode toggle:
+  - when ON, backend retrieves recent web evidence via Tavily (if `TAVILY_API_KEY` is configured)
+  - retrieval uses multi-attempt fallback (`general/news` + query expansion) for non-news topics like game guides
+  - if Tavily is unavailable or key is missing, it falls back to normal prompt automatically
 - Run history panel (persisted in backend SQLite)
 - `run_id` display and copy button
 

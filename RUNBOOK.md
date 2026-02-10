@@ -85,6 +85,16 @@ npm run build
 - This indicates provider quota/rate-limit, not an app crash.
 - Wait and retry, or raise provider quota/billing limits.
 
+## Fresh Mode (Latest Info)
+
+- Set `TAVILY_API_KEY` in `backend/.env` to enable Fresh mode web retrieval.
+- Optional tuning:
+  - `FRESH_MAX_RESULTS` (default `3`, max `10`)
+  - `FRESH_CACHE_TTL_SECONDS` (default `1800`)
+  - `FRESH_SEARCH_DEPTH` (`basic` or `advanced`)
+  - `FRESH_PRIMARY_TOPIC` (`general` or `news`, default `general`)
+- If key is missing or Tavily request fails, backend falls back to normal prompt (run does not fail).
+
 ## History DB
 
 - Default DB path: `backend/data/magi.db`

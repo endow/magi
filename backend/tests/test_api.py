@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 
 import backend.app.main as main
+import asyncio
 
 
 client = TestClient(main.app)
@@ -327,3 +328,61 @@ def test_parse_deliberation_turn_strict_accepts_valid_criticisms() -> None:
     assert turn.status == "OK"
     assert turn.preferred_agent == "B"
     assert len(turn.criticisms) == 2
+
+
+def test_run_with_fresh_mode_uses_effective_prompt(monkeypatch) -> None:
+    monkeypatch.setattr(main, "load_config", _profiled_config)
+    monkeypatch.setattr(main, "_save_run_history", lambda *args, **kwargs: None)
+
+    async def fake_effective(prompt: str, fresh_mode: bool) -> str:
+        assert fresh_mode is True
+        return f"fresh::{prompt}"
+
+    async def fake_runner(agent_config, prompt, timeout_seconds):
+        assert prompt.startswith("fresh::")
+        return main.AgentResult(
+            agent=agent_config.agent,
+            provider=agent_config.provider,
+            model=agent_config.model,
+            text=f"ok-{agent_config.agent}",
+            status="OK",
+            latency_ms=100,
+        )
+
+    async def fake_consensus(config_obj, prompt, results):
+        assert prompt.startswith("fresh::")
+        return main.ConsensusResult(
+            provider="magi",
+            model="peer_vote_v1",
+            text="consensus-ok",
+            status="OK",
+            latency_ms=10,
+        )
+
+    monkeypatch.setattr(main, "_build_effective_prompt", fake_effective)
+    monkeypatch.setattr(main, "_run_single_agent", fake_runner)
+    monkeypatch.setattr(main, "_run_consensus", fake_consensus)
+
+    response = client.post("/api/magi/run", json={"prompt": "hello", "profile": "cost", "fresh_mode": True})
+    assert response.status_code == 200
+    assert response.json()["consensus"]["status"] == "OK"
+
+
+def test_build_effective_prompt_falls_back_without_tavily_key(monkeypatch) -> None:
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    prompt = "latest policy update"
+    effective = asyncio.run(main._build_effective_prompt(prompt, True))
+    assert effective == prompt
+
+
+def test_fresh_query_attempts_prioritizes_general_and_expansion() -> None:
+    attempts = main._fresh_query_attempts("最新のff14零式4層を解説して", "general")
+    assert attempts[0] == ("最新のff14零式4層を解説して", "general")
+    assert ("最新のff14零式4層を解説して", "news") in attempts
+    assert ("ffxiv savage floor 4 guide latest", "general") in attempts
+
+
+def test_fresh_query_attempts_news_primary_keeps_general_fallback() -> None:
+    attempts = main._fresh_query_attempts("latest ai release", "news")
+    assert attempts[0] == ("latest ai release", "news")
+    assert ("latest ai release", "general") in attempts

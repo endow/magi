@@ -11,6 +11,7 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any, Literal
 
+import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -63,12 +64,14 @@ class AppConfig(BaseModel):
 class RunRequest(BaseModel):
     prompt: str
     profile: str | None = None
+    fresh_mode: bool = False
 
 
 class RetryRequest(BaseModel):
     prompt: str
     agent: Literal["A", "B", "C"]
     profile: str | None = None
+    fresh_mode: bool = False
 
 
 class AgentResult(BaseModel):
@@ -85,6 +88,14 @@ class ConsensusRequest(BaseModel):
     prompt: str
     results: list[AgentResult]
     profile: str | None = None
+    fresh_mode: bool = False
+
+
+class FreshSource(BaseModel):
+    title: str
+    url: str
+    snippet: str
+    published_date: str | None = None
 
 
 class ConsensusResult(BaseModel):
@@ -156,7 +167,7 @@ async def app_lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="MAGI v0 Backend", lifespan=app_lifespan)
+app = FastAPI(title="MAGI v0.7 Backend", lifespan=app_lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -165,6 +176,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+_FRESH_CACHE: dict[str, tuple[float, list[FreshSource]]] = {}
 
 
 def load_config() -> AppConfig:
@@ -254,6 +267,213 @@ def _validate_prompt(raw_prompt: str) -> str:
     if len(prompt) > 4000:
         raise HTTPException(status_code=400, detail="prompt must be 4000 characters or fewer")
     return prompt
+
+
+def _fresh_max_results() -> int:
+    raw = os.getenv("FRESH_MAX_RESULTS", "3")
+    try:
+        return max(1, min(10, int(raw)))
+    except ValueError:
+        return 5
+
+
+def _fresh_cache_ttl_seconds() -> int:
+    raw = os.getenv("FRESH_CACHE_TTL_SECONDS", "1800")
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 1800
+
+
+def _fresh_search_depth() -> Literal["basic", "advanced"]:
+    raw = os.getenv("FRESH_SEARCH_DEPTH", "basic").strip().lower()
+    if raw in {"basic", "advanced"}:
+        return raw  # type: ignore[return-value]
+    return "basic"
+
+
+def _fresh_primary_topic() -> Literal["general", "news"]:
+    raw = os.getenv("FRESH_PRIMARY_TOPIC", "general").strip().lower()
+    if raw in {"general", "news"}:
+        return raw  # type: ignore[return-value]
+    return "general"
+
+
+def _cached_fresh_sources(query: str) -> list[FreshSource] | None:
+    cached = _FRESH_CACHE.get(query)
+    if not cached:
+        return None
+    created, sources = cached
+    ttl_seconds = _fresh_cache_ttl_seconds()
+    if ttl_seconds <= 0:
+        return None
+    age_seconds = perf_counter() - created
+    if age_seconds > ttl_seconds:
+        _FRESH_CACHE.pop(query, None)
+        return None
+    return sources
+
+
+def _cache_fresh_sources(query: str, sources: list[FreshSource]) -> None:
+    _FRESH_CACHE[query] = (perf_counter(), sources)
+
+
+def _fresh_query_attempts(query: str, primary_topic: Literal["general", "news"]) -> list[tuple[str, Literal["general", "news"]]]:
+    q = query.strip()
+    attempts: list[tuple[str, Literal["general", "news"]]] = []
+
+    if primary_topic == "general":
+        attempts.extend(
+            [
+                (q, "general"),
+                (f"{q} guide walkthrough strategy 解説 攻略", "general"),
+            ]
+        )
+        lowered = q.lower()
+        if "ff14" in lowered or "ffxiv" in lowered:
+            attempts.append(("ffxiv savage floor 4 guide latest", "general"))
+        attempts.append((q, "news"))
+    else:
+        attempts.extend(
+            [
+                (q, "news"),
+                (q, "general"),
+                (f"{q} guide walkthrough strategy 解説 攻略", "general"),
+            ]
+        )
+
+    deduped: list[tuple[str, Literal["general", "news"]]] = []
+    seen: set[str] = set()
+    for attempt_query, topic in attempts:
+        key = f"{topic}::{attempt_query}"
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((attempt_query, topic))
+    return deduped
+
+
+async def _tavily_search(
+    client: httpx.AsyncClient,
+    tavily_api_key: str,
+    query: str,
+    max_results: int,
+    topic: Literal["general", "news"],
+) -> list[FreshSource]:
+    payload = {
+        "api_key": tavily_api_key,
+        "query": query,
+        "search_depth": _fresh_search_depth(),
+        "max_results": max_results,
+        "topic": topic,
+        "include_answer": False,
+        "include_images": False,
+        "include_raw_content": False,
+    }
+    response = await client.post("https://api.tavily.com/search", json=payload)
+    response.raise_for_status()
+    data = response.json()
+    raw_results = data.get("results")
+    if not isinstance(raw_results, list):
+        return []
+
+    sources: list[FreshSource] = []
+    for item in raw_results:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        url = str(item.get("url") or "").strip()
+        snippet = str(item.get("content") or "").strip()
+        published = str(item.get("published_date") or "").strip() or None
+        if not url or not snippet:
+            continue
+        sources.append(
+            FreshSource(
+                title=title or "Untitled",
+                url=url,
+                snippet=snippet,
+                published_date=published,
+            )
+        )
+        if len(sources) >= max_results:
+            break
+    return sources
+
+
+async def _fetch_fresh_sources(query: str, max_results: int) -> list[FreshSource]:
+    cached = _cached_fresh_sources(query)
+    if cached is not None:
+        return cached
+
+    tavily_api_key = os.getenv("TAVILY_API_KEY")
+    if not tavily_api_key:
+        print("[magi] fresh_mode enabled but TAVILY_API_KEY is not set; fallback to normal prompt")
+        return []
+
+    primary_topic = _fresh_primary_topic()
+    attempts = _fresh_query_attempts(query, primary_topic)
+    seen_keys: set[str] = set()
+    merged: list[FreshSource] = []
+
+    try:
+        async with httpx.AsyncClient(timeout=12.0) as client:
+            for attempt_query, topic in attempts:
+                found = await _tavily_search(client, tavily_api_key, attempt_query, max_results, topic)
+                print(
+                    f"[magi] fresh_mode search attempt topic={topic} "
+                    f'query="{attempt_query[:60]}" results={len(found)}'
+                )
+                for item in found:
+                    if item.url in seen_keys:
+                        continue
+                    seen_keys.add(item.url)
+                    merged.append(item)
+                    if len(merged) >= max_results:
+                        _cache_fresh_sources(query, merged)
+                        return merged
+                if len(merged) >= max_results:
+                    break
+    except Exception as exc:  # noqa: BLE001
+        print(f"[magi] fresh_mode search failed: {type(exc).__name__}: {exc}")
+        return []
+
+    _cache_fresh_sources(query, merged)
+    return merged
+
+
+def _inject_fresh_context(prompt: str, sources: list[FreshSource]) -> str:
+    if not sources:
+        return prompt
+    now_utc = datetime.now(timezone.utc).isoformat()
+    evidence_lines: list[str] = []
+    for idx, source in enumerate(sources, start=1):
+        published = source.published_date or "unknown"
+        evidence_lines.append(
+            f"[S{idx}] title={source.title}\n"
+            f"url={source.url}\n"
+            f"published={published}\n"
+            f"snippet={source.snippet}"
+        )
+    evidence_text = "\n\n".join(evidence_lines)
+    return (
+        f"{prompt}\n\n"
+        "[Fresh Web Evidence]\n"
+        f"retrieved_at_utc={now_utc}\n"
+        "Use this evidence as a primary source for time-sensitive facts.\n"
+        "If a statement depends on freshness (today/latest/current), cite at least one source URL and published date.\n"
+        "If evidence is insufficient, explicitly say what is uncertain.\n\n"
+        f"{evidence_text}"
+    )
+
+
+async def _build_effective_prompt(prompt: str, fresh_mode: bool) -> str:
+    if not fresh_mode:
+        return prompt
+    sources = await _fetch_fresh_sources(prompt, _fresh_max_results())
+    if not sources:
+        return prompt
+    print(f"[magi] fresh_mode sources={len(sources)}")
+    return _inject_fresh_context(prompt, sources)
 
 
 def _db_path() -> Path:
@@ -950,9 +1170,10 @@ async def run_magi(payload: RunRequest) -> RunResponse:
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"invalid config: {exc}") from exc
 
-    tasks = [_run_single_agent(agent, prompt, profile.timeout_seconds) for agent in profile.agents]
+    effective_prompt = await _build_effective_prompt(prompt, payload.fresh_mode)
+    tasks = [_run_single_agent(agent, effective_prompt, profile.timeout_seconds) for agent in profile.agents]
     results = await asyncio.gather(*tasks)
-    consensus = await _run_consensus(profile, prompt, results)
+    consensus = await _run_consensus(profile, effective_prompt, results)
     run_id = str(uuid.uuid4())
     try:
         _save_run_history(run_id, profile_name, prompt, results, consensus)
@@ -978,7 +1199,8 @@ async def retry_agent(payload: RetryRequest) -> RetryResponse:
     if target_agent is None:
         raise HTTPException(status_code=400, detail=f"agent {payload.agent} is not configured")
 
-    result = await _run_single_agent(target_agent, prompt, profile.timeout_seconds)
+    effective_prompt = await _build_effective_prompt(prompt, payload.fresh_mode)
+    result = await _run_single_agent(target_agent, effective_prompt, profile.timeout_seconds)
     return RetryResponse(run_id=str(uuid.uuid4()), profile=profile_name, result=result)
 
 
@@ -994,5 +1216,6 @@ async def recalc_consensus(payload: ConsensusRequest) -> ConsensusResponse:
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"invalid config: {exc}") from exc
 
-    consensus = await _run_consensus(profile, prompt, payload.results)
+    effective_prompt = await _build_effective_prompt(prompt, payload.fresh_mode)
+    consensus = await _run_consensus(profile, effective_prompt, payload.results)
     return ConsensusResponse(run_id=str(uuid.uuid4()), profile=profile_name, consensus=consensus)

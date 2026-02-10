@@ -67,7 +67,7 @@ type HistoryListResponse = {
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 const MAX_PROMPT_LENGTH = 4000;
-const PHASE_VERSION = "v0.6";
+const PHASE_VERSION = "v0.7";
 
 const loadingResults: AgentResult[] = [
   { agent: "A", provider: "-", model: "-", text: "Loading...", status: "LOADING", latency_ms: 0 },
@@ -123,6 +123,30 @@ function splitConsensusText(text: string | null | undefined): { main: string; vo
   };
 }
 
+function buildConfiguredLoadingCards(
+  profileAgents: ProfilesResponse["profile_agents"],
+  selectedProfile: string
+): AgentResult[] {
+  const configured = profileAgents[selectedProfile] ?? [];
+  if (!configured.length) return loadingResults;
+  const order: AgentId[] = ["A", "B", "C"];
+  const byAgent = new Map(configured.map((item) => [item.agent, item]));
+  const items = order
+    .map((agent) => byAgent.get(agent))
+    .filter((item): item is { agent: AgentId; provider: string; model: string } => Boolean(item))
+    .map(
+      (item): AgentResult => ({
+        agent: item.agent,
+        provider: item.provider,
+        model: item.model,
+        text: "Loading...",
+        status: "LOADING",
+        latency_ms: 0
+      })
+    );
+  return items.length ? items : loadingResults;
+}
+
 export default function HomePage() {
   const [prompt, setPrompt] = useState("");
   const [lastRunPrompt, setLastRunPrompt] = useState("");
@@ -141,6 +165,7 @@ export default function HomePage() {
     C: "IDLE"
   });
   const [showConclusion, setShowConclusion] = useState(false);
+  const [freshMode, setFreshMode] = useState(false);
   const isStrictDebate = selectedProfile === "performance";
   const chamberRef = useRef<HTMLDivElement | null>(null);
   const nodeRefs = useRef<Record<AgentId, HTMLDivElement | null>>({ A: null, B: null, C: null });
@@ -160,33 +185,15 @@ export default function HomePage() {
   }
 
   const cards = useMemo(() => {
-    if (isLoading) return loadingResults;
+    if (isLoading) return buildConfiguredLoadingCards(profileAgents, selectedProfile);
     if (!results.length) return [];
     const order: AgentId[] = ["A", "B", "C"];
     const byAgent = new Map(results.map((item) => [item.agent, item]));
     return order.map((agent) => byAgent.get(agent)).filter((item): item is AgentResult => Boolean(item));
-  }, [isLoading, results]);
+  }, [isLoading, profileAgents, results, selectedProfile]);
   const displayNodes = useMemo(() => {
     if (cards.length) return cards;
-    const configured = profileAgents[selectedProfile] ?? [];
-    if (configured.length) {
-      const order: AgentId[] = ["A", "B", "C"];
-      const byAgent = new Map(configured.map((item) => [item.agent, item]));
-      return order
-        .map((agent) => byAgent.get(agent))
-        .filter((item): item is { agent: AgentId; provider: string; model: string } => Boolean(item))
-        .map(
-          (item): AgentResult => ({
-            agent: item.agent,
-            provider: item.provider,
-            model: item.model,
-            text: "",
-            status: "LOADING",
-            latency_ms: 0
-          })
-        );
-    }
-    return loadingResults;
+    return buildConfiguredLoadingCards(profileAgents, selectedProfile);
   }, [cards, profileAgents, selectedProfile]);
   const confidenceMap = useMemo(
     () => parseConfidenceMap(consensus?.status === "OK" ? consensus.text : ""),
@@ -353,7 +360,7 @@ export default function HomePage() {
         headers: {
           "Content-Type": "application/json"
         },
-        body: JSON.stringify({ prompt: trimmedPrompt, profile: selectedProfile })
+        body: JSON.stringify({ prompt: trimmedPrompt, profile: selectedProfile, fresh_mode: freshMode })
       });
 
       const data = (await response.json()) as RunResponse | { detail?: string };
@@ -377,7 +384,7 @@ export default function HomePage() {
         headers: {
           "Content-Type": "application/json"
         },
-        body: JSON.stringify({ prompt: trimmedPrompt, agent, profile: selectedProfile })
+        body: JSON.stringify({ prompt: trimmedPrompt, agent, profile: selectedProfile, fresh_mode: freshMode })
       });
 
       const data = (await response.json()) as RetryResponse | { detail?: string };
@@ -401,7 +408,7 @@ export default function HomePage() {
         headers: {
           "Content-Type": "application/json"
         },
-        body: JSON.stringify({ prompt: trimmedPrompt, results: latestResults, profile: selectedProfile })
+        body: JSON.stringify({ prompt: trimmedPrompt, results: latestResults, profile: selectedProfile, fresh_mode: freshMode })
       });
 
       const data = (await response.json()) as ConsensusResponse | { detail?: string };
@@ -693,6 +700,16 @@ export default function HomePage() {
                 ))}
               </select>
             </label>
+            <label className="flex items-center gap-2 text-xs text-terminal-dim">
+              <input
+                type="checkbox"
+                checked={freshMode}
+                onChange={(event) => setFreshMode(event.target.checked)}
+                disabled={isLoading}
+                className="h-3.5 w-3.5 accent-terminal-accent"
+              />
+              fresh mode
+            </label>
             {isStrictDebate ? (
               <span className="rounded border border-terminal-accent px-2 py-1 text-[11px] text-terminal-accent">
                 strict debate
@@ -707,6 +724,7 @@ export default function HomePage() {
         <div className="mt-4 flex items-center gap-2 text-xs text-terminal-dim">
           <span>run_id: {runId || "-"}</span>
           <span>mode: {selectedProfile}</span>
+          <span>fresh: {freshMode ? "on" : "off"}</span>
           <button
             type="button"
             onClick={copyRunId}

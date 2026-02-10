@@ -1,4 +1,4 @@
-# MAGI v0.6 実装仕様（現行）
+# MAGI v0.7 実装仕様（現行）
 
 あなたはソフトウェア開発エージェントです。  
 MVPから拡張された現行版「MAGI」を実装・維持してください。
@@ -21,7 +21,7 @@ MVPから拡張された現行版「MAGI」を実装・維持してください�
 
 ---
 
-## 要件（v0.6）
+## 要件（v0.7）
 
 ### 1) バックエンド
 
@@ -29,7 +29,7 @@ MVPから拡張された現行版「MAGI」を実装・維持してください�
 
 #### リクエスト
 ```json
-{ "prompt": "string", "profile": "cost|balance|performance" }
+{ "prompt": "string", "profile": "cost|balance|performance", "fresh_mode": false }
 ```
 
 #### レスポンス（成功時）
@@ -151,6 +151,11 @@ messages = [{"role": "user", "content": prompt}]
 OPENAI_API_KEY=
 ANTHROPIC_API_KEY=
 GOOGLE_API_KEY=
+TAVILY_API_KEY=
+FRESH_MAX_RESULTS=3
+FRESH_CACHE_TTL_SECONDS=1800
+FRESH_SEARCH_DEPTH=basic
+FRESH_PRIMARY_TOPIC=general
 ```
 
 - geminiでも **GOOGLE_API_KEY** を使用。
@@ -173,14 +178,24 @@ GOOGLE_API_KEY=
 
 ---
 
-### 合議再計算API（v0.6）
+### 合議再計算API（v0.7）
 
 - `POST /api/magi/consensus`
 - リクエスト:
   - `prompt`
   - `results`（A/B/Cの結果配列）
+  - `fresh_mode`（true の場合は再検索して最新コンテキストを付与）
 - 用途:
   - フロント側の単体Retry後に、最新結果で合議を再計算するため
+
+---
+
+### 最新情報対策（Fresh mode）
+
+- `fresh_mode=true` のとき、backend は Tavily 検索で最新のWebソースを取得し、プロンプトに前段コンテキストとして付与する。
+- 検索は `general/news` のフォールバックとクエリ拡張を行い、ニュース以外の「攻略・解説」系トピックも拾えるようにする。
+- 取得ソースには `url` と `published_date` を含め、時系列依存の回答で出典明示を促す。
+- `TAVILY_API_KEY` 未設定、または検索失敗時は通常プロンプトへ自動フォールバックする（リクエスト自体は失敗させない）。
 
 ---
 
@@ -243,7 +258,7 @@ GOOGLE_API_KEY=
   - `GET /api/magi/history?limit=20&offset=0`
   - `GET /api/magi/history/{run_id}`
 
-## 実装済み拡張: v0.6（strict debate consensus）
+## 実装済み拡張: v0.7（strict debate consensus + fresh retrieval improvements）
 
 - `performance` profile のみ、合議を strict debate モードで実行する。
 - 各エージェントは投票時に `criticisms`（他案の具体的弱点）を最低2件返す。

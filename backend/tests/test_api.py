@@ -244,14 +244,92 @@ def test_history_list_and_get_item(monkeypatch, tmp_path) -> None:
     assert list_body["total"] >= 1
     assert len(list_body["items"]) >= 1
     assert list_body["items"][0]["run_id"] == run_id
+    assert isinstance(list_body["items"][0]["thread_id"], str) and list_body["items"][0]["thread_id"]
+    assert int(list_body["items"][0]["turn_index"]) >= 1
     assert list_body["items"][0]["prompt"] == "persist me"
 
     item_response = client.get(f"/api/magi/history/{run_id}")
     assert item_response.status_code == 200
     item_body = item_response.json()
     assert item_body["run_id"] == run_id
+    assert isinstance(item_body["thread_id"], str) and item_body["thread_id"]
+    assert int(item_body["turn_index"]) >= 1
     assert item_body["consensus"]["status"] == "OK"
     assert len(item_body["results"]) == 3
+
+
+def test_run_assigns_thread_id_and_turn_index(monkeypatch) -> None:
+    monkeypatch.setattr(main, "load_config", _profiled_config)
+    monkeypatch.setattr(main, "_save_run_history", lambda *args, **kwargs: None)
+
+    async def fake_runner(agent_config, prompt, timeout_seconds):
+        return main.AgentResult(
+            agent=agent_config.agent,
+            provider=agent_config.provider,
+            model=agent_config.model,
+            text=f"ok-{agent_config.agent}",
+            status="OK",
+            latency_ms=100,
+        )
+
+    async def fake_consensus(config_obj, prompt, results):
+        return main.ConsensusResult(provider="magi", model="peer_vote_v1", text="ok", status="OK", latency_ms=10)
+
+    monkeypatch.setattr(main, "_run_single_agent", fake_runner)
+    monkeypatch.setattr(main, "_run_consensus", fake_consensus)
+
+    response = client.post("/api/magi/run", json={"prompt": "hello", "profile": "cost"})
+    assert response.status_code == 200
+    body = response.json()
+    assert isinstance(body["thread_id"], str) and body["thread_id"]
+    assert body["turn_index"] == 1
+
+
+def test_run_with_same_thread_injects_thread_context(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("MAGI_DB_PATH", str(tmp_path / "magi-thread.db"))
+    main._init_db()
+    monkeypatch.setattr(main, "load_config", _profiled_config)
+
+    async def fake_effective(prompt: str, fresh_mode: bool) -> str:
+        return prompt
+
+    async def fake_history(prompt: str, base_prompt: str, app_config=None) -> str:
+        return base_prompt
+
+    captured_prompts: list[str] = []
+
+    async def fake_runner(agent_config, prompt, timeout_seconds):
+        captured_prompts.append(prompt)
+        return main.AgentResult(
+            agent=agent_config.agent,
+            provider=agent_config.provider,
+            model=agent_config.model,
+            text=f"ok-{agent_config.agent}",
+            status="OK",
+            latency_ms=100,
+        )
+
+    async def fake_consensus(config_obj, prompt, results):
+        return main.ConsensusResult(provider="magi", model="peer_vote_v1", text="ok", status="OK", latency_ms=10)
+
+    monkeypatch.setattr(main, "_build_effective_prompt", fake_effective)
+    monkeypatch.setattr(main, "_build_prompt_with_history", fake_history)
+    monkeypatch.setattr(main, "_run_single_agent", fake_runner)
+    monkeypatch.setattr(main, "_run_consensus", fake_consensus)
+
+    first = client.post("/api/magi/run", json={"prompt": "What is Auth.js?", "profile": "cost"})
+    assert first.status_code == 200
+    thread_id = first.json()["thread_id"]
+    assert first.json()["turn_index"] == 1
+
+    second = client.post(
+        "/api/magi/run",
+        json={"prompt": "それってどういうこと？", "profile": "cost", "thread_id": thread_id},
+    )
+    assert second.status_code == 200
+    assert second.json()["thread_id"] == thread_id
+    assert second.json()["turn_index"] == 2
+    assert any("[Thread Conversation Context]" in value for value in captured_prompts[-3:])
 
 
 def test_history_get_returns_404_for_unknown_run(monkeypatch, tmp_path) -> None:
@@ -259,6 +337,31 @@ def test_history_get_returns_404_for_unknown_run(monkeypatch, tmp_path) -> None:
     main._init_db()
     response = client.get("/api/magi/history/not-found")
     assert response.status_code == 404
+
+
+def test_delete_thread_history_removes_only_target_thread(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("MAGI_DB_PATH", str(tmp_path / "magi-delete-thread.db"))
+    main._init_db()
+
+    ok_results = [
+        main.AgentResult(agent="A", provider="openai", model="m1", text="a", status="OK", latency_ms=10),
+        main.AgentResult(agent="B", provider="anthropic", model="m2", text="b", status="OK", latency_ms=10),
+        main.AgentResult(agent="C", provider="gemini", model="m3", text="c", status="OK", latency_ms=10),
+    ]
+    consensus = main.ConsensusResult(provider="magi", model="peer_vote_v1", text="answer", status="OK", latency_ms=5)
+    main._save_run_history("run-a1", "cost", "p1", ok_results, consensus, thread_id="thread-a", turn_index=1)
+    main._save_run_history("run-a2", "cost", "p2", ok_results, consensus, thread_id="thread-a", turn_index=2)
+    main._save_run_history("run-b1", "cost", "p3", ok_results, consensus, thread_id="thread-b", turn_index=1)
+
+    response = client.delete("/api/magi/history/thread/thread-a")
+    assert response.status_code == 200
+    assert response.json()["deleted_runs"] == 2
+
+    list_response = client.get("/api/magi/history?limit=20&offset=0")
+    assert list_response.status_code == 200
+    thread_ids = {item["thread_id"] for item in list_response.json()["items"]}
+    assert "thread-a" not in thread_ids
+    assert "thread-b" in thread_ids
 
 
 def test_history_list_rejects_invalid_query_params() -> None:
@@ -373,6 +476,181 @@ def test_build_effective_prompt_falls_back_without_tavily_key(monkeypatch) -> No
     prompt = "latest policy update"
     effective = asyncio.run(main._build_effective_prompt(prompt, True))
     assert effective == prompt
+
+
+def test_find_similar_history_returns_ranked_matches(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("MAGI_DB_PATH", str(tmp_path / "magi-similar.db"))
+    monkeypatch.setenv("HISTORY_SIMILARITY_THRESHOLD", "0.20")
+    main._init_db()
+
+    ok_results = [
+        main.AgentResult(agent="A", provider="openai", model="m1", text="a", status="OK", latency_ms=10),
+        main.AgentResult(agent="B", provider="anthropic", model="m2", text="b", status="OK", latency_ms=10),
+        main.AgentResult(agent="C", provider="gemini", model="m3", text="c", status="OK", latency_ms=10),
+    ]
+    consensus = main.ConsensusResult(provider="magi", model="peer_vote_v1", text="previous answer", status="OK", latency_ms=5)
+
+    main._save_run_history("run-1", "cost", "how to sort a python list", ok_results, consensus)
+    main._save_run_history("run-2", "cost", "python list sorting ascending order", ok_results, consensus)
+    main._save_run_history("run-3", "cost", "tokyo weather today", ok_results, consensus)
+
+    matches = main._find_similar_history("python list sort", 2)
+    assert len(matches) == 2
+    matched_run_ids = {str(item["run_id"]) for item in matches}
+    assert "run-1" in matched_run_ids
+    assert "run-2" in matched_run_ids
+
+
+def test_build_prompt_with_history_falls_back_on_lookup_error(monkeypatch) -> None:
+    def fail_candidates():
+        raise RuntimeError("lookup failure")
+
+    monkeypatch.setattr(main, "_load_history_candidates", fail_candidates)
+    base = "hello"
+    assert asyncio.run(main._build_prompt_with_history("hello", base)) == base
+
+
+def test_build_prompt_with_history_uses_embedding_strategy(monkeypatch) -> None:
+    app_cfg = main.AppConfig(
+        history_context=main.HistoryContextConfig(
+            strategy="embedding",
+            provider="openai",
+            model="text-embedding-3-small",
+            timeout_seconds=10,
+            batch_size=8,
+        )
+    )
+    row = {
+        "run_id": "r1",
+        "prompt": "python list sort",
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "consensus_text": "old answer",
+        "validity_state": "active",
+        "superseded_by": None,
+        "superseded_at": None,
+    }
+
+    monkeypatch.setattr(main, "_load_history_candidates", lambda: [row])
+
+    async def fake_embedding_rank(prompt, rows, threshold, limit, provider, model, timeout_seconds, batch_size, app_config):
+        assert provider == "openai"
+        assert model == "text-embedding-3-small"
+        return [
+            {
+                "run_id": "r1",
+                "prompt": "python list sort",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "consensus_text": "old answer",
+                "similarity": 0.91,
+                "raw_similarity": 0.91,
+                "validity_state": "active",
+                "superseded_by": "",
+            }
+        ]
+
+    monkeypatch.setattr(main, "_rank_history_matches_embedding", fake_embedding_rank)
+    enriched = asyncio.run(main._build_prompt_with_history("python sort", "python sort", app_cfg))
+    assert "[Similar Past Runs]" in enriched
+
+
+def test_run_with_history_context_uses_enriched_prompt(monkeypatch) -> None:
+    monkeypatch.setattr(main, "load_config", _profiled_config)
+    monkeypatch.setattr(main, "_save_run_history", lambda *args, **kwargs: None)
+
+    async def fake_effective(prompt: str, fresh_mode: bool) -> str:
+        return prompt
+
+    async def fake_history(original_prompt: str, base_prompt: str, app_config=None) -> str:
+        return f"{base_prompt}\n\n[Similar Past Runs]\n[H1] sample"
+
+    async def fake_runner(agent_config, prompt, timeout_seconds):
+        assert "[Similar Past Runs]" in prompt
+        return main.AgentResult(
+            agent=agent_config.agent,
+            provider=agent_config.provider,
+            model=agent_config.model,
+            text=f"ok-{agent_config.agent}",
+            status="OK",
+            latency_ms=100,
+        )
+
+    async def fake_consensus(config_obj, prompt, results):
+        assert "[Similar Past Runs]" in prompt
+        return main.ConsensusResult(
+            provider="magi",
+            model="peer_vote_v1",
+            text="consensus-ok",
+            status="OK",
+            latency_ms=10,
+        )
+
+    monkeypatch.setattr(main, "_build_effective_prompt", fake_effective)
+    monkeypatch.setattr(main, "_build_prompt_with_history", fake_history)
+    monkeypatch.setattr(main, "_run_single_agent", fake_runner)
+    monkeypatch.setattr(main, "_run_consensus", fake_consensus)
+
+    response = client.post("/api/magi/run", json={"prompt": "hello", "profile": "cost"})
+    assert response.status_code == 200
+    assert response.json()["consensus"]["status"] == "OK"
+
+
+def test_save_run_history_marks_legacy_as_superseded(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("MAGI_DB_PATH", str(tmp_path / "magi-supersede.db"))
+    main._init_db()
+
+    cfg = main.AppConfig(
+        history_context=main.HistoryContextConfig(
+            deprecations=[
+                main.HistoryDeprecationRule(
+                    id="authjs-migration",
+                    legacy_terms=["nextauth", "next-auth"],
+                    current_terms=["auth.js", "authjs"],
+                )
+            ]
+        )
+    )
+
+    ok_results = [
+        main.AgentResult(agent="A", provider="openai", model="m1", text="a", status="OK", latency_ms=10),
+        main.AgentResult(agent="B", provider="anthropic", model="m2", text="b", status="OK", latency_ms=10),
+        main.AgentResult(agent="C", provider="gemini", model="m3", text="c", status="OK", latency_ms=10),
+    ]
+    consensus = main.ConsensusResult(provider="magi", model="peer_vote_v1", text="answer", status="OK", latency_ms=5)
+
+    main._save_run_history("old", "cost", "How to use NextAuth in app router?", ok_results, consensus, cfg)
+    main._save_run_history("new", "cost", "How to migrate to Auth.js?", ok_results, consensus, cfg)
+
+    with main._get_db_connection() as conn:
+        row = conn.execute("SELECT validity_state, superseded_by FROM runs WHERE run_id='old'").fetchone()
+    assert row is not None
+    assert row["validity_state"] == "superseded"
+    assert row["superseded_by"] == "authjs-migration"
+
+
+def test_rank_history_matches_lexical_downweights_superseded() -> None:
+    rows = [
+        {
+            "run_id": "active",
+            "prompt": "python list sort",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "consensus_text": "x",
+            "validity_state": "active",
+            "superseded_by": None,
+            "superseded_at": None,
+        },
+        {
+            "run_id": "superseded",
+            "prompt": "python list sort",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "consensus_text": "x",
+            "validity_state": "superseded",
+            "superseded_by": "migration",
+            "superseded_at": "2026-01-02T00:00:00+00:00",
+        },
+    ]
+    ranked = main._rank_history_matches_lexical("python list sort", rows, 0.0, 2)
+    assert ranked[0]["run_id"] == "active"
+    assert ranked[1]["run_id"] == "superseded"
 
 
 def test_fresh_query_attempts_prioritizes_general_and_expansion() -> None:

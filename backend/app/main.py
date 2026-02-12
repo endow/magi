@@ -1,6 +1,8 @@
 import asyncio
 import json
+import math
 import os
+import re
 import sqlite3
 import uuid
 import warnings
@@ -15,7 +17,7 @@ import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from litellm import acompletion
+from litellm import acompletion, aembedding
 from pydantic import BaseModel, Field
 
 warnings.filterwarnings(
@@ -53,18 +55,41 @@ class ProfileConfig(BaseModel):
     timeout_seconds: int = 20
 
 
+class HistoryContextConfig(BaseModel):
+    strategy: Literal["lexical", "embedding"] = "lexical"
+    provider: str | None = None
+    model: str | None = None
+    timeout_seconds: int = 12
+    batch_size: int = 24
+    freshness_half_life_days: int = 180
+    stale_weight: float = 0.55
+    superseded_weight: float = 0.20
+    deprecations: list["HistoryDeprecationRule"] = Field(default_factory=list)
+
+
+class HistoryDeprecationRule(BaseModel):
+    id: str
+    legacy_terms: list[str]
+    current_terms: list[str]
+
+
 class AppConfig(BaseModel):
     default_profile: str | None = None
     profiles: dict[str, ProfileConfig] | None = None
     agents: list[AgentConfig] | None = None
     consensus: ConsensusConfig | None = None
     timeout_seconds: int | None = None
+    history_context: HistoryContextConfig | None = None
+
+
+HistoryContextConfig.model_rebuild()
 
 
 class RunRequest(BaseModel):
     prompt: str
     profile: str | None = None
     fresh_mode: bool = False
+    thread_id: str | None = None
 
 
 class RetryRequest(BaseModel):
@@ -72,6 +97,7 @@ class RetryRequest(BaseModel):
     agent: Literal["A", "B", "C"]
     profile: str | None = None
     fresh_mode: bool = False
+    thread_id: str | None = None
 
 
 class AgentResult(BaseModel):
@@ -89,6 +115,7 @@ class ConsensusRequest(BaseModel):
     results: list[AgentResult]
     profile: str | None = None
     fresh_mode: bool = False
+    thread_id: str | None = None
 
 
 class FreshSource(BaseModel):
@@ -124,6 +151,8 @@ class DeliberationTurn(BaseModel):
 
 class RunResponse(BaseModel):
     run_id: str
+    thread_id: str
+    turn_index: int
     profile: str
     results: list[AgentResult]
     consensus: ConsensusResult
@@ -131,12 +160,16 @@ class RunResponse(BaseModel):
 
 class RetryResponse(BaseModel):
     run_id: str
+    thread_id: str
+    turn_index: int
     profile: str
     result: AgentResult
 
 
 class ConsensusResponse(BaseModel):
     run_id: str
+    thread_id: str
+    turn_index: int
     profile: str
     consensus: ConsensusResult
 
@@ -149,6 +182,8 @@ class ProfilesResponse(BaseModel):
 
 class HistoryItem(BaseModel):
     run_id: str
+    thread_id: str
+    turn_index: int
     profile: str
     prompt: str
     created_at: str
@@ -167,7 +202,7 @@ async def app_lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="MAGI v0.7 Backend", lifespan=app_lifespan)
+app = FastAPI(title="MAGI v0.9 Backend", lifespan=app_lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -480,6 +515,541 @@ async def _build_effective_prompt(prompt: str, fresh_mode: bool) -> str:
     return _inject_fresh_context(prompt, sources)
 
 
+def _history_enabled() -> bool:
+    raw = os.getenv("HISTORY_CONTEXT_ENABLED", "1").strip().lower()
+    return raw not in {"0", "false", "off", "no"}
+
+
+def _history_similarity_threshold() -> float:
+    raw = os.getenv("HISTORY_SIMILARITY_THRESHOLD", "0.78")
+    try:
+        value = float(raw)
+    except ValueError:
+        return 0.78
+    return max(0.0, min(1.0, value))
+
+
+def _history_candidate_limit() -> int:
+    raw = os.getenv("HISTORY_SIMILAR_CANDIDATES", "120")
+    try:
+        return max(10, min(500, int(raw)))
+    except ValueError:
+        return 120
+
+
+def _history_freshness_half_life_days(app_config: AppConfig | None = None) -> int:
+    if app_config and app_config.history_context:
+        return max(1, int(app_config.history_context.freshness_half_life_days))
+    raw = os.getenv("HISTORY_FRESHNESS_HALF_LIFE_DAYS", "180")
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 180
+
+
+def _history_stale_weight(app_config: AppConfig | None = None) -> float:
+    if app_config and app_config.history_context:
+        return max(0.0, min(1.0, float(app_config.history_context.stale_weight)))
+    raw = os.getenv("HISTORY_STALE_WEIGHT", "0.55")
+    try:
+        return max(0.0, min(1.0, float(raw)))
+    except ValueError:
+        return 0.55
+
+
+def _history_superseded_weight(app_config: AppConfig | None = None) -> float:
+    if app_config and app_config.history_context:
+        return max(0.0, min(1.0, float(app_config.history_context.superseded_weight)))
+    raw = os.getenv("HISTORY_SUPERSEDED_WEIGHT", "0.20")
+    try:
+        return max(0.0, min(1.0, float(raw)))
+    except ValueError:
+        return 0.20
+
+
+def _history_max_references() -> int:
+    raw = os.getenv("HISTORY_MAX_REFERENCES", "2")
+    try:
+        return max(1, min(5, int(raw)))
+    except ValueError:
+        return 2
+
+
+def _thread_context_enabled() -> bool:
+    raw = os.getenv("THREAD_CONTEXT_ENABLED", "1").strip().lower()
+    return raw not in {"0", "false", "off", "no"}
+
+
+def _thread_context_max_turns() -> int:
+    raw = os.getenv("THREAD_CONTEXT_MAX_TURNS", "6")
+    try:
+        return max(1, min(20, int(raw)))
+    except ValueError:
+        return 6
+
+
+def _normalize_thread_id(raw_thread_id: str | None) -> str | None:
+    if raw_thread_id is None:
+        return None
+    value = raw_thread_id.strip()
+    if not value:
+        return None
+    if len(value) > 120:
+        raise HTTPException(status_code=400, detail="thread_id must be 120 characters or fewer")
+    return value
+
+
+def _normalize_similarity_text(text: str) -> str:
+    lowered = text.strip().lower()
+    return re.sub(r"\s+", " ", lowered)
+
+
+def _history_validity_weight(validity_state: str | None, app_config: AppConfig | None = None) -> float:
+    state = (validity_state or "active").strip().lower()
+    if state == "superseded":
+        return _history_superseded_weight(app_config)
+    if state == "stale":
+        return _history_stale_weight(app_config)
+    return 1.0
+
+
+def _history_freshness_weight(created_at: str | None, app_config: AppConfig | None = None) -> float:
+    if not created_at:
+        return 0.7
+    try:
+        created = datetime.fromisoformat(created_at)
+    except ValueError:
+        return 0.7
+    now = datetime.now(timezone.utc)
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    age_days = max(0.0, (now - created).total_seconds() / 86400.0)
+    half_life_days = float(_history_freshness_half_life_days(app_config))
+    return math.exp(-math.log(2) * (age_days / half_life_days))
+
+
+def _weighted_history_score(
+    similarity: float,
+    created_at: str | None,
+    validity_state: str | None,
+    app_config: AppConfig | None = None,
+) -> float:
+    return similarity * _history_freshness_weight(created_at, app_config) * _history_validity_weight(
+        validity_state, app_config
+    )
+
+
+def _tokenize_for_vector(text: str) -> list[str]:
+    normalized = _normalize_similarity_text(text)
+    if not normalized:
+        return []
+
+    tokens = [token for token in re.findall(r"\w+", normalized, flags=re.UNICODE) if len(token) > 1]
+    compact = re.sub(r"\s+", "", normalized)
+    # Add char 3-grams to support languages without explicit word boundaries.
+    trigrams = [compact[i : i + 3] for i in range(max(0, len(compact) - 2))]
+    return tokens + trigrams
+
+
+def _term_frequency_vector(text: str) -> dict[str, float]:
+    vector: dict[str, float] = defaultdict(float)
+    for token in _tokenize_for_vector(text):
+        vector[token] += 1.0
+    return vector
+
+
+def _cosine_similarity(left: dict[str, float], right: dict[str, float]) -> float:
+    if not left or not right:
+        return 0.0
+    common = set(left.keys()) & set(right.keys())
+    dot = sum(left[key] * right[key] for key in common)
+    if dot <= 0:
+        return 0.0
+    left_norm = math.sqrt(sum(value * value for value in left.values()))
+    right_norm = math.sqrt(sum(value * value for value in right.values()))
+    if left_norm == 0 or right_norm == 0:
+        return 0.0
+    return dot / (left_norm * right_norm)
+
+
+def _load_history_candidates() -> list[sqlite3.Row]:
+    candidates = _history_candidate_limit()
+    with _get_db_connection() as conn:
+        return conn.execute(
+            """
+            SELECT run_id, prompt, created_at, consensus_text, validity_state, superseded_by, superseded_at
+            FROM runs
+            WHERE consensus_status = 'OK'
+              AND consensus_text IS NOT NULL
+              AND consensus_text != ''
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (candidates,),
+        ).fetchall()
+
+
+def _rank_history_matches_lexical(
+    prompt: str,
+    rows: list[sqlite3.Row],
+    threshold: float,
+    limit: int,
+    app_config: AppConfig | None = None,
+) -> list[dict[str, str | float]]:
+    query_vector = _term_frequency_vector(prompt)
+    scored: list[dict[str, str | float]] = []
+    for row in rows:
+        previous_prompt = row["prompt"] or ""
+        raw_similarity = _cosine_similarity(query_vector, _term_frequency_vector(previous_prompt))
+        score = _weighted_history_score(raw_similarity, row["created_at"], row["validity_state"], app_config)
+        if score < threshold:
+            continue
+        scored.append(
+            {
+                "run_id": row["run_id"],
+                "prompt": previous_prompt,
+                "created_at": row["created_at"] or "",
+                "consensus_text": row["consensus_text"] or "",
+                "validity_state": row["validity_state"] or "active",
+                "superseded_by": row["superseded_by"] or "",
+                "similarity": score,
+                "raw_similarity": raw_similarity,
+            }
+        )
+
+    scored.sort(
+        key=lambda item: (
+            float(item["similarity"]),
+            str(item["created_at"]),
+        ),
+        reverse=True,
+    )
+    return scored[:limit]
+
+
+def _history_embedding_config(
+    app_config: AppConfig | None,
+) -> tuple[str, str, int, int] | None:
+    if not app_config or not app_config.history_context:
+        return None
+    cfg = app_config.history_context
+    if cfg.strategy != "embedding":
+        return None
+    provider = (cfg.provider or "").strip()
+    model = (cfg.model or "").strip()
+    if not provider or not model:
+        return None
+    timeout_seconds = max(3, min(60, int(cfg.timeout_seconds)))
+    batch_size = max(1, min(100, int(cfg.batch_size)))
+    return provider, model, timeout_seconds, batch_size
+
+
+def _extract_embedding_vectors(response: Any) -> list[list[float]]:
+    data = getattr(response, "data", None)
+    if data is None and isinstance(response, dict):
+        data = response.get("data")
+    if not isinstance(data, list):
+        return []
+
+    vectors: list[list[float]] = []
+    for item in data:
+        embedding = getattr(item, "embedding", None)
+        if embedding is None and isinstance(item, dict):
+            embedding = item.get("embedding")
+        if not isinstance(embedding, list) or not embedding:
+            continue
+        try:
+            vectors.append([float(value) for value in embedding])
+        except (TypeError, ValueError):
+            continue
+    return vectors
+
+
+async def _embed_texts(
+    provider: str,
+    model: str,
+    timeout_seconds: int,
+    texts: list[str],
+) -> list[list[float]]:
+    if not texts:
+        return []
+    response = await asyncio.wait_for(
+        aembedding(
+            model=f"{provider}/{model}",
+            input=texts,
+        ),
+        timeout=timeout_seconds,
+    )
+    vectors = _extract_embedding_vectors(response)
+    if len(vectors) != len(texts):
+        raise RuntimeError("embedding result size mismatch")
+    return vectors
+
+
+def _cosine_similarity_dense(left: list[float], right: list[float]) -> float:
+    if not left or not right or len(left) != len(right):
+        return 0.0
+    dot = sum(a * b for a, b in zip(left, right))
+    if dot <= 0:
+        return 0.0
+    left_norm = math.sqrt(sum(value * value for value in left))
+    right_norm = math.sqrt(sum(value * value for value in right))
+    if left_norm == 0 or right_norm == 0:
+        return 0.0
+    return dot / (left_norm * right_norm)
+
+
+async def _rank_history_matches_embedding(
+    prompt: str,
+    rows: list[sqlite3.Row],
+    threshold: float,
+    limit: int,
+    provider: str,
+    model: str,
+    timeout_seconds: int,
+    batch_size: int,
+    app_config: AppConfig | None = None,
+) -> list[dict[str, str | float]]:
+    query_vectors = await _embed_texts(provider, model, timeout_seconds, [prompt])
+    if not query_vectors:
+        return []
+    query_vector = query_vectors[0]
+    scored: list[dict[str, str | float]] = []
+
+    for offset in range(0, len(rows), batch_size):
+        batch_rows = rows[offset : offset + batch_size]
+        batch_prompts = [str(row["prompt"] or "") for row in batch_rows]
+        batch_vectors = await _embed_texts(provider, model, timeout_seconds, batch_prompts)
+
+        for row, vector in zip(batch_rows, batch_vectors):
+            raw_similarity = _cosine_similarity_dense(query_vector, vector)
+            score = _weighted_history_score(raw_similarity, row["created_at"], row["validity_state"], app_config)
+            if score < threshold:
+                continue
+            scored.append(
+                {
+                    "run_id": row["run_id"],
+                    "prompt": row["prompt"] or "",
+                    "created_at": row["created_at"] or "",
+                    "consensus_text": row["consensus_text"] or "",
+                    "validity_state": row["validity_state"] or "active",
+                    "superseded_by": row["superseded_by"] or "",
+                    "similarity": score,
+                    "raw_similarity": raw_similarity,
+                }
+            )
+
+    scored.sort(
+        key=lambda item: (
+            float(item["similarity"]),
+            str(item["created_at"]),
+        ),
+        reverse=True,
+    )
+    return scored[:limit]
+
+
+def _find_similar_history(prompt: str, limit: int) -> list[dict[str, str | float]]:
+    rows = _load_history_candidates()
+    return _rank_history_matches_lexical(prompt, rows, _history_similarity_threshold(), limit)
+
+
+def _trim_for_prompt(text: str, max_chars: int = 700) -> str:
+    value = text.strip()
+    if len(value) <= max_chars:
+        return value
+    return value[: max_chars - 3].rstrip() + "..."
+
+
+def _inject_history_context(base_prompt: str, matches: list[dict[str, str | float]]) -> str:
+    if not matches:
+        return base_prompt
+
+    lines: list[str] = [
+        "[Similar Past Runs]",
+        "Use these only as reference. Re-check facts if they may be outdated.",
+    ]
+    for idx, item in enumerate(matches, start=1):
+        similarity = float(item["similarity"])
+        raw_similarity = float(item["raw_similarity"])
+        validity_state = str(item.get("validity_state") or "active")
+        superseded_by = str(item.get("superseded_by") or "").strip()
+        validity_line = f"validity={validity_state}"
+        if superseded_by:
+            validity_line += f" superseded_by={superseded_by}"
+        lines.append(
+            f"[H{idx}] run_id={item['run_id']} created_at={item['created_at']} similarity={similarity:.2f}\n"
+            f"raw_similarity={raw_similarity:.2f} {validity_line}\n"
+            f"past_question={_trim_for_prompt(str(item['prompt']), 180)}\n"
+            f"past_consensus={_trim_for_prompt(str(item['consensus_text']))}"
+        )
+
+    return f"{base_prompt}\n\n" + "\n\n".join(lines)
+
+
+async def _build_prompt_with_history(
+    original_prompt: str,
+    base_prompt: str,
+    app_config: AppConfig | None = None,
+) -> str:
+    if not _history_enabled():
+        return base_prompt
+    try:
+        rows = _load_history_candidates()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[magi] history_context lookup failed: {type(exc).__name__}: {exc}")
+        return base_prompt
+    threshold = _history_similarity_threshold()
+    limit = _history_max_references()
+
+    try:
+        embedding_cfg = _history_embedding_config(app_config)
+        if embedding_cfg:
+            provider, model, timeout_seconds, batch_size = embedding_cfg
+            matches = await _rank_history_matches_embedding(
+                original_prompt,
+                rows,
+                threshold,
+                limit,
+                provider,
+                model,
+                timeout_seconds,
+                batch_size,
+                app_config,
+            )
+            print(f"[magi] history_context strategy=embedding model={provider}/{model} matches={len(matches)}")
+        else:
+            matches = _rank_history_matches_lexical(original_prompt, rows, threshold, limit, app_config)
+            print(f"[magi] history_context strategy=lexical matches={len(matches)}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[magi] history_context embedding failed; fallback to lexical: {type(exc).__name__}: {exc}")
+        try:
+            matches = _rank_history_matches_lexical(original_prompt, rows, threshold, limit, app_config)
+        except Exception as lexical_exc:  # noqa: BLE001
+            print(f"[magi] history_context lookup failed: {type(lexical_exc).__name__}: {lexical_exc}")
+            return base_prompt
+
+    if not matches:
+        return base_prompt
+    print(f"[magi] history_context references={len(matches)}")
+    return _inject_history_context(base_prompt, matches)
+
+
+def _next_turn_index(thread_id: str) -> int:
+    try:
+        with _get_db_connection() as conn:
+            row = conn.execute(
+                "SELECT MAX(COALESCE(turn_index, 0)) AS max_turn FROM runs WHERE thread_id = ?",
+                (thread_id,),
+            ).fetchone()
+    except sqlite3.OperationalError:
+        return 1
+    max_turn = int((row["max_turn"] if row and row["max_turn"] is not None else 0) or 0)
+    return max_turn + 1
+
+
+def _load_thread_history(thread_id: str, max_turns: int) -> list[sqlite3.Row]:
+    try:
+        with _get_db_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT thread_id, turn_index, prompt, consensus_text, consensus_status, created_at
+                FROM runs
+                WHERE thread_id = ?
+                ORDER BY turn_index DESC, created_at DESC
+                LIMIT ?
+                """,
+                (thread_id, max_turns),
+            ).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    return list(reversed(rows))
+
+
+def _trim_thread_text(text: str, max_chars: int = 400) -> str:
+    value = text.strip()
+    if len(value) <= max_chars:
+        return value
+    return value[: max_chars - 3].rstrip() + "..."
+
+
+def _extract_thread_assistant_text(consensus_text: str, consensus_status: str) -> str:
+    if consensus_status != "OK":
+        return "[no consensus answer]"
+
+    text = consensus_text.strip()
+    if not text:
+        return "[no consensus answer]"
+
+    marker = "Final answer:\n"
+    if marker in text:
+        start = text.find(marker) + len(marker)
+        end_marker = "\n\nVote details:"
+        end = text.find(end_marker, start)
+        answer = text[start:end] if end >= 0 else text[start:]
+        cleaned = answer.strip()
+        if cleaned:
+            return cleaned
+
+    return text
+
+
+def _inject_thread_context(base_prompt: str, thread_id: str, rows: list[sqlite3.Row]) -> str:
+    if not rows:
+        return base_prompt
+
+    latest = rows[-1]
+    latest_turn = int(latest["turn_index"] or 0)
+    latest_user = _trim_thread_text(str(latest["prompt"] or ""), 260)
+    latest_assistant = _trim_thread_text(
+        _extract_thread_assistant_text(
+            str(latest["consensus_text"] or ""),
+            str(latest["consensus_status"] or ""),
+        ),
+        520,
+    )
+
+    lines = [
+        "[High Priority Latest Turn]",
+        "Treat this latest exchange as the strongest context for resolving the current question.",
+        f"[T{latest_turn}] user={latest_user}\nassistant={latest_assistant}",
+        "",
+        "[Thread Conversation Context]",
+        f"thread_id={thread_id}",
+        "Interpret the current user question as a continuation of this thread unless the user clearly switches topic.",
+        "When the current question is ambiguous, prioritize this thread context over generic interpretations.",
+    ]
+    for row in rows:
+        turn_index = int(row["turn_index"] or 0)
+        user_prompt = _trim_thread_text(str(row["prompt"] or ""), 220)
+        consensus_status = str(row["consensus_status"] or "")
+        assistant_text = _trim_thread_text(
+            _extract_thread_assistant_text(str(row["consensus_text"] or ""), consensus_status),
+            420,
+        )
+        lines.append(
+            f"[T{turn_index}] user={user_prompt}\nassistant={assistant_text}"
+        )
+
+    return f"{base_prompt}\n\n" + "\n\n".join(lines)
+
+
+def _build_prompt_with_thread_context(base_prompt: str, thread_id: str | None) -> str:
+    if not _thread_context_enabled():
+        return base_prompt
+    if not thread_id:
+        return base_prompt
+    try:
+        rows = _load_thread_history(thread_id, _thread_context_max_turns())
+    except Exception as exc:  # noqa: BLE001
+        print(f"[magi] thread_context lookup failed: {type(exc).__name__}: {exc}")
+        return base_prompt
+    if not rows:
+        return base_prompt
+    print(f"[magi] thread_context turns={len(rows)} thread_id={thread_id}")
+    return _inject_thread_context(base_prompt, thread_id, rows)
+
+
 def _db_path() -> Path:
     raw_path = os.getenv("MAGI_DB_PATH")
     if raw_path:
@@ -501,6 +1071,8 @@ def _init_db() -> None:
             """
             CREATE TABLE IF NOT EXISTS runs (
                 run_id TEXT PRIMARY KEY,
+                thread_id TEXT,
+                turn_index INTEGER,
                 profile TEXT NOT NULL,
                 prompt TEXT NOT NULL,
                 created_at TEXT NOT NULL,
@@ -509,7 +1081,10 @@ def _init_db() -> None:
                 consensus_text TEXT,
                 consensus_status TEXT,
                 consensus_latency_ms INTEGER,
-                consensus_error_message TEXT
+                consensus_error_message TEXT,
+                validity_state TEXT NOT NULL DEFAULT 'active',
+                superseded_by TEXT,
+                superseded_at TEXT
             );
             CREATE TABLE IF NOT EXISTS agent_results (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -525,6 +1100,94 @@ def _init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_agent_results_run_id ON agent_results(run_id);
             """
         )
+        _ensure_runs_columns(conn)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_validity_state ON runs(validity_state)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_thread_turn ON runs(thread_id, turn_index)")
+
+
+def _ensure_runs_columns(conn: sqlite3.Connection) -> None:
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(runs)").fetchall()}
+    if "thread_id" not in existing:
+        conn.execute("ALTER TABLE runs ADD COLUMN thread_id TEXT")
+    if "turn_index" not in existing:
+        conn.execute("ALTER TABLE runs ADD COLUMN turn_index INTEGER")
+    if "validity_state" not in existing:
+        conn.execute("ALTER TABLE runs ADD COLUMN validity_state TEXT NOT NULL DEFAULT 'active'")
+    if "superseded_by" not in existing:
+        conn.execute("ALTER TABLE runs ADD COLUMN superseded_by TEXT")
+    if "superseded_at" not in existing:
+        conn.execute("ALTER TABLE runs ADD COLUMN superseded_at TEXT")
+    conn.execute(
+        """
+        UPDATE runs
+        SET validity_state = COALESCE(NULLIF(TRIM(validity_state), ''), 'active')
+        WHERE validity_state IS NULL OR TRIM(validity_state) = ''
+        """
+    )
+    conn.execute(
+        """
+        UPDATE runs
+        SET thread_id = COALESCE(NULLIF(TRIM(thread_id), ''), run_id)
+        WHERE thread_id IS NULL OR TRIM(thread_id) = ''
+        """
+    )
+    conn.execute(
+        """
+        UPDATE runs
+        SET turn_index = 1
+        WHERE turn_index IS NULL OR turn_index < 1
+        """
+    )
+
+
+def _contains_any_term(text: str, terms: list[str]) -> bool:
+    normalized = _normalize_similarity_text(text)
+    return any(term.strip().lower() in normalized for term in terms if term.strip())
+
+
+def _initial_validity_state(prompt: str, app_config: AppConfig | None) -> tuple[str, str | None]:
+    if not app_config or not app_config.history_context:
+        return "active", None
+    for rule in app_config.history_context.deprecations:
+        has_legacy = _contains_any_term(prompt, rule.legacy_terms)
+        has_current = _contains_any_term(prompt, rule.current_terms)
+        if has_legacy and not has_current:
+            return "stale", rule.id
+    return "active", None
+
+
+def _apply_history_deprecations(
+    conn: sqlite3.Connection,
+    run_id: str,
+    prompt: str,
+    app_config: AppConfig | None,
+) -> None:
+    if not app_config or not app_config.history_context:
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    normalized = _normalize_similarity_text(prompt)
+
+    for rule in app_config.history_context.deprecations:
+        current_terms = [term.strip().lower() for term in rule.current_terms if term.strip()]
+        legacy_terms = [term.strip().lower() for term in rule.legacy_terms if term.strip()]
+        if not current_terms or not legacy_terms:
+            continue
+        if not any(term in normalized for term in current_terms):
+            continue
+
+        like_clauses = " OR ".join("LOWER(prompt) LIKE ?" for _ in legacy_terms)
+        conn.execute(
+            f"""
+            UPDATE runs
+            SET validity_state = 'superseded',
+                superseded_by = ?,
+                superseded_at = ?
+            WHERE run_id != ?
+              AND ({like_clauses})
+              AND COALESCE(validity_state, 'active') != 'superseded'
+            """,
+            [rule.id, now, run_id, *[f"%{term}%" for term in legacy_terms]],
+        )
 
 
 def _save_run_history(
@@ -533,19 +1196,28 @@ def _save_run_history(
     prompt: str,
     results: list[AgentResult],
     consensus: ConsensusResult,
+    app_config: AppConfig | None = None,
+    thread_id: str | None = None,
+    turn_index: int | None = None,
 ) -> None:
     created_at = datetime.now(timezone.utc).isoformat()
+    normalized_thread_id = thread_id or run_id
+    normalized_turn_index = int(turn_index or 1)
+    validity_state, superseded_hint = _initial_validity_state(prompt, app_config)
     with _get_db_connection() as conn:
         conn.execute(
             """
             INSERT INTO runs (
-                run_id, profile, prompt, created_at,
+                run_id, thread_id, turn_index, profile, prompt, created_at,
                 consensus_provider, consensus_model, consensus_text, consensus_status,
-                consensus_latency_ms, consensus_error_message
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                consensus_latency_ms, consensus_error_message,
+                validity_state, superseded_by, superseded_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run_id,
+                normalized_thread_id,
+                normalized_turn_index,
                 profile,
                 prompt,
                 created_at,
@@ -555,6 +1227,9 @@ def _save_run_history(
                 consensus.status,
                 consensus.latency_ms,
                 consensus.error_message,
+                validity_state,
+                superseded_hint,
+                None,
             ),
         )
         conn.executemany(
@@ -577,6 +1252,7 @@ def _save_run_history(
                 for item in results
             ],
         )
+        _apply_history_deprecations(conn, run_id, prompt, app_config)
 
 
 def _load_agent_results_map(run_ids: list[str]) -> dict[str, list[AgentResult]]:
@@ -620,6 +1296,8 @@ def _history_item_from_row(row: sqlite3.Row, results: list[AgentResult]) -> Hist
 
     return HistoryItem(
         run_id=row["run_id"],
+        thread_id=row["thread_id"] or row["run_id"],
+        turn_index=int(row["turn_index"] or 1),
         profile=row["profile"],
         prompt=row["prompt"],
         created_at=row["created_at"],
@@ -633,7 +1311,7 @@ def _list_history(limit: int, offset: int) -> HistoryListResponse:
         total = conn.execute("SELECT COUNT(1) AS count FROM runs").fetchone()["count"]
         rows = conn.execute(
             """
-            SELECT run_id, profile, prompt, created_at,
+            SELECT run_id, thread_id, turn_index, profile, prompt, created_at,
                    consensus_provider, consensus_model, consensus_text, consensus_status,
                    consensus_latency_ms, consensus_error_message
             FROM runs
@@ -653,7 +1331,7 @@ def _get_history_item(run_id: str) -> HistoryItem | None:
     with _get_db_connection() as conn:
         row = conn.execute(
             """
-            SELECT run_id, profile, prompt, created_at,
+            SELECT run_id, thread_id, turn_index, profile, prompt, created_at,
                    consensus_provider, consensus_model, consensus_text, consensus_status,
                    consensus_latency_ms, consensus_error_message
             FROM runs
@@ -667,6 +1345,21 @@ def _get_history_item(run_id: str) -> HistoryItem | None:
 
     by_run = _load_agent_results_map([run_id])
     return _history_item_from_row(row, by_run.get(run_id, []))
+
+
+def _delete_thread_history(thread_id: str) -> int:
+    normalized = thread_id.strip()
+    if not normalized:
+        return 0
+    with _get_db_connection() as conn:
+        run_rows = conn.execute("SELECT run_id FROM runs WHERE thread_id = ?", (normalized,)).fetchall()
+        run_ids = [row["run_id"] for row in run_rows]
+        if not run_ids:
+            return 0
+        placeholders = ",".join("?" for _ in run_ids)
+        conn.execute(f"DELETE FROM agent_results WHERE run_id IN ({placeholders})", run_ids)
+        result = conn.execute("DELETE FROM runs WHERE thread_id = ?", (normalized,))
+        return int(result.rowcount or 0)
 
 
 def _serialize_result_for_consensus(result: AgentResult) -> str:
@@ -1178,9 +1871,21 @@ async def get_history_item(run_id: str) -> HistoryItem:
     return item
 
 
+@app.delete("/api/magi/history/thread/{thread_id}")
+async def delete_thread_history(thread_id: str) -> dict[str, int | str]:
+    try:
+        deleted = _delete_thread_history(thread_id)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"failed to delete thread history: {exc}") from exc
+    if deleted == 0:
+        raise HTTPException(status_code=404, detail="thread not found")
+    return {"thread_id": thread_id, "deleted_runs": deleted}
+
+
 @app.post("/api/magi/run", response_model=RunResponse)
 async def run_magi(payload: RunRequest) -> RunResponse:
     prompt = _validate_prompt(payload.prompt)
+    thread_id = _normalize_thread_id(payload.thread_id) or str(uuid.uuid4())
 
     try:
         config = load_config()
@@ -1191,21 +1896,41 @@ async def run_magi(payload: RunRequest) -> RunResponse:
         raise HTTPException(status_code=500, detail=f"invalid config: {exc}") from exc
 
     effective_prompt = await _build_effective_prompt(prompt, payload.fresh_mode)
+    effective_prompt = _build_prompt_with_thread_context(effective_prompt, thread_id)
+    effective_prompt = await _build_prompt_with_history(prompt, effective_prompt, config)
     tasks = [_run_single_agent(agent, effective_prompt, profile.timeout_seconds) for agent in profile.agents]
     results = await asyncio.gather(*tasks)
     consensus = await _run_consensus(profile, effective_prompt, results)
     run_id = str(uuid.uuid4())
+    turn_index = _next_turn_index(thread_id)
     try:
-        _save_run_history(run_id, profile_name, prompt, results, consensus)
+        _save_run_history(
+            run_id,
+            profile_name,
+            prompt,
+            results,
+            consensus,
+            config,
+            thread_id=thread_id,
+            turn_index=turn_index,
+        )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"failed to persist history: {exc}") from exc
 
-    return RunResponse(run_id=run_id, profile=profile_name, results=results, consensus=consensus)
+    return RunResponse(
+        run_id=run_id,
+        thread_id=thread_id,
+        turn_index=turn_index,
+        profile=profile_name,
+        results=results,
+        consensus=consensus,
+    )
 
 
 @app.post("/api/magi/retry", response_model=RetryResponse)
 async def retry_agent(payload: RetryRequest) -> RetryResponse:
     prompt = _validate_prompt(payload.prompt)
+    thread_id = _normalize_thread_id(payload.thread_id) or str(uuid.uuid4())
 
     try:
         config = load_config()
@@ -1220,13 +1945,15 @@ async def retry_agent(payload: RetryRequest) -> RetryResponse:
         raise HTTPException(status_code=400, detail=f"agent {payload.agent} is not configured")
 
     effective_prompt = await _build_effective_prompt(prompt, payload.fresh_mode)
+    effective_prompt = _build_prompt_with_thread_context(effective_prompt, thread_id)
     result = await _run_single_agent(target_agent, effective_prompt, profile.timeout_seconds)
-    return RetryResponse(run_id=str(uuid.uuid4()), profile=profile_name, result=result)
+    return RetryResponse(run_id=str(uuid.uuid4()), thread_id=thread_id, turn_index=0, profile=profile_name, result=result)
 
 
 @app.post("/api/magi/consensus", response_model=ConsensusResponse)
 async def recalc_consensus(payload: ConsensusRequest) -> ConsensusResponse:
     prompt = _validate_prompt(payload.prompt)
+    thread_id = _normalize_thread_id(payload.thread_id) or str(uuid.uuid4())
 
     try:
         config = load_config()
@@ -1237,5 +1964,12 @@ async def recalc_consensus(payload: ConsensusRequest) -> ConsensusResponse:
         raise HTTPException(status_code=500, detail=f"invalid config: {exc}") from exc
 
     effective_prompt = await _build_effective_prompt(prompt, payload.fresh_mode)
+    effective_prompt = _build_prompt_with_thread_context(effective_prompt, thread_id)
     consensus = await _run_consensus(profile, effective_prompt, payload.results)
-    return ConsensusResponse(run_id=str(uuid.uuid4()), profile=profile_name, consensus=consensus)
+    return ConsensusResponse(
+        run_id=str(uuid.uuid4()),
+        thread_id=thread_id,
+        turn_index=0,
+        profile=profile_name,
+        consensus=consensus,
+    )

@@ -3,6 +3,7 @@ import { expect, test } from "@playwright/test";
 test("submit with Enter and restore from history", async ({ page }) => {
   let runCount = 0;
   const seenFreshModes: boolean[] = [];
+  const seenThreadIds: Array<string | undefined> = [];
 
   await page.route("**/api/magi/profiles", async (route) => {
     await route.fulfill({
@@ -20,6 +21,8 @@ test("submit with Enter and restore from history", async ({ page }) => {
     if (runCount >= 2) {
       items.push({
         run_id: "run-2",
+        thread_id: "thread-1",
+        turn_index: 2,
         profile: "cost",
         prompt: "second prompt",
         created_at: "2026-02-10T00:00:00+00:00",
@@ -40,6 +43,8 @@ test("submit with Enter and restore from history", async ({ page }) => {
     if (runCount >= 1) {
       items.push({
         run_id: "run-1",
+        thread_id: "thread-1",
+        turn_index: 1,
         profile: "cost",
         prompt: "first prompt",
         created_at: "2026-02-09T00:00:00+00:00",
@@ -65,12 +70,15 @@ test("submit with Enter and restore from history", async ({ page }) => {
   });
 
   await page.route("**/api/magi/run", async (route) => {
-    const requestBody = route.request().postDataJSON() as { fresh_mode?: boolean };
+    const requestBody = route.request().postDataJSON() as { fresh_mode?: boolean; thread_id?: string };
     seenFreshModes.push(Boolean(requestBody.fresh_mode));
+    seenThreadIds.push(requestBody.thread_id);
     runCount += 1;
     const payload = runCount === 1
       ? {
           run_id: "run-1",
+          thread_id: "thread-1",
+          turn_index: 1,
           profile: "cost",
           results: [
             { agent: "A", provider: "openai", model: "gpt-4.1-mini", text: "A-first", status: "OK", latency_ms: 100 },
@@ -87,6 +95,8 @@ test("submit with Enter and restore from history", async ({ page }) => {
         }
       : {
           run_id: "run-2",
+          thread_id: "thread-1",
+          turn_index: 2,
           profile: "cost",
           results: [
             { agent: "A", provider: "openai", model: "gpt-4.1-mini", text: "A-second", status: "OK", latency_ms: 130 },
@@ -130,4 +140,5 @@ test("submit with Enter and restore from history", async ({ page }) => {
   await expect(promptInput).toHaveValue("first prompt");
   await expect(page.locator("span", { hasText: "run_id: run-1" })).toBeVisible();
   expect(seenFreshModes).toEqual([true, true]);
+  expect(seenThreadIds).toEqual([undefined, "thread-1"]);
 });

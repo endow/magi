@@ -1,4 +1,4 @@
-# MAGI v0.7 実装仕様（現行）
+# MAGI v0.9 実装仕様（現行）
 
 あなたはソフトウェア開発エージェントです。  
 MVPから拡張された現行版「MAGI」を実装・維持してください。
@@ -21,7 +21,7 @@ MVPから拡張された現行版「MAGI」を実装・維持してください�
 
 ---
 
-## 要件（v0.7）
+## 要件（v0.9）
 
 ### 1) バックエンド
 
@@ -29,13 +29,15 @@ MVPから拡張された現行版「MAGI」を実装・維持してください�
 
 #### リクエスト
 ```json
-{ "prompt": "string", "profile": "cost|balance|performance|ultra", "fresh_mode": false }
+{ "prompt": "string", "profile": "cost|balance|performance|ultra", "fresh_mode": false, "thread_id": "optional-string" }
 ```
 
 #### レスポンス（成功時）
 ```json
 {
   "run_id": "uuid-string",
+  "thread_id": "thread-uuid-or-app-id",
+  "turn_index": 1,
   "profile": "performance",
   "results": [
     {
@@ -84,6 +86,8 @@ MVPから拡張された現行版「MAGI」を実装・維持してください�
 - タイムアウトは **profileごとに `backend/config.json` の `timeout_seconds`** を適用（`asyncio.wait_for`）。
 - 現行設定は `cost: 25s / balance: 35s / performance: 45s / ultra: 60s`。
 - `run_id` はUUIDで毎回発行し、レスポンスに含める（履歴はSQLiteに保存する）。
+- `thread_id` は会話スレッドを識別し、未指定時は新規生成する。
+- 同一 `thread_id` のときは直近ターン文脈をプロンプトに注入し、代名詞参照（「それ」など）に対応する。
 - 3モデルの結果を入力にして、**3モデル同士の相互レビュー＋投票で合議（consensus）** を実行する。
 - 合議が失敗しても全体レスポンスは返し、`consensus.status="ERROR"` を返す。
 
@@ -117,6 +121,23 @@ messages = [{"role": "user", "content": prompt}]
 ```json
 {
   "default_profile": "balance",
+  "history_context": {
+    "strategy": "embedding|lexical",
+    "provider": "openai",
+    "model": "text-embedding-3-small",
+    "timeout_seconds": 12,
+    "batch_size": 24,
+    "freshness_half_life_days": 180,
+    "stale_weight": 0.55,
+    "superseded_weight": 0.20,
+    "deprecations": [
+      {
+        "id": "example-migration",
+        "legacy_terms": ["old term"],
+        "current_terms": ["new term"]
+      }
+    ]
+  },
   "profiles": {
     "cost": { "...": "..." },
     "balance": { "...": "..." },
@@ -127,6 +148,9 @@ messages = [{"role": "user", "content": prompt}]
 ```
 
 - `GET /api/magi/profiles` で利用可能profile一覧を返す。
+- `history_context.strategy=embedding` の場合、履歴類似検索は外部埋め込みモデルを使う（失敗時は lexical にフォールバック）。
+- 履歴は削除せず保持し、`validity_state(active|stale|superseded)` と鮮度減衰を使って参照重みを調整する。
+- `deprecations` で技術移行ルール（legacy/current）を定義し、current語を含む新規実行時に過去legacy履歴を `superseded` に更新する。
 
 ---
 
@@ -158,6 +182,15 @@ FRESH_MAX_RESULTS=3
 FRESH_CACHE_TTL_SECONDS=1800
 FRESH_SEARCH_DEPTH=basic
 FRESH_PRIMARY_TOPIC=general
+HISTORY_CONTEXT_ENABLED=1
+HISTORY_SIMILARITY_THRESHOLD=0.78
+HISTORY_SIMILAR_CANDIDATES=120
+HISTORY_MAX_REFERENCES=2
+HISTORY_FRESHNESS_HALF_LIFE_DAYS=180
+HISTORY_STALE_WEIGHT=0.55
+HISTORY_SUPERSEDED_WEIGHT=0.20
+THREAD_CONTEXT_ENABLED=1
+THREAD_CONTEXT_MAX_TURNS=6
 ```
 
 - geminiでも **GOOGLE_API_KEY** を使用。
@@ -257,12 +290,13 @@ FRESH_PRIMARY_TOPIC=general
 
 - SQLiteに `run` 結果を保存して、過去実行を見返せるようにする。
 - 保存対象:
-  - run_id / created_at / profile / prompt
+  - run_id / thread_id / turn_index / created_at / profile / prompt
   - A/B/C 各結果（status, text, latency, error）
   - consensus結果（status, text, latency, error）
 - 追加API:
   - `GET /api/magi/history?limit=20&offset=0`
   - `GET /api/magi/history/{run_id}`
+  - `DELETE /api/magi/history/thread/{thread_id}`
 
 ## 実装済み拡張: v0.7（strict debate consensus + fresh retrieval improvements）
 
@@ -270,6 +304,23 @@ FRESH_PRIMARY_TOPIC=general
 - 各エージェントは投票時に `criticisms`（他案の具体的弱点）を最低2件返す。
 - `criticisms` 不足のターンは `ERROR` 扱いにして無効票とする。
 - 勝者選定は「票数 + 信頼度 + 批判品質スコア」で重み付けする。
+
+## 実装済み拡張: v0.8（history-aware retrieval with lifecycle control）
+
+- `run` 実行前に履歴DBから類似質問を検索し、プロンプトへ参照コンテキストを付与できる。
+- 類似検索は `embedding`（外部埋め込み）または `lexical`（ローカル）を選択できる。
+- スコアは `similarity × freshness × validity_weight` で計算する。
+- 履歴行に `validity_state` / `superseded_by` / `superseded_at` を保持する。
+- `deprecations` ルールで移行イベントを検知し、旧議論を `superseded` に自動更新する。
+
+## 実装済み拡張: v0.9（threaded conversation memory）
+
+- `POST /api/magi/run` は `thread_id` を受け取り、レスポンスに `thread_id` / `turn_index` を返す。
+- `thread_id` 未指定なら新規スレッドを作る。
+- 同一スレッドの直近ターンを `run/retry/consensus` の有効プロンプトに注入する。
+- 直近1ターンは `[High Priority Latest Turn]` ブロックとして別枠注入し、曖昧質問時に最優先参照する。
+- 履歴保存に `thread_id` / `turn_index` を保持し、過去会話復元の一貫性を確保する。
+- UIではスレッド単位表示・ターン表示に加え、インラインRename、折りたたみトグル、Delete確認付き削除を行える。
 
 ---
 

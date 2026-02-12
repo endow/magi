@@ -19,6 +19,8 @@ type AgentResult = {
 
 type RunResponse = {
   run_id: string;
+  thread_id: string;
+  turn_index: number;
   profile: string;
   results: AgentResult[];
   consensus: ConsensusResult;
@@ -26,12 +28,16 @@ type RunResponse = {
 
 type RetryResponse = {
   run_id: string;
+  thread_id: string;
+  turn_index: number;
   profile: string;
   result: AgentResult;
 };
 
 type RunHistoryItem = {
   run_id: string;
+  thread_id: string;
+  turn_index: number;
   profile: string;
   prompt: string;
   results: AgentResult[];
@@ -50,6 +56,8 @@ type ConsensusResult = {
 
 type ConsensusResponse = {
   run_id: string;
+  thread_id: string;
+  turn_index: number;
   profile: string;
   consensus: ConsensusResult;
 };
@@ -65,9 +73,18 @@ type HistoryListResponse = {
   items: RunHistoryItem[];
 };
 
+type ThreadGroup = {
+  thread_id: string;
+  latest_at: string;
+  turns: RunHistoryItem[];
+};
+
+type ThreadNameMap = Record<string, string>;
+type ThreadCollapsedMap = Record<string, boolean>;
+
 const RAW_API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 const MAX_PROMPT_LENGTH = 4000;
-const PHASE_VERSION = "v0.7";
+const PHASE_VERSION = "v0.9";
 
 function resolveApiBaseUrl(): string {
   if (typeof window === "undefined") return RAW_API_BASE_URL;
@@ -180,6 +197,13 @@ export default function HomePage() {
   const [consensus, setConsensus] = useState<ConsensusResult | null>(null);
   const [history, setHistory] = useState<RunHistoryItem[]>([]);
   const [runId, setRunId] = useState("");
+  const [threadId, setThreadId] = useState("");
+  const [turnIndex, setTurnIndex] = useState(0);
+  const [threadNames, setThreadNames] = useState<ThreadNameMap>({});
+  const [collapsedThreads, setCollapsedThreads] = useState<ThreadCollapsedMap>({});
+  const [editingThreadId, setEditingThreadId] = useState<string | null>(null);
+  const [threadNameDraft, setThreadNameDraft] = useState("");
+  const [confirmDeleteThreadId, setConfirmDeleteThreadId] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [nodeStates, setNodeStates] = useState<Record<AgentId, NodeState>>({
@@ -228,6 +252,29 @@ export default function HomePage() {
     [consensus]
   );
   const parsedConsensus = useMemo(() => splitConsensusText(consensus?.text), [consensus?.text]);
+  const threadGroups = useMemo(() => {
+    const byThread = new Map<string, RunHistoryItem[]>();
+    for (const item of history) {
+      const key = item.thread_id || item.run_id;
+      const list = byThread.get(key) ?? [];
+      list.push(item);
+      byThread.set(key, list);
+    }
+
+    const groups: ThreadGroup[] = Array.from(byThread.entries()).map(([key, items]) => {
+      const sortedTurns = [...items].sort((a, b) => {
+        if (b.turn_index !== a.turn_index) return b.turn_index - a.turn_index;
+        return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+      });
+      return {
+        thread_id: key,
+        latest_at: sortedTurns[0]?.created_at ?? "",
+        turns: sortedTurns
+      };
+    });
+
+    return groups.sort((a, b) => new Date(b.latest_at).getTime() - new Date(a.latest_at).getTime());
+  }, [history]);
   const nodePositionClass: Record<AgentId, string> = {
     A: "magi-node-a",
     B: "magi-node-b",
@@ -296,6 +343,28 @@ export default function HomePage() {
   useEffect(() => {
     void fetchHistory();
   }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const rawNames = window.localStorage.getItem("magi_thread_names");
+      const rawCollapsed = window.localStorage.getItem("magi_thread_collapsed");
+      if (rawNames) setThreadNames(JSON.parse(rawNames) as ThreadNameMap);
+      if (rawCollapsed) setCollapsedThreads(JSON.parse(rawCollapsed) as ThreadCollapsedMap);
+    } catch {
+      // ignore storage parse error
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem("magi_thread_names", JSON.stringify(threadNames));
+  }, [threadNames]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem("magi_thread_collapsed", JSON.stringify(collapsedThreads));
+  }, [collapsedThreads]);
 
   useEffect(() => {
     return () => {
@@ -367,7 +436,12 @@ export default function HomePage() {
         headers: {
           "Content-Type": "application/json"
         },
-        body: JSON.stringify({ prompt: trimmedPrompt, profile: selectedProfile, fresh_mode: freshMode })
+        body: JSON.stringify({
+          prompt: trimmedPrompt,
+          profile: selectedProfile,
+          fresh_mode: freshMode,
+          thread_id: threadId || undefined
+        })
       });
 
       const data = (await response.json()) as RunResponse | { detail?: string };
@@ -391,7 +465,13 @@ export default function HomePage() {
         headers: {
           "Content-Type": "application/json"
         },
-        body: JSON.stringify({ prompt: trimmedPrompt, agent, profile: selectedProfile, fresh_mode: freshMode })
+        body: JSON.stringify({
+          prompt: trimmedPrompt,
+          agent,
+          profile: selectedProfile,
+          fresh_mode: freshMode,
+          thread_id: threadId || undefined
+        })
       });
 
       const data = (await response.json()) as RetryResponse | { detail?: string };
@@ -415,7 +495,13 @@ export default function HomePage() {
         headers: {
           "Content-Type": "application/json"
         },
-        body: JSON.stringify({ prompt: trimmedPrompt, results: latestResults, profile: selectedProfile, fresh_mode: freshMode })
+        body: JSON.stringify({
+          prompt: trimmedPrompt,
+          results: latestResults,
+          profile: selectedProfile,
+          fresh_mode: freshMode,
+          thread_id: threadId || undefined
+        })
       });
 
       const data = (await response.json()) as ConsensusResponse | { detail?: string };
@@ -464,6 +550,8 @@ export default function HomePage() {
         return;
       }
       setRunId(success.run_id);
+      setThreadId(success.thread_id || threadId || success.run_id);
+      setTurnIndex(success.turn_index || turnIndex);
       setSelectedProfile(success.profile);
       setResults(success.results);
       setConsensus(success.consensus);
@@ -508,6 +596,8 @@ export default function HomePage() {
       }
 
       setRunId(retried.run_id);
+      setThreadId(retried.thread_id || threadId || retried.run_id);
+      if ((retried.turn_index ?? 0) > 0) setTurnIndex(retried.turn_index);
       setSelectedProfile(retried.profile);
       setConsensus({
         provider: consensus?.provider ?? "-",
@@ -527,6 +617,8 @@ export default function HomePage() {
       setResults(updatedResults);
       const recalculated = await requestConsensus(lastRunPrompt, updatedResults);
       if (recalculated) {
+        setThreadId(recalculated.thread_id || threadId || recalculated.run_id);
+        if ((recalculated.turn_index ?? 0) > 0) setTurnIndex(recalculated.turn_index);
         setSelectedProfile(recalculated.profile);
         setConsensus(recalculated.consensus);
         runNodeTransition(updatedResults, recalculated.consensus.status);
@@ -550,6 +642,8 @@ export default function HomePage() {
     setPrompt(item.prompt);
     setLastRunPrompt(item.prompt);
     setRunId(item.run_id);
+    setThreadId(item.thread_id || item.run_id);
+    setTurnIndex(item.turn_index || 0);
     setSelectedProfile(item.profile);
     setResults(item.results);
     setConsensus(item.consensus);
@@ -563,12 +657,82 @@ export default function HomePage() {
     clearNodeTimers();
     setError("");
     setRunId("");
+    setThreadId("");
+    setTurnIndex(0);
     setPrompt("");
     setLastRunPrompt("");
     setResults([]);
     setConsensus(null);
     setNodeStates({ A: "IDLE", B: "IDLE", C: "IDLE" });
     setShowConclusion(false);
+  }
+
+  function threadLabel(threadKey: string): string {
+    const custom = (threadNames[threadKey] ?? "").trim();
+    if (custom) return custom;
+    return `Thread ${threadKey.slice(0, 8)}`;
+  }
+
+  function beginRenameThread(threadKey: string) {
+    setEditingThreadId(threadKey);
+    setThreadNameDraft(threadNames[threadKey] ?? "");
+  }
+
+  function cancelRenameThread() {
+    setEditingThreadId(null);
+    setThreadNameDraft("");
+  }
+
+  function saveRenameThread(threadKey: string) {
+    const next = threadNameDraft.trim();
+    setThreadNames((prev) => {
+      const copy = { ...prev };
+      if (!next) {
+        delete copy[threadKey];
+      } else {
+        copy[threadKey] = next;
+      }
+      return copy;
+    });
+    setEditingThreadId(null);
+    setThreadNameDraft("");
+  }
+
+  function toggleThreadCollapse(threadKey: string) {
+    setCollapsedThreads((prev) => ({ ...prev, [threadKey]: !prev[threadKey] }));
+  }
+
+  async function deleteThread(threadKey: string) {
+    if (isLoading) return;
+    try {
+      const response = await fetch(`${apiBaseUrl}/api/magi/history/thread/${encodeURIComponent(threadKey)}`, {
+        method: "DELETE"
+      });
+      if (!response.ok) {
+        const data = (await response.json()) as { detail?: string };
+        setError(data.detail ?? "failed to delete thread");
+        return;
+      }
+
+      setHistory((prev) => prev.filter((item) => (item.thread_id || item.run_id) !== threadKey));
+      setThreadNames((prev) => {
+        const copy = { ...prev };
+        delete copy[threadKey];
+        return copy;
+      });
+      setCollapsedThreads((prev) => {
+        const copy = { ...prev };
+        delete copy[threadKey];
+        return copy;
+      });
+      if (threadKey === threadId) {
+        startNewChat();
+      }
+      setConfirmDeleteThreadId(null);
+      setError("");
+    } catch {
+      setError("backend connection failed");
+    }
   }
 
   return (
@@ -583,27 +747,131 @@ export default function HomePage() {
           >
             Start New Chat
           </button>
-          <p className="mt-3 text-xs font-semibold text-terminal-dim">Run history</p>
+          <p className="mt-3 text-xs font-semibold text-terminal-dim">Threads</p>
           <div className="mt-2 space-y-2">
-            {history.length ? (
-              history.map((item) => {
-                const statusSummary = item.results
-                  .map((result) => `${result.agent}:${result.status}`)
-                  .join(" ");
-                return (
-                  <button
-                    key={item.run_id}
-                    type="button"
-                    onClick={() => restoreHistory(item)}
-                    className="w-full rounded border border-terminal-border px-2 py-2 text-left text-xs text-terminal-dim hover:border-terminal-accent hover:text-terminal-text"
-                  >
-                    <p>{new Date(item.created_at).toLocaleString()}</p>
-                    <p>mode: {item.profile}</p>
-                    <p>status: {statusSummary}</p>
-                    <p className="truncate">prompt: {item.prompt}</p>
-                  </button>
-                );
-              })
+            {threadGroups.length ? (
+              threadGroups.map((group) => (
+                <div
+                  key={group.thread_id}
+                  className={`rounded border px-2 py-2 transition-colors ${
+                    group.thread_id === threadId
+                      ? "border-terminal-accent bg-[#091015]"
+                      : "border-terminal-border bg-[#060a0f]"
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0 flex-1">
+                      {editingThreadId === group.thread_id ? (
+                        <div className="flex items-center gap-1">
+                          <input
+                            value={threadNameDraft}
+                            onChange={(event) => setThreadNameDraft(event.target.value)}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter") saveRenameThread(group.thread_id);
+                              if (event.key === "Escape") cancelRenameThread();
+                            }}
+                            className="w-full rounded border border-terminal-accent bg-[#02060b] px-2 py-1 text-[11px] text-terminal-text outline-none"
+                            maxLength={64}
+                            autoFocus
+                          />
+                          <button
+                            type="button"
+                            onClick={() => saveRenameThread(group.thread_id)}
+                            className="rounded border border-terminal-accent px-1.5 py-0.5 text-[10px] text-terminal-accent"
+                          >
+                            Save
+                          </button>
+                          <button
+                            type="button"
+                            onClick={cancelRenameThread}
+                            className="rounded border border-terminal-border px-1.5 py-0.5 text-[10px] text-terminal-dim"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      ) : (
+                        <p className="truncate text-[11px] font-semibold text-terminal-text">
+                          {threadLabel(group.thread_id)}
+                        </p>
+                      )}
+                      <p className="text-[11px] text-terminal-dim">{group.turns.length} turns</p>
+                    </div>
+                    <div className="flex items-center gap-1 pl-1">
+                      <button
+                        type="button"
+                        onClick={() => toggleThreadCollapse(group.thread_id)}
+                        title={collapsedThreads[group.thread_id] ? "Expand thread" : "Fold thread"}
+                        className="rounded border border-terminal-border px-1.5 py-0.5 text-[10px] text-terminal-dim hover:border-terminal-accent hover:text-terminal-text"
+                      >
+                        {collapsedThreads[group.thread_id] ? ">" : "v"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => beginRenameThread(group.thread_id)}
+                        title="Rename thread"
+                        className="rounded border border-terminal-border px-1.5 py-0.5 text-[10px] text-terminal-dim hover:border-terminal-accent hover:text-terminal-text"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setConfirmDeleteThreadId((prev) => (prev === group.thread_id ? null : group.thread_id))
+                        }
+                        title="Delete thread"
+                        className="rounded border border-terminal-err px-1.5 py-0.5 text-[10px] text-terminal-err hover:opacity-90"
+                      >
+                        Del
+                      </button>
+                    </div>
+                  </div>
+
+                  <p className="mt-1 text-[11px] text-terminal-dim">id: {group.thread_id}</p>
+                  <p className="text-[11px] text-terminal-dim">updated: {group.latest_at ? new Date(group.latest_at).toLocaleString() : "-"}</p>
+
+                  {confirmDeleteThreadId === group.thread_id ? (
+                    <div className="mt-2 rounded border border-terminal-err bg-[#160a0a] p-2 text-[11px]">
+                      <p className="text-terminal-err">Delete this thread permanently?</p>
+                      <div className="mt-1 flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => void deleteThread(group.thread_id)}
+                          className="rounded border border-terminal-err px-2 py-0.5 text-[10px] text-terminal-err"
+                        >
+                          Confirm delete
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setConfirmDeleteThreadId(null)}
+                          className="rounded border border-terminal-border px-2 py-0.5 text-[10px] text-terminal-dim"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  <div className={`mt-2 space-y-1 ${collapsedThreads[group.thread_id] ? "hidden" : ""}`}>
+                    {group.turns.map((item) => {
+                      const statusSummary = item.results.map((result) => `${result.agent}:${result.status}`).join(" ");
+                      return (
+                        <button
+                          key={item.run_id}
+                          type="button"
+                          onClick={() => restoreHistory(item)}
+                          className="w-full rounded border border-terminal-border bg-[#02060b] px-2 py-2 text-left text-xs text-terminal-dim transition-colors hover:border-terminal-accent hover:text-terminal-text"
+                        >
+                          <p>{new Date(item.created_at).toLocaleString()}</p>
+                          <p>turn: {item.turn_index}</p>
+                          <p>mode: {item.profile}</p>
+                          <p>status: {statusSummary}</p>
+                          <p className="truncate">prompt: {item.prompt}</p>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))
             ) : (
               <p className="text-xs text-terminal-dim">No history yet.</p>
             )}
@@ -735,6 +1003,8 @@ export default function HomePage() {
 
         <div className="mt-4 flex items-center gap-2 text-xs text-terminal-dim">
           <span>run_id: {runId || "-"}</span>
+          <span>thread_id: {threadId || "-"}</span>
+          <span>turn: {turnIndex > 0 ? turnIndex : "-"}</span>
           <span>mode: {selectedProfile}</span>
           <span>fresh: {freshMode ? "on" : "off"}</span>
           <button

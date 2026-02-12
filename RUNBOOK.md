@@ -56,6 +56,12 @@ History API:
 Invoke-RestMethod -Method Get http://localhost:8000/api/magi/history?limit=5&offset=0 | ConvertTo-Json -Depth 6
 ```
 
+Thread delete API:
+
+```powershell
+Invoke-RestMethod -Method Delete http://localhost:8000/api/magi/history/thread/<thread_id>
+```
+
 ## Next.js Cache Recovery
 
 Use when dev server shows module/chunk inconsistencies (e.g. missing `_document`, missing chunk files).

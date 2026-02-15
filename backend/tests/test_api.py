@@ -86,16 +86,6 @@ def test_run_returns_partial_failure_without_failing_request(monkeypatch) -> Non
         )
 
     monkeypatch.setattr(main, "_run_single_agent", fake_runner)
-    async def fake_consensus(config_obj, prompt, results):
-        return main.ConsensusResult(
-            provider=config_obj.consensus.provider or "magi",
-            model=config_obj.consensus.model or "peer_vote_v1",
-            text="consensus-ok",
-            status="OK",
-            latency_ms=99,
-        )
-
-    monkeypatch.setattr(main, "_run_consensus", fake_consensus)
 
     response = client.post("/api/magi/run", json={"prompt": "hello", "profile": "performance"})
     assert response.status_code == 200
@@ -110,8 +100,8 @@ def test_run_returns_partial_failure_without_failing_request(monkeypatch) -> Non
     assert by_agent["B"]["status"] == "ERROR"
     assert by_agent["B"]["error_message"] == "provider request failed"
     assert by_agent["C"]["status"] == "OK"
-    assert body["consensus"]["status"] == "OK"
-    assert body["consensus"]["text"] == "consensus-ok"
+    assert body["consensus"]["status"] == "LOADING"
+    assert body["consensus"]["text"] == ""
 
 
 def test_retry_rejects_empty_prompt() -> None:
@@ -207,6 +197,53 @@ def test_consensus_endpoint_recalculates(monkeypatch) -> None:
     assert body["consensus"]["text"] == "recalc-consensus"
 
 
+def test_consensus_endpoint_updates_saved_run(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("MAGI_DB_PATH", str(tmp_path / "magi-consensus-update.db"))
+    main._init_db()
+    monkeypatch.setattr(main, "load_config", _profiled_config)
+
+    ok_results = [
+        main.AgentResult(agent="A", provider="openai", model="m1", text="a", status="OK", latency_ms=10),
+        main.AgentResult(agent="B", provider="anthropic", model="m2", text="b", status="OK", latency_ms=10),
+        main.AgentResult(agent="C", provider="gemini", model="m3", text="c", status="OK", latency_ms=10),
+    ]
+    pending = main.ConsensusResult(provider="magi", model="peer_vote_r1", text="", status="LOADING", latency_ms=0)
+    main._save_run_history("run-update", "cost", "hello", ok_results, pending, thread_id="thread-x", turn_index=3)
+
+    async def fake_consensus(config_obj, prompt, results):
+        return main.ConsensusResult(
+            provider="magi",
+            model="peer_vote_r1",
+            text="finalized-consensus",
+            status="OK",
+            latency_ms=44,
+        )
+
+    monkeypatch.setattr(main, "_run_consensus", fake_consensus)
+
+    response = client.post(
+        "/api/magi/consensus",
+        json={
+            "run_id": "run-update",
+            "prompt": "hello",
+            "profile": "cost",
+            "results": [item.model_dump() for item in ok_results],
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["run_id"] == "run-update"
+    assert body["thread_id"] == "thread-x"
+    assert body["turn_index"] == 3
+    assert body["consensus"]["status"] == "OK"
+
+    item_response = client.get("/api/magi/history/run-update")
+    assert item_response.status_code == 200
+    item = item_response.json()
+    assert item["consensus"]["status"] == "OK"
+    assert item["consensus"]["text"] == "finalized-consensus"
+
+
 def test_history_list_and_get_item(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("MAGI_DB_PATH", str(tmp_path / "magi-test.db"))
     main._init_db()
@@ -222,17 +259,7 @@ def test_history_list_and_get_item(monkeypatch, tmp_path) -> None:
             latency_ms=111,
         )
 
-    async def fake_consensus(config_obj, prompt, results):
-        return main.ConsensusResult(
-            provider="magi",
-            model="peer_vote_v1",
-            text="consensus-ok",
-            status="OK",
-            latency_ms=55,
-        )
-
     monkeypatch.setattr(main, "_run_single_agent", fake_runner)
-    monkeypatch.setattr(main, "_run_consensus", fake_consensus)
 
     run_response = client.post("/api/magi/run", json={"prompt": "persist me", "profile": "cost"})
     assert run_response.status_code == 200
@@ -254,7 +281,7 @@ def test_history_list_and_get_item(monkeypatch, tmp_path) -> None:
     assert item_body["run_id"] == run_id
     assert isinstance(item_body["thread_id"], str) and item_body["thread_id"]
     assert int(item_body["turn_index"]) >= 1
-    assert item_body["consensus"]["status"] == "OK"
+    assert item_body["consensus"]["status"] == "LOADING"
     assert len(item_body["results"]) == 3
 
 
@@ -272,11 +299,7 @@ def test_run_assigns_thread_id_and_turn_index(monkeypatch) -> None:
             latency_ms=100,
         )
 
-    async def fake_consensus(config_obj, prompt, results):
-        return main.ConsensusResult(provider="magi", model="peer_vote_v1", text="ok", status="OK", latency_ms=10)
-
     monkeypatch.setattr(main, "_run_single_agent", fake_runner)
-    monkeypatch.setattr(main, "_run_consensus", fake_consensus)
 
     response = client.post("/api/magi/run", json={"prompt": "hello", "profile": "cost"})
     assert response.status_code == 200
@@ -309,13 +332,9 @@ def test_run_with_same_thread_injects_thread_context(monkeypatch, tmp_path) -> N
             latency_ms=100,
         )
 
-    async def fake_consensus(config_obj, prompt, results):
-        return main.ConsensusResult(provider="magi", model="peer_vote_v1", text="ok", status="OK", latency_ms=10)
-
     monkeypatch.setattr(main, "_build_effective_prompt", fake_effective)
     monkeypatch.setattr(main, "_build_prompt_with_history", fake_history)
     monkeypatch.setattr(main, "_run_single_agent", fake_runner)
-    monkeypatch.setattr(main, "_run_consensus", fake_consensus)
 
     first = client.post("/api/magi/run", json={"prompt": "What is Auth.js?", "profile": "cost"})
     assert first.status_code == 200
@@ -452,23 +471,12 @@ def test_run_with_fresh_mode_uses_effective_prompt(monkeypatch) -> None:
             latency_ms=100,
         )
 
-    async def fake_consensus(config_obj, prompt, results):
-        assert prompt.startswith("fresh::")
-        return main.ConsensusResult(
-            provider="magi",
-            model="peer_vote_v1",
-            text="consensus-ok",
-            status="OK",
-            latency_ms=10,
-        )
-
     monkeypatch.setattr(main, "_build_effective_prompt", fake_effective)
     monkeypatch.setattr(main, "_run_single_agent", fake_runner)
-    monkeypatch.setattr(main, "_run_consensus", fake_consensus)
 
     response = client.post("/api/magi/run", json={"prompt": "hello", "profile": "cost", "fresh_mode": True})
     assert response.status_code == 200
-    assert response.json()["consensus"]["status"] == "OK"
+    assert response.json()["consensus"]["status"] == "LOADING"
 
 
 def test_build_effective_prompt_falls_back_without_tavily_key(monkeypatch) -> None:
@@ -574,24 +582,13 @@ def test_run_with_history_context_uses_enriched_prompt(monkeypatch) -> None:
             latency_ms=100,
         )
 
-    async def fake_consensus(config_obj, prompt, results):
-        assert "[Similar Past Runs]" in prompt
-        return main.ConsensusResult(
-            provider="magi",
-            model="peer_vote_v1",
-            text="consensus-ok",
-            status="OK",
-            latency_ms=10,
-        )
-
     monkeypatch.setattr(main, "_build_effective_prompt", fake_effective)
     monkeypatch.setattr(main, "_build_prompt_with_history", fake_history)
     monkeypatch.setattr(main, "_run_single_agent", fake_runner)
-    monkeypatch.setattr(main, "_run_consensus", fake_consensus)
 
     response = client.post("/api/magi/run", json={"prompt": "hello", "profile": "cost"})
     assert response.status_code == 200
-    assert response.json()["consensus"]["status"] == "OK"
+    assert response.json()["consensus"]["status"] == "LOADING"
 
 
 def test_save_run_history_marks_legacy_as_superseded(monkeypatch, tmp_path) -> None:

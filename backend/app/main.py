@@ -116,6 +116,7 @@ class ConsensusRequest(BaseModel):
     profile: str | None = None
     fresh_mode: bool = False
     thread_id: str | None = None
+    run_id: str | None = None
 
 
 class FreshSource(BaseModel):
@@ -129,7 +130,7 @@ class ConsensusResult(BaseModel):
     provider: str
     model: str
     text: str
-    status: Literal["OK", "ERROR"]
+    status: Literal["OK", "ERROR", "LOADING"]
     latency_ms: int
     error_message: str | None = None
 
@@ -1255,6 +1256,43 @@ def _save_run_history(
         _apply_history_deprecations(conn, run_id, prompt, app_config)
 
 
+def _update_run_consensus(run_id: str, consensus: ConsensusResult) -> bool:
+    with _get_db_connection() as conn:
+        result = conn.execute(
+            """
+            UPDATE runs
+            SET consensus_provider = ?,
+                consensus_model = ?,
+                consensus_text = ?,
+                consensus_status = ?,
+                consensus_latency_ms = ?,
+                consensus_error_message = ?
+            WHERE run_id = ?
+            """,
+            (
+                consensus.provider,
+                consensus.model,
+                consensus.text,
+                consensus.status,
+                consensus.latency_ms,
+                consensus.error_message,
+                run_id,
+            ),
+        )
+        return int(result.rowcount or 0) > 0
+
+
+def _get_run_thread_turn(run_id: str) -> tuple[str, int] | None:
+    with _get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT thread_id, turn_index FROM runs WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    return str(row["thread_id"] or run_id), int(row["turn_index"] or 1)
+
+
 def _load_agent_results_map(run_ids: list[str]) -> dict[str, list[AgentResult]]:
     if not run_ids:
         return {}
@@ -1814,6 +1852,23 @@ async def _run_consensus(profile: ProfileConfig, prompt: str, results: list[Agen
     )
 
 
+def _build_pending_consensus(profile: ProfileConfig) -> ConsensusResult:
+    if profile.consensus.strategy == "single_model":
+        provider = profile.consensus.provider or "magi"
+        model = profile.consensus.model or "single_model"
+    else:
+        provider = "magi"
+        model = f"peer_vote_r{max(1, profile.consensus.rounds)}"
+    return ConsensusResult(
+        provider=provider,
+        model=model,
+        text="",
+        status="LOADING",
+        latency_ms=0,
+        error_message=None,
+    )
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -1900,9 +1955,9 @@ async def run_magi(payload: RunRequest) -> RunResponse:
     effective_prompt = await _build_prompt_with_history(prompt, effective_prompt, config)
     tasks = [_run_single_agent(agent, effective_prompt, profile.timeout_seconds) for agent in profile.agents]
     results = await asyncio.gather(*tasks)
-    consensus = await _run_consensus(profile, effective_prompt, results)
     run_id = str(uuid.uuid4())
     turn_index = _next_turn_index(thread_id)
+    consensus = _build_pending_consensus(profile)
     try:
         _save_run_history(
             run_id,
@@ -1953,7 +2008,17 @@ async def retry_agent(payload: RetryRequest) -> RetryResponse:
 @app.post("/api/magi/consensus", response_model=ConsensusResponse)
 async def recalc_consensus(payload: ConsensusRequest) -> ConsensusResponse:
     prompt = _validate_prompt(payload.prompt)
-    thread_id = _normalize_thread_id(payload.thread_id) or str(uuid.uuid4())
+    requested_run_id = payload.run_id.strip() if payload.run_id else None
+    if requested_run_id == "":
+        requested_run_id = None
+
+    stored_thread_turn = _get_run_thread_turn(requested_run_id) if requested_run_id else None
+    thread_id = (
+        _normalize_thread_id(payload.thread_id)
+        or (stored_thread_turn[0] if stored_thread_turn else None)
+        or str(uuid.uuid4())
+    )
+    turn_index = stored_thread_turn[1] if stored_thread_turn else 0
 
     try:
         config = load_config()
@@ -1966,10 +2031,14 @@ async def recalc_consensus(payload: ConsensusRequest) -> ConsensusResponse:
     effective_prompt = await _build_effective_prompt(prompt, payload.fresh_mode)
     effective_prompt = _build_prompt_with_thread_context(effective_prompt, thread_id)
     consensus = await _run_consensus(profile, effective_prompt, payload.results)
+    response_run_id = requested_run_id or str(uuid.uuid4())
+    if requested_run_id and not _update_run_consensus(requested_run_id, consensus):
+        raise HTTPException(status_code=404, detail="run not found")
+
     return ConsensusResponse(
-        run_id=str(uuid.uuid4()),
+        run_id=response_run_id,
         thread_id=thread_id,
-        turn_index=0,
+        turn_index=turn_index,
         profile=profile_name,
         consensus=consensus,
     )

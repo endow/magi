@@ -86,11 +86,11 @@ test("submit with Enter and restore from history", async ({ page }) => {
             { agent: "C", provider: "gemini", model: "gemini-2.5-flash", text: "C-first", status: "OK", latency_ms: 120 }
           ],
           consensus: {
-            provider: "openai",
-            model: "gpt-4.1-mini",
-            text: "consensus-first",
-            status: "OK",
-            latency_ms: 90
+            provider: "magi",
+            model: "peer_vote_r1",
+            text: "",
+            status: "LOADING",
+            latency_ms: 0
           }
         }
       : {
@@ -104,6 +104,43 @@ test("submit with Enter and restore from history", async ({ page }) => {
             { agent: "C", provider: "gemini", model: "gemini-2.5-flash", text: "C-second", status: "OK", latency_ms: 150 }
           ],
           consensus: {
+            provider: "magi",
+            model: "peer_vote_r1",
+            text: "",
+            status: "LOADING",
+            latency_ms: 0
+          }
+        };
+
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(payload)
+    });
+  });
+
+  await page.route("**/api/magi/consensus", async (route) => {
+    const requestBody = route.request().postDataJSON() as { run_id?: string };
+    const payload = requestBody.run_id === "run-1"
+      ? {
+          run_id: "run-1",
+          thread_id: "thread-1",
+          turn_index: 1,
+          profile: "cost",
+          consensus: {
+            provider: "openai",
+            model: "gpt-4.1-mini",
+            text: "consensus-first",
+            status: "OK",
+            latency_ms: 90
+          }
+        }
+      : {
+          run_id: "run-2",
+          thread_id: "thread-1",
+          turn_index: 2,
+          profile: "cost",
+          consensus: {
             provider: "openai",
             model: "gpt-4.1-mini",
             text: "consensus-second",
@@ -111,7 +148,6 @@ test("submit with Enter and restore from history", async ({ page }) => {
             latency_ms: 95
           }
         };
-
     await route.fulfill({
       status: 200,
       contentType: "application/json",

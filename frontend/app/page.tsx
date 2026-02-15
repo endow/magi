@@ -205,6 +205,7 @@ export default function HomePage() {
   const [confirmDeleteThreadId, setConfirmDeleteThreadId] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [isConsensusLoading, setIsConsensusLoading] = useState(false);
   const [nodeStates, setNodeStates] = useState<Record<AgentId, NodeState>>({
     A: "IDLE",
     B: "IDLE",
@@ -212,6 +213,7 @@ export default function HomePage() {
   });
   const [showConclusion, setShowConclusion] = useState(false);
   const [freshMode, setFreshMode] = useState(false);
+  const isBusy = isLoading || isConsensusLoading;
   const isStrictDebate = selectedProfile === "performance" || selectedProfile === "ultra";
   const isUltra = selectedProfile === "ultra";
   const chamberRef = useRef<HTMLDivElement | null>(null);
@@ -487,7 +489,11 @@ export default function HomePage() {
     return null;
   }
 
-  async function requestConsensus(trimmedPrompt: string, latestResults: AgentResult[]): Promise<ConsensusResponse | null> {
+  async function requestConsensus(
+    trimmedPrompt: string,
+    latestResults: AgentResult[],
+    options?: { runId?: string; threadId?: string; profile?: string; freshMode?: boolean }
+  ): Promise<ConsensusResponse | null> {
     try {
       const response = await fetch(`${apiBaseUrl}/api/magi/consensus`, {
         method: "POST",
@@ -497,9 +503,10 @@ export default function HomePage() {
         body: JSON.stringify({
           prompt: trimmedPrompt,
           results: latestResults,
-          profile: selectedProfile,
-          fresh_mode: freshMode,
-          thread_id: threadId || undefined
+          profile: options?.profile ?? selectedProfile,
+          fresh_mode: options?.freshMode ?? freshMode,
+          thread_id: options?.threadId ?? (threadId || undefined),
+          run_id: options?.runId
         })
       });
 
@@ -518,6 +525,7 @@ export default function HomePage() {
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (isBusy) return;
     const trimmed = prompt.trim();
     const validationError = validatePrompt(trimmed);
 
@@ -529,6 +537,7 @@ export default function HomePage() {
     setError("");
     setRunId("");
     setIsLoading(true);
+    setIsConsensusLoading(false);
     clearNodeTimers();
     setShowConclusion(false);
     setNodeStates({ A: "BLINK", B: "BLINK", C: "BLINK" });
@@ -556,6 +565,31 @@ export default function HomePage() {
       setConsensus(success.consensus);
       runNodeTransition(success.results, success.consensus.status);
       await fetchHistory();
+
+      if (success.consensus.status !== "LOADING") {
+        return;
+      }
+
+      setIsConsensusLoading(true);
+      try {
+        const finalized = await requestConsensus(trimmed, success.results, {
+          runId: success.run_id,
+          threadId: success.thread_id,
+          profile: success.profile,
+          freshMode
+        });
+        if (!finalized || finalized.run_id !== success.run_id) {
+          return;
+        }
+        setThreadId(finalized.thread_id || success.thread_id);
+        if ((finalized.turn_index ?? 0) > 0) setTurnIndex(finalized.turn_index);
+        setSelectedProfile(finalized.profile);
+        setConsensus(finalized.consensus);
+        runNodeTransition(success.results, finalized.consensus.status);
+        await fetchHistory();
+      } finally {
+        setIsConsensusLoading(false);
+      }
     } finally {
       setIsLoading(false);
     }
@@ -580,7 +614,7 @@ export default function HomePage() {
   }
 
   async function retryAgent(agent: AgentId) {
-    if (!lastRunPrompt || isLoading) return;
+    if (!lastRunPrompt || isBusy) return;
     setError("");
     setIsLoading(true);
     clearNodeTimers();
@@ -636,7 +670,7 @@ export default function HomePage() {
   }
 
   function restoreHistory(item: RunHistoryItem) {
-    if (isLoading) return;
+    if (isBusy) return;
     setError("");
     setPrompt(item.prompt);
     setLastRunPrompt(item.prompt);
@@ -652,7 +686,7 @@ export default function HomePage() {
   }
 
   function startNewChat() {
-    if (isLoading) return;
+    if (isBusy) return;
     clearNodeTimers();
     setError("");
     setRunId("");
@@ -702,7 +736,7 @@ export default function HomePage() {
   }
 
   async function deleteThread(threadKey: string) {
-    if (isLoading) return;
+    if (isBusy) return;
     try {
       const response = await fetch(`${apiBaseUrl}/api/magi/history/thread/${encodeURIComponent(threadKey)}`, {
         method: "DELETE"
@@ -741,7 +775,7 @@ export default function HomePage() {
           <button
             type="button"
             onClick={startNewChat}
-            disabled={isLoading}
+            disabled={isBusy}
             className="w-full rounded border border-terminal-accent bg-[#1f120b] px-3 py-2 text-xs font-semibold text-terminal-accent disabled:cursor-not-allowed disabled:opacity-50"
           >
             Start New Chat
@@ -951,10 +985,10 @@ export default function HomePage() {
           <div className="flex items-center gap-3">
             <button
               type="submit"
-              disabled={isLoading}
+              disabled={isBusy}
               className="rounded-md border border-terminal-accent bg-[#0d1d2a] px-4 py-2 text-sm text-terminal-accent disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {isLoading ? "Running..." : "Run MAGI"}
+              {isLoading ? "Running..." : isConsensusLoading ? "Finalizing..." : "Run MAGI"}
             </button>
             <span className="text-xs text-terminal-dim">
               {prompt.length}/{MAX_PROMPT_LENGTH} chars
@@ -965,7 +999,7 @@ export default function HomePage() {
                 className="ml-2 rounded border border-terminal-border bg-[#02060b] px-2 py-1 text-xs"
                 value={selectedProfile}
                 onChange={(event) => setSelectedProfile(event.target.value)}
-                disabled={isLoading}
+                disabled={isBusy}
               >
                 {availableProfiles.map((profile) => (
                   <option key={profile} value={profile}>
@@ -979,7 +1013,7 @@ export default function HomePage() {
                 type="checkbox"
                 checked={freshMode}
                 onChange={(event) => setFreshMode(event.target.checked)}
-                disabled={isLoading}
+                disabled={isBusy}
                 className="h-3.5 w-3.5 accent-terminal-accent"
               />
               fresh mode
@@ -1069,7 +1103,7 @@ export default function HomePage() {
                   <button
                     type="button"
                     onClick={() => copyResultText(result)}
-                    disabled={!result.text || isLoading}
+                    disabled={!result.text || isBusy}
                     className="rounded border border-terminal-border px-2 py-1 text-[11px] disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     Copy
@@ -1078,7 +1112,7 @@ export default function HomePage() {
                     <button
                       type="button"
                       onClick={() => retryAgent(result.agent)}
-                      disabled={isLoading}
+                      disabled={isBusy}
                       className="rounded border border-terminal-err px-2 py-1 text-[11px] text-terminal-err disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       Retry

@@ -100,7 +100,6 @@ function resolveApiBaseUrl(): string {
   }
   return RAW_API_BASE_URL;
 }
-
 const loadingResults: AgentResult[] = [
   { agent: "A", provider: "-", model: "-", text: "Loading...", status: "LOADING", latency_ms: 0 },
   { agent: "B", provider: "-", model: "-", text: "Loading...", status: "LOADING", latency_ms: 0 },
@@ -212,7 +211,7 @@ export default function HomePage() {
     C: "IDLE"
   });
   const [showConclusion, setShowConclusion] = useState(false);
-  const [freshMode, setFreshMode] = useState(true);
+  const [freshMode, setFreshMode] = useState(false);
   const isStrictDebate = selectedProfile === "performance" || selectedProfile === "ultra";
   const isUltra = selectedProfile === "ultra";
   const chamberRef = useRef<HTMLDivElement | null>(null);
@@ -1104,3 +1103,4 @@ export default function HomePage() {
     </main>
   );
 }
+

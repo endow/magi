@@ -479,6 +479,40 @@ def test_run_with_fresh_mode_uses_effective_prompt(monkeypatch) -> None:
     assert response.json()["consensus"]["status"] == "LOADING"
 
 
+def test_run_auto_enables_fresh_mode_for_time_sensitive_prompt(monkeypatch) -> None:
+    monkeypatch.setattr(main, "load_config", _profiled_config)
+    monkeypatch.setattr(main, "_save_run_history", lambda *args, **kwargs: None)
+    monkeypatch.setenv("FRESH_AUTO_MODE", "1")
+
+    async def fake_effective(prompt: str, fresh_mode: bool) -> str:
+        assert fresh_mode is True
+        return f"fresh::{prompt}"
+
+    async def fake_runner(agent_config, prompt, timeout_seconds):
+        assert prompt.startswith("fresh::")
+        return main.AgentResult(
+            agent=agent_config.agent,
+            provider=agent_config.provider,
+            model=agent_config.model,
+            text=f"ok-{agent_config.agent}",
+            status="OK",
+            latency_ms=100,
+        )
+
+    monkeypatch.setattr(main, "_build_effective_prompt", fake_effective)
+    monkeypatch.setattr(main, "_run_single_agent", fake_runner)
+
+    response = client.post("/api/magi/run", json={"prompt": "latest gdp numbers", "profile": "cost", "fresh_mode": False})
+    assert response.status_code == 200
+
+
+def test_resolve_fresh_mode_respects_auto_toggle(monkeypatch) -> None:
+    monkeypatch.setenv("FRESH_AUTO_MODE", "0")
+    assert main._resolve_fresh_mode("latest ai news", False) is False
+    monkeypatch.setenv("FRESH_AUTO_MODE", "1")
+    assert main._resolve_fresh_mode("latest ai news", False) is True
+
+
 def test_build_effective_prompt_falls_back_without_tavily_key(monkeypatch) -> None:
     monkeypatch.delenv("TAVILY_API_KEY", raising=False)
     prompt = "latest policy update"

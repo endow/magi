@@ -339,6 +339,63 @@ def _fresh_primary_topic() -> Literal["general", "news"]:
     return "general"
 
 
+def _fresh_auto_enabled() -> bool:
+    raw = os.getenv("FRESH_AUTO_MODE", "1").strip().lower()
+    return raw not in {"0", "false", "off", "no"}
+
+
+def _is_fresh_sensitive_prompt(prompt: str) -> bool:
+    lowered = prompt.strip().lower()
+    if not lowered:
+        return False
+
+    keywords = (
+        "latest",
+        "today",
+        "current",
+        "now",
+        "as of",
+        "breaking",
+        "news",
+        "price",
+        "stock",
+        "weather",
+        "release date",
+        "version",
+        "速報",
+        "最新",
+        "今日",
+        "現在",
+        "ニュース",
+        "株価",
+        "為替",
+        "価格",
+        "天気",
+        "直近",
+        "アップデート",
+        "リリース",
+    )
+    if any(token in lowered for token in keywords):
+        return True
+
+    if re.search(r"\b(19|20)\d{2}\b", lowered):
+        return True
+    if re.search(r"\b(q[1-4]|fy\d{2,4})\b", lowered):
+        return True
+    return False
+
+
+def _resolve_fresh_mode(prompt: str, requested_fresh_mode: bool) -> bool:
+    if requested_fresh_mode:
+        return True
+    if not _fresh_auto_enabled():
+        return False
+    auto_enabled = _is_fresh_sensitive_prompt(prompt)
+    if auto_enabled:
+        print("[magi] fresh_mode auto-enabled by prompt pattern")
+    return auto_enabled
+
+
 def _cached_fresh_sources(query: str) -> list[FreshSource] | None:
     cached = _FRESH_CACHE.get(query)
     if not cached:
@@ -1940,6 +1997,7 @@ async def delete_thread_history(thread_id: str) -> dict[str, int | str]:
 @app.post("/api/magi/run", response_model=RunResponse)
 async def run_magi(payload: RunRequest) -> RunResponse:
     prompt = _validate_prompt(payload.prompt)
+    fresh_mode = _resolve_fresh_mode(prompt, payload.fresh_mode)
     thread_id = _normalize_thread_id(payload.thread_id) or str(uuid.uuid4())
 
     try:
@@ -1950,7 +2008,7 @@ async def run_magi(payload: RunRequest) -> RunResponse:
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"invalid config: {exc}") from exc
 
-    effective_prompt = await _build_effective_prompt(prompt, payload.fresh_mode)
+    effective_prompt = await _build_effective_prompt(prompt, fresh_mode)
     effective_prompt = _build_prompt_with_thread_context(effective_prompt, thread_id)
     effective_prompt = await _build_prompt_with_history(prompt, effective_prompt, config)
     tasks = [_run_single_agent(agent, effective_prompt, profile.timeout_seconds) for agent in profile.agents]
@@ -1985,6 +2043,7 @@ async def run_magi(payload: RunRequest) -> RunResponse:
 @app.post("/api/magi/retry", response_model=RetryResponse)
 async def retry_agent(payload: RetryRequest) -> RetryResponse:
     prompt = _validate_prompt(payload.prompt)
+    fresh_mode = _resolve_fresh_mode(prompt, payload.fresh_mode)
     thread_id = _normalize_thread_id(payload.thread_id) or str(uuid.uuid4())
 
     try:
@@ -1999,7 +2058,7 @@ async def retry_agent(payload: RetryRequest) -> RetryResponse:
     if target_agent is None:
         raise HTTPException(status_code=400, detail=f"agent {payload.agent} is not configured")
 
-    effective_prompt = await _build_effective_prompt(prompt, payload.fresh_mode)
+    effective_prompt = await _build_effective_prompt(prompt, fresh_mode)
     effective_prompt = _build_prompt_with_thread_context(effective_prompt, thread_id)
     result = await _run_single_agent(target_agent, effective_prompt, profile.timeout_seconds)
     return RetryResponse(run_id=str(uuid.uuid4()), thread_id=thread_id, turn_index=0, profile=profile_name, result=result)
@@ -2008,6 +2067,7 @@ async def retry_agent(payload: RetryRequest) -> RetryResponse:
 @app.post("/api/magi/consensus", response_model=ConsensusResponse)
 async def recalc_consensus(payload: ConsensusRequest) -> ConsensusResponse:
     prompt = _validate_prompt(payload.prompt)
+    fresh_mode = _resolve_fresh_mode(prompt, payload.fresh_mode)
     requested_run_id = payload.run_id.strip() if payload.run_id else None
     if requested_run_id == "":
         requested_run_id = None
@@ -2028,7 +2088,7 @@ async def recalc_consensus(payload: ConsensusRequest) -> ConsensusResponse:
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"invalid config: {exc}") from exc
 
-    effective_prompt = await _build_effective_prompt(prompt, payload.fresh_mode)
+    effective_prompt = await _build_effective_prompt(prompt, fresh_mode)
     effective_prompt = _build_prompt_with_thread_context(effective_prompt, thread_id)
     consensus = await _run_consensus(profile, effective_prompt, payload.results)
     response_run_id = requested_run_id or str(uuid.uuid4())

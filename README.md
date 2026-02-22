@@ -1,22 +1,22 @@
-# MAGI v0.9 (Local Use)
+# MAGI v1.0（ローカル利用）
 
-One prompt goes to three LLMs in parallel and the outputs are displayed side-by-side.
+1つのプロンプトを3つのLLMへ並列送信し、回答を横並びで表示します。
 
-## Structure
+## 構成
 
 - `backend/`: FastAPI + LiteLLM
-- `frontend/`: Next.js (App Router) + Tailwind CSS
-- `SPEC.md`: implementation spec
-- `AGENTS.md`: coding-agent working rules
-- `RUNBOOK.md`: operational commands and troubleshooting
+- `frontend/`: Next.js（App Router）+ Tailwind CSS
+- `SPEC.md`: 実装仕様
+- `AGENTS.md`: コーディングエージェント向け作業ルール
+- `RUNBOOK.md`: 運用コマンドとトラブルシューティング
 
-## Prerequisites
+## 前提条件
 
 - Python 3.10+
 - Node.js 20+
 - npm 10+
 
-## One-Time Setup
+## 初回セットアップ
 
 ### Backend
 
@@ -39,84 +39,84 @@ copy .env.example .env.local
 copy .env.mcp.example .env.local
 ```
 
-## Local Run
+## ローカル起動
 
-From repository root:
+リポジトリのルートで実行:
 
 ```bash
 .\start-backend.ps1
 ```
 
-Open another terminal:
+別ターミナルで実行:
 
 ```bash
 .\start-frontend.ps1
 ```
 
-URLs:
+URL:
 
 - Frontend: `http://localhost:3000`
 - Backend: `http://localhost:8000`
 - Health: `http://localhost:8000/health`
 
-## Docker Run (FE/BE together)
+## Docker起動（FE/BE同時）
 
-Prerequisites:
+前提:
 
 - Docker Desktop
-- `backend/.env` configured (copy from `backend/.env.example`)
+- `backend/.env` を設定済み（`backend/.env.example` をコピー）
 
-From repository root:
+リポジトリのルートで実行:
 
 ```bash
 docker compose up --build -d
 ```
 
-Note:
+補足:
 - Docker構成には `ollama` が含まれます。
 - 初回起動時は `ollama-pull` が `qwen2.5:7b-instruct-q4_K_M` を取得するため、少し時間がかかります。
 
-Check status:
+状態確認:
 
 ```bash
 docker compose ps
 ```
 
-Stop:
+停止:
 
 ```bash
 docker compose down
 ```
 
-URLs:
+URL:
 
 - Frontend: `http://localhost:3000`
 - Backend: `http://localhost:8000`
 
-## Environment Variables
+## 環境変数
 
 `backend/.env`
 
 - `OPENAI_API_KEY=`
 - `ANTHROPIC_API_KEY=`
-- `GOOGLE_API_KEY=`
-- `TAVILY_API_KEY=` (optional, for Fresh mode web retrieval)
-- `FRESH_MAX_RESULTS=3` (optional, fresh mode安定化向け推奨)
-- `FRESH_CACHE_TTL_SECONDS=1800` (optional)
-- `FRESH_SEARCH_DEPTH=basic` (optional: `basic|advanced`)
-- `FRESH_PRIMARY_TOPIC=general` (optional: `general|news`)
-- `MAGI_DB_PATH=data/magi.db` (optional, Docker/Local 共通推奨)
-- `HISTORY_CONTEXT_ENABLED=1` (optional: `0/false` で無効化)
-- `HISTORY_SIMILARITY_THRESHOLD=0.78` (optional: 0.0-1.0)
-- `HISTORY_SIMILAR_CANDIDATES=120` (optional: 類似検索対象の最新履歴件数)
-- `HISTORY_MAX_REFERENCES=2` (optional: プロンプトに注入する参照履歴数)
-- `HISTORY_FRESHNESS_HALF_LIFE_DAYS=180` (optional: 履歴スコアの鮮度減衰)
-- `HISTORY_STALE_WEIGHT=0.55` (optional: stale 履歴の重み)
-- `HISTORY_SUPERSEDED_WEIGHT=0.20` (optional: superseded 履歴の重み)
+- `GEMINI_API_KEY=`
+- `TAVILY_API_KEY=`（任意、Fresh modeのWeb取得用）
+- `FRESH_MAX_RESULTS=3`（任意、fresh mode安定化向け推奨）
+- `FRESH_CACHE_TTL_SECONDS=1800`（任意）
+- `FRESH_SEARCH_DEPTH=basic`（任意: `basic|advanced`）
+- `FRESH_PRIMARY_TOPIC=general`（任意: `general|news`）
+- `MAGI_DB_PATH=data/magi.db`（任意、Docker/Local 共通推奨）
+- `HISTORY_CONTEXT_ENABLED=1`（任意: `0/false` で無効化）
+- `HISTORY_SIMILARITY_THRESHOLD=0.78`（任意: 0.0-1.0）
+- `HISTORY_SIMILAR_CANDIDATES=120`（任意: 類似検索対象の最新履歴件数）
+- `HISTORY_MAX_REFERENCES=2`（任意: プロンプトに注入する参照履歴数）
+- `HISTORY_FRESHNESS_HALF_LIFE_DAYS=180`（任意: 履歴スコアの鮮度減衰）
+- `HISTORY_STALE_WEIGHT=0.55`（任意: stale 履歴の重み）
+- `HISTORY_SUPERSEDED_WEIGHT=0.20`（任意: superseded 履歴の重み）
 - `history_context` を `backend/config.json` で設定している場合は、`HISTORY_FRESHNESS_HALF_LIFE_DAYS` / `HISTORY_STALE_WEIGHT` / `HISTORY_SUPERSEDED_WEIGHT` より `config.json` 側を優先
-- `THREAD_CONTEXT_ENABLED=1` (optional: `0/false` でスレッド文脈注入を無効化)
-- `THREAD_CONTEXT_MAX_TURNS=6` (optional: 参照する直近ターン数)
-- `OLLAMA_API_BASE=http://ollama:11434` (Docker Compose時の推奨値)
+- `THREAD_CONTEXT_ENABLED=1`（任意: `0/false` でスレッド文脈注入を無効化）
+- `THREAD_CONTEXT_MAX_TURNS=6`（任意: 参照する直近ターン数）
+- `OLLAMA_API_BASE=http://ollama:11434`（Docker Compose時の推奨値）
 
 `frontend/.env.local`
 
@@ -124,11 +124,9 @@ URLs:
 - Docker MCP/コンテナ内ブラウザからアクセスする場合は `NEXT_PUBLIC_API_BASE_URL=http://host.docker.internal:8000` を使用
 - サンプルとして `frontend/.env.mcp.example` を用意（`copy .env.mcp.example .env.local`）
 
-Note: backend maps `GOOGLE_API_KEY` to `GEMINI_API_KEY` for LiteLLM compatibility.
+## モデル設定
 
-## Model Configuration
-
-Edit `backend/config.json` to define profiles and swap models without code changes.
+コード変更なしでプロファイルやモデルを切り替えるには、`backend/config.json` を編集します。
 
 ```json
 {
@@ -198,10 +196,11 @@ Edit `backend/config.json` to define profiles and swap models without code chang
 - `embedding`: 外部埋め込みモデルで類似履歴を検索（失敗時は自動でローカル類似検索へフォールバック）
 - `lexical`: ローカル類似検索のみ
 
-`request_router` (optional):
+`request_router`（任意）:
 - `enabled=true` のとき、`POST /api/magi/run` で `profile` 未指定の場合のみ入口LLMで自動ルーティング
-- 入口LLMは JSON (`intent`, `complexity`, `profile`, `confidence`, `reason`) を返し、`min_confidence` 未満は `default_profile` にフォールバック
+- 入口LLMは JSON (`intent`, `complexity`, `safety`, `execution_tier`, `profile`, `confidence`, `reason`) を返し、`min_confidence` 未満は `router_rules.default_profile` にフォールバック
 - 例: ローカル Ollama で `provider=ollama`, `model=qwen2.5:7b-instruct-q4_K_M`
+- 現行ルール: `translation|rewrite|summarize_short` + `complexity=low` + `safety=low` は `local_only` へ、それ以外は `cost`
 
 履歴の扱い:
 - データは削除せず保持
@@ -210,64 +209,65 @@ Edit `backend/config.json` to define profiles and swap models without code chang
 - `deprecations` の `current_terms` を含む新規実行が入ると、`legacy_terms` を含む過去履歴を `superseded` に更新
 - 現在のサンプルは `nextauth->auth.js`, `pages router->app router`, `react-query->tanstack query` などを含む
 
-## API Notes
+## APIメモ
 
-- Endpoint: `POST /api/magi/run`
-- Request body: `{ "prompt": "...", "profile": "cost|balance|performance|ultra", "fresh_mode": false, "thread_id": "optional-string" }`
-- Run response includes `consensus` (synthesized final answer from peer-vote deliberation)
-- Run response includes `thread_id` and `turn_index`
-- Run responses are persisted to local SQLite history
-- Retry endpoint: `POST /api/magi/retry`
-- Retry body: `{ "prompt": "...", "agent": "A|B|C", "profile": "...", "fresh_mode": false, "thread_id": "optional-string" }`
-- Consensus endpoint: `POST /api/magi/consensus`
-- Consensus body: `{ "prompt": "...", "results": AgentResult[], "profile": "...", "fresh_mode": false, "thread_id": "optional-string" }`
-- Profiles endpoint: `GET /api/magi/profiles`
-- History list endpoint: `GET /api/magi/history?limit=20&offset=0`
-- History detail endpoint: `GET /api/magi/history/{run_id}`
-- History thread delete endpoint: `DELETE /api/magi/history/thread/{thread_id}`
-- For same `thread_id`, backend injects thread memory into effective prompt; latest turn is injected as a dedicated `[High Priority Latest Turn]` block.
-- Empty prompt or over 4000 chars returns `400`
-- Per-model timeout: profile config (`backend/config.json`) に従う（現行: cost 25s / balance 35s / performance 45s / ultra 60s）
-- Partial failure is allowed (`status: ERROR`)
-- Backend returns `run_id` as UUID
+- エンドポイント: `POST /api/magi/run`
+- リクエストボディ: `{ "prompt": "...", "profile": "optional: cost|balance|performance|ultra|local_only", "fresh_mode": false, "thread_id": "optional-string" }`
+- `profile` 未指定の場合、backend router が実行されます（UIの `auto (unset)`）
+- Runレスポンスには `consensus`（3者合議で合成された最終回答）が含まれます
+- Runレスポンスには `thread_id` と `turn_index` が含まれます
+- RunレスポンスはローカルSQLite履歴へ保存されます
+- Retryエンドポイント: `POST /api/magi/retry`
+- Retryボディ: `{ "prompt": "...", "agent": "A|B|C", "profile": "...", "fresh_mode": false, "thread_id": "optional-string" }`
+- Consensusエンドポイント: `POST /api/magi/consensus`
+- Consensusボディ: `{ "prompt": "...", "results": AgentResult[], "profile": "...", "fresh_mode": false, "thread_id": "optional-string" }`
+- Profilesエンドポイント: `GET /api/magi/profiles`
+- 履歴一覧エンドポイント: `GET /api/magi/history?limit=20&offset=0`
+- 履歴詳細エンドポイント: `GET /api/magi/history/{run_id}`
+- スレッド削除エンドポイント: `DELETE /api/magi/history/thread/{thread_id}`
+- 同一 `thread_id` の場合、backend はスレッド文脈を有効プロンプトに注入し、最新ターンを専用の `[High Priority Latest Turn]` ブロックとして優先注入します
+- 空プロンプトまたは4000文字超過は `400` を返します
+- モデルごとのタイムアウトは profile 設定（`backend/config.json`）に従います（現行: local_only 20s / cost 25s / balance 25s / performance 35s / ultra 45s）
+- 部分失敗は許容されます（`status: ERROR`）
+- Backend は `run_id` を UUID で返します
 
-## Current UI Features
+## 現在のUI機能
 
-- Enter to submit (`Shift+Enter` for newline)
-- Prompt character counter (`0/4000`)
-- 3-column result cards with:
+- Enterで送信（`Shift+Enter` で改行）
+- プロンプト文字数カウンター（`0/4000`）
+- 3カラムの結果カード表示:
   - status
   - model id
   - latency
   - response text
-- Per-card actions:
-  - `Copy` response text
-  - `Retry` failed card
-- Consensus panel:
-  - shown before the 3 result cards
-  - shows synthesized conclusion from multi-agent deliberation
-  - supports `OK/ERROR` status and latency display
-- Profile selector:
-  - choose `cost`, `balance`, `performance`, `ultra`
-  - selected profile is sent on run/retry/consensus
-  - default profile is `balance` (from `backend/config.json`)
-  - `performance` and `ultra` enable strict debate consensus (requires concrete cross-agent criticisms)
-  - UI shows a `strict debate` badge when `performance` or `ultra` is selected
-  - UI shows a `high cost` badge when `ultra` is selected
-- Fresh mode toggle:
-  - default is ON
-  - when ON, backend retrieves recent web evidence via Tavily (if `TAVILY_API_KEY` is configured)
-  - retrieval uses multi-attempt fallback (`general/news` + query expansion) for non-news topics like game guides
-  - if Tavily is unavailable or key is missing, it falls back to normal prompt automatically
-- Run history panel (persisted in backend SQLite)
-- `run_id` display and copy button
-- `thread_id` display（同一チャットで継続）
-- Thread panel supports grouped turns per thread
-- Thread actions are modernized: inline `Rename`, icon-style `Fold/Expand`, and confirmation-based `Delete`
+- カードごとの操作:
+  - `Copy`（回答テキストのコピー）
+  - `Retry`（失敗カードの再実行）
+- Consensusパネル:
+  - 3つの結果カードより先に表示
+  - 3者合議の最終結論を表示
+  - `OK/ERROR` と latency 表示に対応
+- Profileセレクター:
+  - `auto (unset)`, `local_only`, `cost`, `balance`, `performance`, `ultra` を選択可能
+  - デフォルトは `auto (unset)`。初回実行は `profile` を省略し backend routing を使用
+  - 選択した profile は run/retry/consensus に送信
+  - `performance` と `ultra` は strict debate consensus（具体的な相互批判が必要）を有効化
+  - `performance` / `ultra` 選択時は `strict debate` バッジを表示
+  - `ultra` 選択時は `high cost` バッジを表示
+- Fresh modeトグル:
+  - デフォルトは ON
+  - ON時は backend が Tavily で最新Web証拠を取得（`TAVILY_API_KEY` 設定時）
+  - `general/news` のフォールバックとクエリ拡張により、非ニュース系（ゲーム攻略など）も取得しやすくする
+  - Tavily が利用不可、またはキー未設定の場合は通常プロンプトへ自動フォールバック
+- Run履歴パネル（backend SQLiteに永続化）
+- `run_id` 表示とコピーボタン
+- `thread_id` 表示（同一チャット継続）
+- スレッド単位でターンをグループ表示
+- スレッド操作を近代化: インライン `Rename`、アイコン風 `Fold/Expand`、確認付き `Delete`
 
-## Troubleshooting (Local)
+## トラブルシューティング（ローカル）
 
-- `localhost:3000 refused to connect`: start frontend (`.\start-frontend.ps1`).
-- `status=ERROR` for one model: verify API key and model name in `backend/config.json`.
-- Anthropic/Gemini errors while others work: usually provider-side quota/credits.
+- `localhost:3000 refused to connect`: frontend を起動（`.\start-frontend.ps1`）
+- 1モデルだけ `status=ERROR`: `backend/config.json` のAPIキーとモデル名を確認
+- Anthropic/Gemini だけ失敗: 多くはプロバイダ側のクォータ/クレジット問題
 - Docker で履歴が消える: `docker-compose.yml` で `./backend/data:/app/data` がマウントされていること、かつ `MAGI_DB_PATH` は未設定または `data/magi.db` を使用する。

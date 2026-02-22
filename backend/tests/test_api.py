@@ -41,6 +41,13 @@ def _profiled_config() -> main.AppConfig:
 
 def _profiled_config_with_router(enabled: bool = True, min_confidence: int = 75) -> main.AppConfig:
     cfg = _profiled_config()
+    cfg.profiles["local_only"] = main.ProfileConfig(
+        agents=[
+            main.AgentConfig(agent="A", provider="ollama", model="qwen2.5:7b-instruct-q4_K_M"),
+        ],
+        consensus=main.ConsensusConfig(strategy="peer_vote", min_ok_results=1, rounds=1),
+        timeout_seconds=20,
+    )
     cfg.request_router = main.RequestRouterConfig(
         enabled=enabled,
         provider="ollama",
@@ -49,17 +56,13 @@ def _profiled_config_with_router(enabled: bool = True, min_confidence: int = 75)
         min_confidence=min_confidence,
     )
     cfg.router_rules = main.RouterRulesConfig(
-        default_profile="balance",
+        default_profile="cost",
         routes=[
             main.RouteRule(
-                when_intents_any=["coding", "analysis", "research"],
-                when_complexity_any=["high"],
-                profile="performance",
-            ),
-            main.RouteRule(
-                when_intents_any=["qa", "creative", "other", "translation"],
-                when_complexity_any=["low", "medium"],
-                profile="cost",
+                when_intents_any=["translation", "rewrite", "summarize_short"],
+                when_complexity_any=["low"],
+                when_safety_any=["low"],
+                profile="local_only",
             ),
         ],
     )
@@ -512,7 +515,7 @@ def test_run_uses_request_router_when_profile_not_provided(monkeypatch) -> None:
     monkeypatch.setattr(main, "_save_run_history", lambda *args, **kwargs: None)
 
     async def fake_route_profile(config, prompt):
-        return "performance"
+        return "local_only"
 
     async def fake_runner(agent_config, prompt, timeout_seconds):
         return main.AgentResult(
@@ -530,7 +533,8 @@ def test_run_uses_request_router_when_profile_not_provided(monkeypatch) -> None:
     response = client.post("/api/magi/run", json={"prompt": "deep architecture review"})
     assert response.status_code == 200
     body = response.json()
-    assert body["profile"] == "performance"
+    assert body["profile"] == "local_only"
+    assert len(body["results"]) == 1
 
 
 def test_run_skips_request_router_when_profile_is_explicit(monkeypatch) -> None:
@@ -561,12 +565,223 @@ def test_run_skips_request_router_when_profile_is_explicit(monkeypatch) -> None:
 def test_route_profile_falls_back_when_confidence_is_low(monkeypatch) -> None:
     config = _profiled_config_with_router(enabled=True, min_confidence=80)
 
-    async def fake_call(full_model: str, prompt: str, timeout_seconds: int):
+    async def fake_call(full_model: str, prompt: str, timeout_seconds: int, max_tokens: int | None = None):
         return '{"intent":"coding","complexity":"high","profile":"performance","confidence":42,"reason":"uncertain"}', 12
 
     monkeypatch.setattr(main, "_call_model_text", fake_call)
     selected = asyncio.run(main._route_profile(config, "refactor this service"))
     assert selected == "cost"
+
+
+def test_route_profile_uses_local_only_for_low_risk_translation(monkeypatch) -> None:
+    config = _profiled_config_with_router(enabled=True, min_confidence=75)
+
+    async def fake_call(full_model: str, prompt: str, timeout_seconds: int, max_tokens: int | None = None):
+        return (
+            '{"intent":"translation","complexity":"low","safety":"low","execution_tier":"local",'
+            '"profile":"cost","confidence":92,"reason":"safe text rewrite"}',
+            10,
+        )
+
+    monkeypatch.setattr(main, "_call_model_text", fake_call)
+    selected = asyncio.run(main._route_profile(config, "日本語の敬語で言い換えて"))
+    assert selected == "local_only"
+
+
+def test_route_profile_fast_path_skips_router_call_for_simple_rewrite(monkeypatch) -> None:
+    config = _profiled_config_with_router(enabled=True, min_confidence=75)
+
+    async def fail_call(*args, **kwargs):
+        raise AssertionError("router llm call should be skipped by fast_path")
+
+    monkeypatch.setattr(main, "_call_model_text", fail_call)
+    selected = asyncio.run(main._route_profile(config, "日本語の敬語で、丁寧に言い換えて"))
+    assert selected == "local_only"
+
+
+def test_run_local_only_skips_history_context(monkeypatch) -> None:
+    monkeypatch.setattr(main, "load_config", lambda: _profiled_config_with_router(enabled=False))
+    monkeypatch.setattr(main, "_save_run_history", lambda *args, **kwargs: None)
+
+    async def fail_history(*args, **kwargs):
+        raise AssertionError("history context should be skipped for local_only")
+
+    def fail_thread_context(*args, **kwargs):
+        raise AssertionError("thread context should be skipped for local_only")
+
+    async def fake_effective(prompt: str, fresh_mode: bool) -> str:
+        return prompt
+
+    async def fake_runner(agent_config, prompt, timeout_seconds):
+        return main.AgentResult(
+            agent=agent_config.agent,
+            provider=agent_config.provider,
+            model=agent_config.model,
+            text="ok-local",
+            status="OK",
+            latency_ms=120,
+        )
+
+    monkeypatch.setattr(main, "_build_effective_prompt", fake_effective)
+    monkeypatch.setattr(main, "_build_prompt_with_history", fail_history)
+    monkeypatch.setattr(main, "_build_prompt_with_thread_context", fail_thread_context)
+    monkeypatch.setattr(main, "_run_single_agent", fake_runner)
+
+    response = client.post("/api/magi/run", json={"prompt": "敬語に言い換えて", "profile": "local_only"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["profile"] == "local_only"
+    assert len(body["results"]) == 1
+    assert body["consensus"]["status"] == "OK"
+    assert body["consensus"]["text"] == "ok-local"
+
+
+def test_run_local_only_normalizes_verbose_rewrite_output(monkeypatch) -> None:
+    monkeypatch.setattr(main, "load_config", lambda: _profiled_config_with_router(enabled=False))
+    monkeypatch.setattr(main, "_save_run_history", lambda *args, **kwargs: None)
+
+    async def fake_effective(prompt: str, fresh_mode: bool) -> str:
+        return prompt
+
+    async def fake_runner(agent_config, prompt, timeout_seconds):
+        return main.AgentResult(
+            agent=agent_config.agent,
+            provider=agent_config.provider,
+            model=agent_config.model,
+            text=(
+                "日本語の敬語で丁寧に言い換えると、"
+                "「明日は伺えません」"
+                "です。"
+            ),
+            status="OK",
+            latency_ms=120,
+        )
+
+    monkeypatch.setattr(main, "_build_effective_prompt", fake_effective)
+    monkeypatch.setattr(main, "_run_single_agent", fake_runner)
+
+    response = client.post("/api/magi/run", json={"prompt": "日本語の敬語で、以下を丁寧に言い換えて：『明日行けない』", "profile": "local_only"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["results"][0]["text"] == "明日は伺えません"
+    assert body["consensus"]["text"] == "明日は伺えません"
+
+
+def test_run_local_only_skips_source_quote_when_normalizing(monkeypatch) -> None:
+    monkeypatch.setattr(main, "load_config", lambda: _profiled_config_with_router(enabled=False))
+    monkeypatch.setattr(main, "_save_run_history", lambda *args, **kwargs: None)
+
+    async def fake_effective(prompt: str, fresh_mode: bool) -> str:
+        return prompt
+
+    async def fake_runner(agent_config, prompt, timeout_seconds):
+        return main.AgentResult(
+            agent=agent_config.agent,
+            provider=agent_config.provider,
+            model=agent_config.model,
+            text=(
+                "丁寧に言い換えると、"
+                "「明日行けない」ではなく"
+                "「明日は伺えません」"
+                "です。"
+            ),
+            status="OK",
+            latency_ms=120,
+        )
+
+    monkeypatch.setattr(main, "_build_effective_prompt", fake_effective)
+    monkeypatch.setattr(main, "_run_single_agent", fake_runner)
+
+    response = client.post("/api/magi/run", json={"prompt": "日本語の敬語で、以下を丁寧に言い換えて：『明日行けない』", "profile": "local_only"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["results"][0]["text"] == "明日は伺えません"
+    assert body["consensus"]["text"] == "明日は伺えません"
+
+
+def test_run_local_only_rewrites_when_output_equals_source(monkeypatch) -> None:
+    monkeypatch.setattr(main, "load_config", lambda: _profiled_config_with_router(enabled=False))
+    monkeypatch.setattr(main, "_save_run_history", lambda *args, **kwargs: None)
+
+    async def fake_effective(prompt: str, fresh_mode: bool) -> str:
+        return prompt
+
+    async def fake_runner(agent_config, prompt, timeout_seconds):
+        return main.AgentResult(
+            agent=agent_config.agent,
+            provider=agent_config.provider,
+            model=agent_config.model,
+            text="明日行けない",
+            status="OK",
+            latency_ms=120,
+        )
+
+    monkeypatch.setattr(main, "_build_effective_prompt", fake_effective)
+    monkeypatch.setattr(main, "_run_single_agent", fake_runner)
+
+    response = client.post("/api/magi/run", json={"prompt": "日本語の敬語で、以下を丁寧に言い換えて：『明日行けない』", "profile": "local_only"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["results"][0]["text"] == "明日は行けません"
+    assert body["consensus"]["text"] == "明日は行けません"
+
+
+def test_run_local_only_rewrites_when_output_is_unstable(monkeypatch) -> None:
+    monkeypatch.setattr(main, "load_config", lambda: _profiled_config_with_router(enabled=False))
+    monkeypatch.setattr(main, "_save_run_history", lambda *args, **kwargs: None)
+
+    async def fake_effective(prompt: str, fresh_mode: bool) -> str:
+        return prompt
+
+    async def fake_runner(agent_config, prompt, timeout_seconds):
+        return main.AgentResult(
+            agent=agent_config.agent,
+            provider=agent_config.provider,
+            model=agent_config.model,
+            text="明日はご同行ができないことがございます。",
+            status="OK",
+            latency_ms=120,
+        )
+
+    monkeypatch.setattr(main, "_build_effective_prompt", fake_effective)
+    monkeypatch.setattr(main, "_run_single_agent", fake_runner)
+
+    response = client.post("/api/magi/run", json={"prompt": "日本語の敬語で、以下を丁寧に言い換えて：『明日行けない』", "profile": "local_only"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["results"][0]["text"] == "明日は行けません"
+    assert body["consensus"]["text"] == "明日は行けません"
+
+
+def test_consensus_local_only_passthrough(monkeypatch) -> None:
+    monkeypatch.setattr(main, "load_config", lambda: _profiled_config_with_router(enabled=False))
+
+    async def fail_consensus(*args, **kwargs):
+        raise AssertionError("local_only should not run consensus deliberation")
+
+    monkeypatch.setattr(main, "_run_consensus", fail_consensus)
+
+    payload = {
+        "prompt": "敬語に言い換えて",
+        "profile": "local_only",
+        "results": [
+            {
+                "agent": "A",
+                "provider": "ollama",
+                "model": "qwen2.5:7b-instruct-q4_K_M",
+                "text": "明日は伺えません。",
+                "status": "OK",
+                "latency_ms": 1111,
+                "error_message": None,
+            }
+        ],
+    }
+    response = client.post("/api/magi/consensus", json=payload)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["profile"] == "local_only"
+    assert body["consensus"]["status"] == "OK"
+    assert body["consensus"]["text"] == "明日は伺えません。"
 
 
 def test_run_auto_enables_fresh_mode_for_time_sensitive_prompt(monkeypatch) -> None:

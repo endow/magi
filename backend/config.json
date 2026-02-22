@@ -8,17 +8,13 @@
     "min_confidence": 75
   },
   "router_rules": {
-    "default_profile": "balance",
+    "default_profile": "cost",
     "routes": [
       {
-        "when_intents_any": ["coding", "analysis", "research"],
-        "when_complexity_any": ["high"],
-        "profile": "performance"
-      },
-      {
-        "when_intents_any": ["creative", "translation", "qa", "other"],
-        "when_complexity_any": ["low", "medium"],
-        "profile": "cost"
+        "when_intents_any": ["translation", "rewrite", "summarize_short"],
+        "when_complexity_any": ["low"],
+        "when_safety_any": ["low"],
+        "profile": "local_only"
       }
     ]
   },
@@ -75,6 +71,17 @@
     ]
   },
   "profiles": {
+    "local_only": {
+      "agents": [
+        { "agent": "A", "provider": "ollama", "model": "qwen2.5:7b-instruct-q4_K_M" }
+      ],
+      "consensus": {
+        "strategy": "peer_vote",
+        "min_ok_results": 1,
+        "rounds": 1
+      },
+      "timeout_seconds": 30
+    },
     "cost": {
       "agents": [
         { "agent": "A", "provider": "openai", "model": "gpt-4o-mini" },

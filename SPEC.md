@@ -1,7 +1,7 @@
-# MAGI v0.9 実装仕様（現行）
+# MAGI v1.0 実装仕様（現行）
 
-あなたはソフトウェア開発エージェントです。  
-MVPから拡張された現行版「MAGI」を実装・維持してください。
+本書は、MVPから拡張された現行版「MAGI」の実装仕様を定義する。  
+実装・改修時は、本仕様を正とする。
 
 ---
 
@@ -9,6 +9,7 @@ MVPから拡張された現行版「MAGI」を実装・維持してください�
 
 - ユーザーが1回プロンプトを入力するだけで、同じ質問を3つのLLMに同時に投げ、3つの回答を並べて見られるようにする。
 - 3モデル回答に加え、合議結果（consensus）を返し、履歴として保存・再参照できるようにする。
+- 軽量・低リスクな文面タスクは `local_only`（ローカル1モデル）で完結させ、必要時のみ3モデル合議へ回す。
 
 ---
 
@@ -21,7 +22,7 @@ MVPから拡張された現行版「MAGI」を実装・維持してください�
 
 ---
 
-## 要件（v0.9）
+## 要件（v1.0）
 
 ### 1) バックエンド
 
@@ -29,7 +30,7 @@ MVPから拡張された現行版「MAGI」を実装・維持してください�
 
 #### リクエスト
 ```json
-{ "prompt": "string", "profile": "cost|balance|performance|ultra", "fresh_mode": false, "thread_id": "optional-string" }
+{ "prompt": "string", "profile": "optional: cost|balance|performance|ultra|local_only", "fresh_mode": false, "thread_id": "optional-string" }
 ```
 
 #### レスポンス（成功時）
@@ -69,9 +70,9 @@ MVPから拡張された現行版「MAGI」を実装・維持してください�
   "consensus": {
     "provider": "magi",
     "model": "peer_vote_r1",
-    "text": "...",
-    "status": "OK",
-    "latency_ms": 1200
+    "text": "",
+    "status": "LOADING",
+    "latency_ms": 0
   }
 }
 ```
@@ -84,11 +85,13 @@ MVPから拡張された現行版「MAGI」を実装・維持してください�
 - **各タスク内で try/except を行い、必ず結果オブジェクトを返す**。
 - 失敗したモデルがあっても全体は落とさない。
 - タイムアウトは **profileごとに `backend/config.json` の `timeout_seconds`** を適用（`asyncio.wait_for`）。
-- 現行設定は `cost: 25s / balance: 35s / performance: 45s / ultra: 60s`。
+- 現行設定は `local_only: 30s / cost: 25s / balance: 25s / performance: 35s / ultra: 45s`。
 - `run_id` はUUIDで毎回発行し、レスポンスに含める（履歴はSQLiteに保存する）。
 - `thread_id` は会話スレッドを識別し、未指定時は新規生成する。
 - 同一 `thread_id` のときは直近ターン文脈をプロンプトに注入し、代名詞参照（「それ」など）に対応する。
-- 3モデルの結果を入力にして、**3モデル同士の相互レビュー＋投票で合議（consensus）** を実行する。
+- ただし `local_only` では thread/history 文脈注入をスキップし、単発処理を優先する。
+- `cost|balance|performance|ultra` は 3モデル結果を入力にして、**3モデル同士の相互レビュー＋投票で合議（consensus）** を実行する。
+- `local_only` では合議再生成を行わず、Agent Aの結果を consensus にパススルーする。
 - 合議が失敗しても全体レスポンスは返し、`consensus.status="ERROR"` を返す。
 
 ---
@@ -102,7 +105,7 @@ MVPから拡張された現行版「MAGI」を実装・維持してください�
 messages = [{"role": "user", "content": prompt}]
 ```
 
-- system メッセージ・temperature等は **v0では指定しない**。
+- system メッセージ・temperature等は指定しない（必要時は仕様変更で明示する）。
 
 #### model文字列の組み立てルール
 
@@ -121,6 +124,24 @@ messages = [{"role": "user", "content": prompt}]
 ```json
 {
   "default_profile": "balance",
+  "request_router": {
+    "enabled": true,
+    "provider": "ollama",
+    "model": "qwen2.5:7b-instruct-q4_K_M",
+    "timeout_seconds": 20,
+    "min_confidence": 75
+  },
+  "router_rules": {
+    "default_profile": "cost",
+    "routes": [
+      {
+        "when_intents_any": ["translation", "rewrite", "summarize_short"],
+        "when_complexity_any": ["low"],
+        "when_safety_any": ["low"],
+        "profile": "local_only"
+      }
+    ]
+  },
   "history_context": {
     "strategy": "embedding|lexical",
     "provider": "openai",
@@ -139,6 +160,7 @@ messages = [{"role": "user", "content": prompt}]
     ]
   },
   "profiles": {
+    "local_only": { "...": "..." },
     "cost": { "...": "..." },
     "balance": { "...": "..." },
     "performance": { "...": "..." },
@@ -148,6 +170,9 @@ messages = [{"role": "user", "content": prompt}]
 ```
 
 - `GET /api/magi/profiles` で利用可能profile一覧を返す。
+- `POST /api/magi/run` で `profile` 未指定時、`request_router.enabled=true` なら入口LLMが分類してprofileを自動選択する。
+- ルーター出力は `intent/complexity/safety/execution_tier/profile/confidence/reason` のJSONを想定し、`confidence < min_confidence` は `router_rules.default_profile` にフォールバックする。
+- `profiles` は **最低1エージェント** を許容する（`local_only` は1エージェント想定）。
 - `history_context.strategy=embedding` の場合、履歴類似検索は外部埋め込みモデルを使う（失敗時は lexical にフォールバック）。
 - 履歴は削除せず保持し、`validity_state(active|stale|superseded)` と鮮度減衰を使って参照重みを調整する。
 - `deprecations` で技術移行ルール（legacy/current）を定義し、current語を含む新規実行時に過去legacy履歴を `superseded` に更新する。
@@ -176,7 +201,7 @@ messages = [{"role": "user", "content": prompt}]
 ```
 OPENAI_API_KEY=
 ANTHROPIC_API_KEY=
-GOOGLE_API_KEY=
+GEMINI_API_KEY=
 TAVILY_API_KEY=
 FRESH_MAX_RESULTS=3
 FRESH_CACHE_TTL_SECONDS=1800
@@ -191,10 +216,8 @@ HISTORY_STALE_WEIGHT=0.55
 HISTORY_SUPERSEDED_WEIGHT=0.20
 THREAD_CONTEXT_ENABLED=1
 THREAD_CONTEXT_MAX_TURNS=6
+OLLAMA_API_BASE=http://ollama:11434
 ```
-
-- geminiでも **GOOGLE_API_KEY** を使用。
-- 実装では互換性のため、`GOOGLE_API_KEY` を `GEMINI_API_KEY` に内部マッピングして利用する。
 
 ---
 
@@ -216,15 +239,17 @@ THREAD_CONTEXT_MAX_TURNS=6
 
 ---
 
-### 合議再計算API（v0.7）
+### 合議再計算API（現行）
 
 - `POST /api/magi/consensus`
 - リクエスト:
   - `prompt`
-  - `results`（A/B/Cの結果配列）
+  - `results`（`AgentResult[]`。通常はA/B/C、`local_only` は1件）
   - `fresh_mode`（true の場合は再検索して最新コンテキストを付与）
 - 用途:
   - フロント側の単体Retry後に、最新結果で合議を再計算するため
+- 備考:
+  - `local_only` では再合議せず、受け取ったAgent結果を consensus として返す
 
 ---
 
@@ -258,7 +283,10 @@ THREAD_CONTEXT_MAX_TURNS=6
 - `Loading...`
 - **run_id表示＋コピー可能**
 - **合議結果は3カラムより先（上部）に表示する**
-- 初期値: profile は `backend/config.json` の `default_profile`（現行: `balance`）、`fresh_mode` は `true`
+- 初期値: profile は **未設定（auto）**、`fresh_mode` は `false`
+- profile未設定（auto）の場合、`POST /api/magi/run` は `profile` を送らずルーター判定に委譲する
+- 上段に `Local LLM` ノードを表示し、下段3ノード（合議グループ）との関係を可視化する
+- `local_only` 完了時は下段3ノードを `skipped` 表示とし、誤解を避ける
 
 ### デザイン
 
@@ -268,44 +296,35 @@ THREAD_CONTEXT_MAX_TURNS=6
 
 ---
 
-## 3) README
-
-- 前提環境
-- 起動手順
-- 構成
-- APIキー
-- 接続先
-- `backend/.env.example` を作成し、必要な環境変数キーを記載
-
----
-
-## 4) 接続
+## 3) 接続設定（フロント）
 
 - `NEXT_PUBLIC_API_BASE_URL`
-- 既定: http://localhost:8000
+- 既定: `http://localhost:8000`
 
 ---
 
-## 実装済み拡張: v0.5（履歴永続化）
+## 変更履歴（参考）
+
+### v0.5（履歴永続化）
 
 - SQLiteに `run` 結果を保存して、過去実行を見返せるようにする。
 - 保存対象:
   - run_id / thread_id / turn_index / created_at / profile / prompt
   - A/B/C 各結果（status, text, latency, error）
   - consensus結果（status, text, latency, error）
-- 追加API:
+- 主な追加API:
   - `GET /api/magi/history?limit=20&offset=0`
   - `GET /api/magi/history/{run_id}`
   - `DELETE /api/magi/history/thread/{thread_id}`
 
-## 実装済み拡張: v0.7（strict debate consensus + fresh retrieval improvements）
+### v0.7（strict debate consensus + fresh retrieval improvements）
 
 - `performance` / `ultra` profile では、合議を strict debate モードで実行する。
 - 各エージェントは投票時に `criticisms`（他案の具体的弱点）を最低2件返す。
 - `criticisms` 不足のターンは `ERROR` 扱いにして無効票とする。
 - 勝者選定は「票数 + 信頼度 + 批判品質スコア」で重み付けする。
 
-## 実装済み拡張: v0.8（history-aware retrieval with lifecycle control）
+### v0.8（history-aware retrieval with lifecycle control）
 
 - `run` 実行前に履歴DBから類似質問を検索し、プロンプトへ参照コンテキストを付与できる。
 - 類似検索は `embedding`（外部埋め込み）または `lexical`（ローカル）を選択できる。
@@ -313,7 +332,7 @@ THREAD_CONTEXT_MAX_TURNS=6
 - 履歴行に `validity_state` / `superseded_by` / `superseded_at` を保持する。
 - `deprecations` ルールで移行イベントを検知し、旧議論を `superseded` に自動更新する。
 
-## 実装済み拡張: v0.9（threaded conversation memory）
+### v0.9（threaded conversation memory）
 
 - `POST /api/magi/run` は `thread_id` を受け取り、レスポンスに `thread_id` / `turn_index` を返す。
 - `thread_id` 未指定なら新規スレッドを作る。
@@ -321,6 +340,15 @@ THREAD_CONTEXT_MAX_TURNS=6
 - 直近1ターンは `[High Priority Latest Turn]` ブロックとして別枠注入し、曖昧質問時に最優先参照する。
 - 履歴保存に `thread_id` / `turn_index` を保持し、過去会話復元の一貫性を確保する。
 - UIではスレッド単位表示・ターン表示に加え、インラインRename、折りたたみトグル、Delete確認付き削除を行える。
+
+### v1.0（router-first execution with local_only path）
+
+- Docker Composeに `ollama` / `ollama-pull` を追加し、ローカル推論モデルを常駐・事前取得できるようにする。
+- 入口ルーター（`request_router`）を実装し、`profile` 未指定runを自動分類する。
+- ルーター分類ラベルに `execution_tier` / `safety` を追加する。
+- `profiles.local_only`（1エージェント: `ollama/qwen2.5:7b-instruct-q4_K_M`）を追加する。
+- ルール: `translation|rewrite|summarize_short` かつ `complexity=low` かつ `safety=low` は `local_only` へ、それ以外は `cost` へフォールバックする。
+- UIのprofile選択に `auto (unset)` を追加し、初期値を未設定にする。
 
 ---
 
@@ -331,3 +359,6 @@ THREAD_CONTEXT_MAX_TURNS=6
 - 空入力不可
 - 接続失敗判別可
 - config差し替えでモデル変更可
+- profile未指定時の自動ルーティングが機能する
+- 軽量・低リスク文面タスクが `local_only` へ到達する
+- `local_only` は合議再生成なしで即時確定し、thread/history文脈注入を行わない

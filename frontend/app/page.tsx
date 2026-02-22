@@ -4,7 +4,7 @@ import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "
 
 type AgentId = "A" | "B" | "C";
 type AgentStatus = "OK" | "ERROR" | "LOADING";
-type NodeState = "IDLE" | "BLINK" | "ON" | "ERROR";
+type NodeState = "IDLE" | "BLINK" | "ON" | "ERROR" | "RELAY";
 type ConfidenceMap = Record<AgentId, number | null>;
 
 type AgentResult = {
@@ -84,7 +84,7 @@ type ThreadCollapsedMap = Record<string, boolean>;
 
 const RAW_API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 const MAX_PROMPT_LENGTH = 4000;
-const PHASE_VERSION = "v0.9";
+const PHASE_VERSION = "v1.0";
 
 function resolveApiBaseUrl(): string {
   if (typeof window === "undefined") return RAW_API_BASE_URL;
@@ -165,6 +165,7 @@ function buildConfiguredLoadingCards(
   profileAgents: ProfilesResponse["profile_agents"],
   selectedProfile: string
 ): AgentResult[] {
+  if (!selectedProfile) return loadingResults;
   const configured = profileAgents[selectedProfile] ?? [];
   if (!configured.length) return loadingResults;
   const order: AgentId[] = ["A", "B", "C"];
@@ -189,8 +190,10 @@ export default function HomePage() {
   const apiBaseUrl = useMemo(() => resolveApiBaseUrl(), []);
   const [prompt, setPrompt] = useState("");
   const [lastRunPrompt, setLastRunPrompt] = useState("");
-  const [selectedProfile, setSelectedProfile] = useState("default");
-  const [availableProfiles, setAvailableProfiles] = useState<string[]>(["default"]);
+  const [selectedProfile, setSelectedProfile] = useState("");
+  const [defaultProfile, setDefaultProfile] = useState("");
+  const [resolvedProfile, setResolvedProfile] = useState("");
+  const [availableProfiles, setAvailableProfiles] = useState<string[]>([]);
   const [profileAgents, setProfileAgents] = useState<ProfilesResponse["profile_agents"]>({});
   const [results, setResults] = useState<AgentResult[]>([]);
   const [consensus, setConsensus] = useState<ConsensusResult | null>(null);
@@ -211,12 +214,15 @@ export default function HomePage() {
     B: "IDLE",
     C: "IDLE"
   });
+  const [localNodeState, setLocalNodeState] = useState<NodeState>("IDLE");
   const [showConclusion, setShowConclusion] = useState(false);
   const [freshMode, setFreshMode] = useState(false);
   const isBusy = isLoading || isConsensusLoading;
   const isStrictDebate = selectedProfile === "performance" || selectedProfile === "ultra";
   const isUltra = selectedProfile === "ultra";
   const chamberRef = useRef<HTMLDivElement | null>(null);
+  const localNodeRef = useRef<HTMLDivElement | null>(null);
+  const peerGroupRef = useRef<HTMLDivElement | null>(null);
   const nodeRefs = useRef<Record<AgentId, HTMLDivElement | null>>({ A: null, B: null, C: null });
   const [linkPaths, setLinkPaths] = useState<string[]>([]);
   const [linkViewBox, setLinkViewBox] = useState("0 0 100 100");
@@ -244,6 +250,33 @@ export default function HomePage() {
     if (cards.length) return cards;
     return buildConfiguredLoadingCards(profileAgents, selectedProfile);
   }, [cards, profileAgents, selectedProfile]);
+  const localAgent = useMemo(() => (profileAgents.local_only ?? [])[0], [profileAgents]);
+  const downstreamProfile = useMemo(() => {
+    const candidate = resolvedProfile || selectedProfile || defaultProfile;
+    if (candidate && candidate !== "local_only") return candidate;
+    if (defaultProfile && defaultProfile !== "local_only") return defaultProfile;
+    if (profileAgents.cost?.length) return "cost";
+    const firstNonLocal = Object.keys(profileAgents).find((name) => name !== "local_only");
+    return firstNonLocal ?? "";
+  }, [defaultProfile, profileAgents, resolvedProfile, selectedProfile]);
+  const chamberNodes = useMemo(() => {
+    const base = buildConfiguredLoadingCards(profileAgents, downstreamProfile);
+    if (isLoading) return base;
+    if (resolvedProfile === "local_only") return base;
+    if (!results.length) return base;
+    const byAgent = new Map(results.map((item) => [item.agent, item]));
+    return base.map((node) => byAgent.get(node.agent) ?? node);
+  }, [downstreamProfile, isLoading, profileAgents, resolvedProfile, results]);
+  const localRouteHint = useMemo(() => {
+    if (localNodeState === "BLINK") return "classifying";
+    if (resolvedProfile === "local_only") return "handled local_only";
+    if (resolvedProfile) return `routed to ${resolvedProfile}`;
+    return "pre-routing";
+  }, [localNodeState, resolvedProfile]);
+  const localOnlyHandled = useMemo(
+    () => resolvedProfile === "local_only" && (results.length > 0 || consensus?.status === "OK"),
+    [consensus?.status, resolvedProfile, results.length]
+  );
   const confidenceMap = useMemo(
     () => parseConfidenceMap(consensus?.status === "OK" ? consensus.text : ""),
     [consensus]
@@ -281,7 +314,7 @@ export default function HomePage() {
     B: "magi-node-b",
     C: "magi-node-c"
   };
-  const chamberActive = Object.values(nodeStates).some((state) => state === "BLINK");
+  const chamberActive = localNodeState === "RELAY" || Object.values(nodeStates).some((state) => state === "BLINK");
 
   function clearNodeTimers() {
     nodeTimerRefs.current.forEach((id) => window.clearTimeout(id));
@@ -296,14 +329,32 @@ export default function HomePage() {
     return base;
   }
 
-  function runNodeTransition(items: AgentResult[], consensusStatus: "OK" | "ERROR" | "LOADING") {
+  function runNodeTransition(
+    profile: string,
+    items: AgentResult[],
+    consensusStatus: "OK" | "ERROR" | "LOADING"
+  ) {
     clearNodeTimers();
     setShowConclusion(false);
-    setNodeStates({ A: "BLINK", B: "BLINK", C: "BLINK" });
+    setLocalNodeState("BLINK");
+    setNodeStates({ A: "IDLE", B: "IDLE", C: "IDLE" });
+
+    const localTimer = window.setTimeout(() => {
+      if (profile === "local_only") {
+        setLocalNodeState("ON");
+        setShowConclusion(false);
+        return;
+      }
+      setLocalNodeState("RELAY");
+      setNodeStates({ A: "BLINK", B: "BLINK", C: "BLINK" });
+    }, 240);
+    nodeTimerRefs.current.push(localTimer);
+
+    if (profile === "local_only") return;
 
     const maxLatency = Math.max(...items.map((item) => Math.max(1, item.latency_ms)), 1);
     const maxDelay = 1800;
-    let doneAt = 0;
+    let doneAt = 240;
 
     for (const item of items) {
       const delay = Math.max(260, Math.round((item.latency_ms / maxLatency) * maxDelay));
@@ -318,7 +369,8 @@ export default function HomePage() {
     }
 
     const endTimer = window.setTimeout(() => {
-      setShowConclusion(consensusStatus === "OK");
+      setLocalNodeState("ON");
+      setShowConclusion(consensusStatus === "OK" && profile !== "local_only");
     }, doneAt + 200);
     nodeTimerRefs.current.push(endTimer);
   }
@@ -331,7 +383,8 @@ export default function HomePage() {
         const data = (await response.json()) as ProfilesResponse;
         if (!data.profiles.length) return;
         setAvailableProfiles(data.profiles);
-        setSelectedProfile(data.default_profile);
+        setDefaultProfile(data.default_profile || "");
+        setSelectedProfile("");
         setProfileAgents(data.profile_agents ?? {});
       } catch {
         // ignore and fallback to default
@@ -376,10 +429,16 @@ export default function HomePage() {
   useEffect(() => {
     function updateLinks() {
       const chamber = chamberRef.current;
+      const local = localNodeRef.current;
+      const peerGroup = peerGroupRef.current;
       const nodeA = nodeRefs.current.A;
       const nodeB = nodeRefs.current.B;
       const nodeC = nodeRefs.current.C;
-      if (!chamber || !nodeA || !nodeB || !nodeC) return;
+      if (!chamber || !local || !peerGroup || !nodeA || !nodeB || !nodeC) return;
+      if (resolvedProfile === "local_only") {
+        setLinkPaths([]);
+        return;
+      }
 
       const chamberRect = chamber.getBoundingClientRect();
       if (window.innerWidth < 768) {
@@ -396,19 +455,24 @@ export default function HomePage() {
         };
       }
 
+      const l = centerOf(local);
+      const g = centerOf(peerGroup);
       const a = centerOf(nodeA);
       const b = centerOf(nodeB);
       const c = centerOf(nodeC);
 
+      const lBottomCenter = { x: l.x, y: l.y + l.rect.height / 2 };
+      const gTopCenter = { x: g.x, y: g.y - g.rect.height / 2 };
       const aTop = { x: a.x, y: a.y - a.rect.height / 2 };
-      const aRight = { x: a.x + a.rect.width / 2, y: a.y };
+      const cTop = { x: c.x, y: c.y - c.rect.height / 2 };
       const bLeft = { x: b.x - b.rect.width / 2, y: b.y };
       const bRight = { x: b.x + b.rect.width / 2, y: b.y };
-      const cTop = { x: c.x, y: c.y - c.rect.height / 2 };
+      const aRight = { x: a.x + a.rect.width / 2, y: a.y };
       const cLeft = { x: c.x - c.rect.width / 2, y: c.y };
 
       setLinkViewBox(`0 0 ${Math.max(1, chamberRect.width)} ${Math.max(1, chamberRect.height)}`);
       setLinkPaths([
+        `M ${lBottomCenter.x} ${lBottomCenter.y} L ${gTopCenter.x} ${gTopCenter.y}`,
         `M ${bLeft.x} ${bLeft.y} L ${aTop.x} ${aTop.y}`,
         `M ${bRight.x} ${bRight.y} L ${cTop.x} ${cTop.y}`,
         `M ${aRight.x} ${aRight.y} L ${cLeft.x} ${cLeft.y}`
@@ -421,7 +485,7 @@ export default function HomePage() {
       window.cancelAnimationFrame(id);
       window.removeEventListener("resize", updateLinks);
     };
-  }, [cards, isLoading]);
+  }, [chamberNodes, isLoading, localNodeState, resolvedProfile]);
 
   function validatePrompt(input: string): string | null {
     const trimmed = input.trim();
@@ -439,7 +503,7 @@ export default function HomePage() {
         },
         body: JSON.stringify({
           prompt: trimmedPrompt,
-          profile: selectedProfile,
+          profile: selectedProfile || undefined,
           fresh_mode: freshMode,
           thread_id: threadId || undefined
         })
@@ -469,7 +533,7 @@ export default function HomePage() {
         body: JSON.stringify({
           prompt: trimmedPrompt,
           agent,
-          profile: selectedProfile,
+          profile: selectedProfile || undefined,
           fresh_mode: freshMode,
           thread_id: threadId || undefined
         })
@@ -503,7 +567,7 @@ export default function HomePage() {
         body: JSON.stringify({
           prompt: trimmedPrompt,
           results: latestResults,
-          profile: options?.profile ?? selectedProfile,
+          profile: options?.profile ?? (selectedProfile || undefined),
           fresh_mode: options?.freshMode ?? freshMode,
           thread_id: options?.threadId ?? (threadId || undefined),
           run_id: options?.runId
@@ -540,7 +604,9 @@ export default function HomePage() {
     setIsConsensusLoading(false);
     clearNodeTimers();
     setShowConclusion(false);
-    setNodeStates({ A: "BLINK", B: "BLINK", C: "BLINK" });
+    setResolvedProfile("");
+    setLocalNodeState("BLINK");
+    setNodeStates({ A: "IDLE", B: "IDLE", C: "IDLE" });
     setResults([]);
     setConsensus({
       provider: "-",
@@ -554,17 +620,19 @@ export default function HomePage() {
     try {
       const success = await requestRun(trimmed);
       if (!success) {
+        setLocalNodeState("IDLE");
         setNodeStates({ A: "IDLE", B: "IDLE", C: "IDLE" });
         return;
       }
+      setResolvedProfile(success.profile);
       setRunId(success.run_id);
       setThreadId(success.thread_id || threadId || success.run_id);
       setTurnIndex(success.turn_index || turnIndex);
-      setSelectedProfile(success.profile);
       setResults(success.results);
       setConsensus(success.consensus);
-      runNodeTransition(success.results, success.consensus.status);
+      runNodeTransition(success.profile, success.results, success.consensus.status);
       await fetchHistory();
+      setIsLoading(false);
 
       if (success.consensus.status !== "LOADING") {
         return;
@@ -583,9 +651,9 @@ export default function HomePage() {
         }
         setThreadId(finalized.thread_id || success.thread_id);
         if ((finalized.turn_index ?? 0) > 0) setTurnIndex(finalized.turn_index);
-        setSelectedProfile(finalized.profile);
+        setResolvedProfile(finalized.profile);
         setConsensus(finalized.consensus);
-        runNodeTransition(success.results, finalized.consensus.status);
+        runNodeTransition(finalized.profile, success.results, finalized.consensus.status);
         await fetchHistory();
       } finally {
         setIsConsensusLoading(false);
@@ -619,6 +687,7 @@ export default function HomePage() {
     setIsLoading(true);
     clearNodeTimers();
     setShowConclusion(false);
+    setLocalNodeState("RELAY");
     setNodeStates((prev) => ({ ...prev, [agent]: "BLINK" }));
 
     try {
@@ -629,9 +698,9 @@ export default function HomePage() {
       }
 
       setRunId(retried.run_id);
+      setResolvedProfile(retried.profile);
       setThreadId(retried.thread_id || threadId || retried.run_id);
       if ((retried.turn_index ?? 0) > 0) setTurnIndex(retried.turn_index);
-      setSelectedProfile(retried.profile);
       setConsensus({
         provider: consensus?.provider ?? "-",
         model: consensus?.model ?? "-",
@@ -650,11 +719,11 @@ export default function HomePage() {
       setResults(updatedResults);
       const recalculated = await requestConsensus(lastRunPrompt, updatedResults);
       if (recalculated) {
+        setResolvedProfile(recalculated.profile);
         setThreadId(recalculated.thread_id || threadId || recalculated.run_id);
         if ((recalculated.turn_index ?? 0) > 0) setTurnIndex(recalculated.turn_index);
-        setSelectedProfile(recalculated.profile);
         setConsensus(recalculated.consensus);
-        runNodeTransition(updatedResults, recalculated.consensus.status);
+        runNodeTransition(recalculated.profile, updatedResults, recalculated.consensus.status);
       } else {
         setNodeStates(nodeStatesFromResults(updatedResults));
       }
@@ -677,12 +746,13 @@ export default function HomePage() {
     setRunId(item.run_id);
     setThreadId(item.thread_id || item.run_id);
     setTurnIndex(item.turn_index || 0);
-    setSelectedProfile(item.profile);
+    setResolvedProfile(item.profile);
     setResults(item.results);
     setConsensus(item.consensus);
     clearNodeTimers();
+    setLocalNodeState(item.profile === "local_only" ? "ON" : "RELAY");
     setNodeStates(nodeStatesFromResults(item.results));
-    setShowConclusion(item.consensus?.status === "OK");
+    setShowConclusion(item.profile !== "local_only" && item.consensus?.status === "OK");
   }
 
   function startNewChat() {
@@ -694,8 +764,10 @@ export default function HomePage() {
     setTurnIndex(0);
     setPrompt("");
     setLastRunPrompt("");
+    setResolvedProfile("");
     setResults([]);
     setConsensus(null);
+    setLocalNodeState("IDLE");
     setNodeStates({ A: "IDLE", B: "IDLE", C: "IDLE" });
     setShowConclusion(false);
   }
@@ -919,7 +991,7 @@ export default function HomePage() {
             phase {PHASE_VERSION}
           </span>
         </div>
-        <p className="mt-2 text-sm text-terminal-dim">Command chamber: one prompt, three models, one consensus core.</p>
+        <p className="mt-2 text-sm text-terminal-dim">Command chamber: local pre-router, then three models, then one consensus core.</p>
 
         <div className="magi-wire mt-4 rounded-md p-3">
           <div ref={chamberRef} className="magi-chamber grid grid-cols-1 gap-3 md:block">
@@ -933,7 +1005,24 @@ export default function HomePage() {
                 <path key={`link-${index}`} className="magi-link-path" d={path} />
               ))}
             </svg>
-            {displayNodes.map((node) => (
+            <div
+              ref={peerGroupRef}
+              className={`magi-peer-group ${localOnlyHandled ? "magi-peer-group-skipped" : ""}`}
+              aria-hidden="true"
+            />
+            <div ref={localNodeRef} className="magi-node-wrap magi-node-local">
+              <div className={`magi-node p-4 magi-node-${localNodeState.toLowerCase()}`}>
+                <p className="magi-node-label">Local LLM</p>
+                <p className="magi-node-model mt-2 text-sm font-semibold">
+                  {localAgent ? `${localAgent.provider}/${localAgent.model}` : "ollama/local"}
+                </p>
+                <div className="magi-node-status-slot mt-2 w-full px-6">
+                  <p className="mt-1 text-[11px] font-semibold">{localRouteHint}</p>
+                  {localNodeState === "BLINK" || localNodeState === "RELAY" ? <div className="magi-node-progress" /> : null}
+                </div>
+              </div>
+            </div>
+            {chamberNodes.map((node) => (
               <div
                 key={`node-${node.agent}`}
                 ref={(el) => {
@@ -946,24 +1035,26 @@ export default function HomePage() {
                     winnerAgent && nodeStates[node.agent] === "ON" && node.agent !== winnerAgent
                       ? "magi-node-rejected"
                       : ""
-                  }`}
+                  } ${localOnlyHandled ? "magi-node-skipped" : ""}`}
                 >
                   <p className="magi-node-label">{buildLlmLabel(node.provider, node.model, node.agent)}</p>
                   <p className="magi-node-model mt-2 text-sm font-semibold">
                     {node.provider === "-" ? `AGENT ${node.agent}` : `${node.provider}/${node.model}`}
                   </p>
                   <div className="magi-node-status-slot mt-2 w-full px-6">
-                    {confidenceMap[node.agent] !== null ? (
+                    {localOnlyHandled ? (
+                      <p className="mt-1 text-[11px] font-semibold">skipped (not routed)</p>
+                    ) : confidenceMap[node.agent] !== null ? (
                       <div className="magi-confidence-track">
                         <div className="magi-confidence-fill" style={{ width: `${confidenceMap[node.agent]}%` }} />
                       </div>
                     ) : null}
-                    {confidenceMap[node.agent] !== null ? (
+                    {!localOnlyHandled && confidenceMap[node.agent] !== null ? (
                       <p className="mt-1 text-[11px] font-semibold">confidence {confidenceMap[node.agent]}</p>
                     ) : (
                       <p className="mt-1 text-[11px] font-semibold opacity-0">confidence --</p>
                     )}
-                    {nodeStates[node.agent] === "BLINK" ? (
+                    {!localOnlyHandled && nodeStates[node.agent] === "BLINK" ? (
                       <div className="magi-node-progress" />
                     ) : null}
                   </div>
@@ -1001,6 +1092,7 @@ export default function HomePage() {
                 onChange={(event) => setSelectedProfile(event.target.value)}
                 disabled={isBusy}
               >
+                <option value="">auto (unset)</option>
                 {availableProfiles.map((profile) => (
                   <option key={profile} value={profile}>
                     {profile}
@@ -1038,7 +1130,7 @@ export default function HomePage() {
           <span>run_id: {runId || "-"}</span>
           <span>thread_id: {threadId || "-"}</span>
           <span>turn: {turnIndex > 0 ? turnIndex : "-"}</span>
-          <span>mode: {selectedProfile}</span>
+          <span>mode: {selectedProfile || "auto"}</span>
           <span>fresh: {freshMode ? "on" : "off"}</span>
           <button
             type="button"

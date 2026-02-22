@@ -4,6 +4,7 @@ test("submit with Enter and restore from history", async ({ page }) => {
   let runCount = 0;
   const seenFreshModes: boolean[] = [];
   const seenThreadIds: Array<string | undefined> = [];
+  const seenProfiles: Array<string | undefined> = [];
 
   await page.route("**/api/magi/profiles", async (route) => {
     await route.fulfill({
@@ -70,9 +71,10 @@ test("submit with Enter and restore from history", async ({ page }) => {
   });
 
   await page.route("**/api/magi/run", async (route) => {
-    const requestBody = route.request().postDataJSON() as { fresh_mode?: boolean; thread_id?: string };
+    const requestBody = route.request().postDataJSON() as { fresh_mode?: boolean; thread_id?: string; profile?: string };
     seenFreshModes.push(Boolean(requestBody.fresh_mode));
     seenThreadIds.push(requestBody.thread_id);
+    seenProfiles.push(requestBody.profile);
     runCount += 1;
     const payload = runCount === 1
       ? {
@@ -177,4 +179,5 @@ test("submit with Enter and restore from history", async ({ page }) => {
   await expect(page.locator("span", { hasText: "run_id: run-1" })).toBeVisible();
   expect(seenFreshModes).toEqual([true, true]);
   expect(seenThreadIds).toEqual([undefined, "thread-1"]);
+  expect(seenProfiles[0]).toBeUndefined();
 });

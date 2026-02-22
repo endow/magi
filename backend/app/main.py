@@ -28,9 +28,6 @@ warnings.filterwarnings(
 )
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
-# LiteLLM Gemini adapter expects GEMINI_API_KEY in many environments.
-if not os.getenv("GEMINI_API_KEY") and os.getenv("GOOGLE_API_KEY"):
-    os.environ["GEMINI_API_KEY"] = os.environ["GOOGLE_API_KEY"]
 
 
 class AgentConfig(BaseModel):
@@ -84,6 +81,8 @@ class RequestRouterConfig(BaseModel):
 class RouteRule(BaseModel):
     when_intents_any: list[str] = Field(default_factory=list)
     when_complexity_any: list[str] = Field(default_factory=list)
+    when_safety_any: list[str] = Field(default_factory=list)
+    when_execution_tiers_any: list[str] = Field(default_factory=list)
     profile: str
 
 
@@ -98,6 +97,8 @@ class RouteDecision(BaseModel):
     reason: str | None = None
     intent: str | None = None
     complexity: str | None = None
+    safety: str | None = None
+    execution_tier: str | None = None
 
 
 class AppConfig(BaseModel):
@@ -232,7 +233,7 @@ async def app_lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="MAGI v0.9 Backend", lifespan=app_lifespan)
+app = FastAPI(title="MAGI v1.0 Backend", lifespan=app_lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -257,8 +258,8 @@ def load_config() -> AppConfig:
 
 
 def _validate_profile(profile: ProfileConfig) -> None:
-    if len(profile.agents) != 3:
-        raise ValueError("each profile must define exactly 3 agents")
+    if len(profile.agents) < 1:
+        raise ValueError("each profile must define at least 1 agent")
 
 
 def _resolve_profile(config: AppConfig, requested_profile: str | None) -> tuple[str, ProfileConfig]:
@@ -316,10 +317,175 @@ def _router_enabled(config: AppConfig, requested_profile: str | None) -> bool:
     return bool(config.request_router and config.request_router.enabled and config.profiles)
 
 
+def _is_low_safety_prompt(prompt: str) -> bool:
+    lowered = prompt.strip().lower()
+    risky_terms = (
+        "kill",
+        "suicide",
+        "bomb",
+        "explosive",
+        "weapon",
+        "hack",
+        "malware",
+        "ransomware",
+        "self-harm",
+        "自殺",
+        "爆弾",
+        "武器",
+        "不正アクセス",
+        "ハッキング",
+    )
+    return not any(term in lowered for term in risky_terms)
+
+
+def _local_intent_fast_path(prompt: str) -> str | None:
+    lowered = prompt.strip().lower()
+    if not lowered:
+        return None
+
+    # Keep heuristic intentionally strict: only short, low-risk text operations.
+    compact = re.sub(r"\s+", " ", lowered)
+    if len(compact) > 240:
+        return None
+
+    if any(token in compact for token in ("要約", "summarize", "summary", "短くまとめ", "short summary")):
+        return "summarize_short"
+    if any(token in compact for token in ("言い換え", "言い直", "rephrase", "paraphrase", "rewrite")):
+        return "rewrite"
+    if any(token in compact for token in ("翻訳", "translate", "敬語", "丁寧に")):
+        return "translation"
+    return None
+
+
+def _should_apply_history_context(profile_name: str) -> bool:
+    return profile_name != "local_only"
+
+
+def _should_apply_thread_context(profile_name: str) -> bool:
+    return profile_name != "local_only"
+
+
+def _is_rewrite_or_translation_prompt(prompt: str) -> bool:
+    lowered = prompt.strip().lower()
+    return any(token in lowered for token in ("敬語", "丁寧に", "言い換え", "言い直", "rephrase", "rewrite", "translate", "翻訳"))
+
+
+def _extract_prompt_quoted_text(prompt: str) -> str | None:
+    match = re.search(r"[「『]([^「」『』\n]{1,120})[」』]", prompt.strip())
+    if not match:
+        return None
+    value = match.group(1).strip()
+    return value or None
+
+
+def _extract_local_single_answer(text: str, source_text: str | None = None) -> str:
+    stripped = text.strip()
+    if not stripped:
+        return stripped
+    quoted = re.findall(r"[「『]([^「」『』\n]{1,120})[」』]", stripped)
+    source = (source_text or "").strip()
+    for candidate in quoted:
+        value = candidate.strip()
+        if not value:
+            continue
+        if source and value == source:
+            continue
+        if len(value) <= 2:
+            continue
+        if value:
+            return value
+    return stripped
+
+
+def _heuristic_polite_rewrite(source_text: str) -> str:
+    value = source_text.strip().strip("。")
+    if not value:
+        return source_text
+    if value.startswith("明日") and not value.startswith("明日は"):
+        value = f"明日は{value[2:]}"
+    replaced = value
+    replaced = replaced.replace("行けない", "行けません")
+    replaced = replaced.replace("いけない", "いけません")
+    replaced = replaced.replace("できない", "できません")
+    replaced = replaced.replace("無理", "難しいです")
+    if replaced == value and replaced.endswith("ない"):
+        replaced = f"{replaced[:-2]}ません"
+    if not re.search(r"(です|ます|ません|でした|ください)$", replaced):
+        replaced = f"{replaced}です"
+    return replaced
+
+
+def _should_fallback_local_rewrite(text: str) -> bool:
+    value = text.strip()
+    if not value:
+        return True
+    if "\n" in value:
+        return True
+    if any(token in value for token in ("または", "以下", "これら", "言い換えると", "丁寧に言い換え")):
+        return True
+    if any(token in value for token in ("ご同行", "ご案内できかねる", "お mee", "参り難い", "参り难い")):
+        return True
+    if re.search(r"[A-Za-z]{2,}", value) and re.search(r"[ぁ-んァ-ン一-龥]", value):
+        return True
+    return False
+
+
+def _postprocess_local_only_result(prompt: str, result: AgentResult) -> AgentResult:
+    if result.status != "OK":
+        return result
+    if not _is_rewrite_or_translation_prompt(prompt):
+        return result
+    source_text = _extract_prompt_quoted_text(prompt)
+    extracted = _extract_local_single_answer(result.text, source_text=source_text)
+    if source_text and extracted.strip().strip("。") == source_text.strip().strip("。"):
+        fallback = _heuristic_polite_rewrite(source_text)
+        print("[magi] local_only_output fallback rewrite")
+        return result.model_copy(update={"text": fallback})
+    if source_text and _should_fallback_local_rewrite(extracted):
+        fallback = _heuristic_polite_rewrite(source_text)
+        print("[magi] local_only_output fallback rewrite")
+        return result.model_copy(update={"text": fallback})
+    if extracted == result.text:
+        return result
+    print("[magi] local_only_output normalized")
+    return result.model_copy(update={"text": extracted})
+
+
+def _build_local_only_consensus(results: list[AgentResult]) -> ConsensusResult:
+    primary = results[0] if results else None
+    if primary is None:
+        return ConsensusResult(
+            provider="magi",
+            model="local_passthrough",
+            text="",
+            status="ERROR",
+            latency_ms=0,
+            error_message="no result for local_only consensus",
+        )
+    if primary.status != "OK":
+        return ConsensusResult(
+            provider=primary.provider,
+            model=primary.model,
+            text="",
+            status="ERROR",
+            latency_ms=primary.latency_ms,
+            error_message=primary.error_message or "local_only agent failed",
+        )
+    return ConsensusResult(
+        provider=primary.provider,
+        model=primary.model,
+        text=primary.text,
+        status="OK",
+        latency_ms=primary.latency_ms,
+    )
+
+
 def _route_rule_matches(
     rule: RouteRule,
     intents: list[str],
     complexity: str,
+    safety: str,
+    execution_tier: str,
 ) -> bool:
     normalized_intents = {item.strip().lower() for item in intents if item.strip()}
     rule_intents = {item.strip().lower() for item in rule.when_intents_any if item.strip()}
@@ -328,6 +494,14 @@ def _route_rule_matches(
 
     rule_complexities = {item.strip().lower() for item in rule.when_complexity_any if item.strip()}
     if rule_complexities and complexity.strip().lower() not in rule_complexities:
+        return False
+
+    rule_safety = {item.strip().lower() for item in rule.when_safety_any if item.strip()}
+    if rule_safety and safety.strip().lower() not in rule_safety:
+        return False
+
+    rule_execution_tiers = {item.strip().lower() for item in rule.when_execution_tiers_any if item.strip()}
+    if rule_execution_tiers and execution_tier.strip().lower() not in rule_execution_tiers:
         return False
     return True
 
@@ -348,12 +522,16 @@ def _extract_route_decision(text: str, fallback_profile: str) -> RouteDecision:
     reason = _safe_str(payload.get("reason")) or None
     intent = _safe_str(payload.get("intent")) or None
     complexity = _safe_str(payload.get("complexity")) or None
+    safety = _safe_str(payload.get("safety")) or None
+    execution_tier = _safe_str(payload.get("execution_tier")) or None
     return RouteDecision(
         profile=profile,
         confidence=confidence,
         reason=reason,
         intent=intent,
         complexity=complexity,
+        safety=safety,
+        execution_tier=execution_tier,
     )
 
 
@@ -366,10 +544,12 @@ def _pick_profile_by_rules(
     candidate_profile = route_decision.profile.strip()
     intents = _safe_str_list(route_decision.intent)
     complexity = _safe_str(route_decision.complexity).lower()
+    safety = _safe_str(route_decision.safety).lower()
+    execution_tier = _safe_str(route_decision.execution_tier).lower()
 
     if rules:
         for rule in rules.routes:
-            if _route_rule_matches(rule, intents, complexity):
+            if _route_rule_matches(rule, intents, complexity, safety, execution_tier):
                 mapped = rule.profile.strip()
                 if mapped in available_profiles:
                     return mapped
@@ -393,54 +573,80 @@ async def _route_profile(config: AppConfig, prompt: str) -> str | None:
     fallback_profile = config.default_profile
     full_model = f"{router.provider}/{router.model}"
     available_profiles = set(config.profiles.keys())
+
+    fast_intent = _local_intent_fast_path(prompt)
+    if (
+        fast_intent in {"translation", "rewrite", "summarize_short"}
+        and _is_low_safety_prompt(prompt)
+        and "local_only" in available_profiles
+    ):
+        print(
+            "[magi] request_router fast_path "
+            f"intent={fast_intent} complexity=low safety=low tier=local profile=local_only"
+        )
+        return "local_only"
+
     routing_prompt = (
         "You are a lightweight request router. "
         "Classify the user request and output strict JSON only.\n"
         "Allowed values:\n"
-        '- intent: one of ["qa","coding","research","creative","translation","analysis","other"]\n'
+        '- intent: one of ["qa","coding","research","creative","translation","rewrite","summarize_short","analysis","other"]\n'
         '- complexity: one of ["low","medium","high"]\n'
+        '- safety: one of ["low","medium","high"]\n'
+        '- execution_tier: one of ["local","cloud"]\n'
         f'- profile: one of {sorted(available_profiles)}\n'
         "- confidence: integer 0-100 (not decimal)\n"
         "Return exactly this shape:\n"
-        '{"intent":"qa","complexity":"low","profile":"cost","confidence":85,"reason":"..."}\n'
+        '{"intent":"qa","complexity":"low","safety":"low","execution_tier":"local","profile":"cost","confidence":85,"reason":"..."}\n'
         "If classification is clear, confidence should be >= 80.\n"
         "No markdown, no extra keys.\n\n"
         f"User request:\n{prompt}"
     )
 
-    try:
-        raw_text, latency_ms = await _call_model_text(
-            full_model,
-            routing_prompt,
-            router.timeout_seconds,
-            max_tokens=120,
-        )
-        decision = _extract_route_decision(raw_text, fallback_profile)
-        selected_profile = _pick_profile_by_rules(
-            decision,
-            config.router_rules,
-            fallback_profile,
-            available_profiles,
-        )
-
-        if decision.confidence < router.min_confidence:
-            print(
-                "[magi] request_router fallback_by_confidence "
-                f"model={full_model} confidence={decision.confidence} threshold={router.min_confidence} "
-                f"profile={fallback_profile}"
+    max_attempts = 2
+    for attempt in range(1, max_attempts + 1):
+        try:
+            raw_text, latency_ms = await _call_model_text(
+                full_model,
+                routing_prompt,
+                router.timeout_seconds,
+                max_tokens=120,
             )
+            decision = _extract_route_decision(raw_text, fallback_profile)
+            selected_profile = _pick_profile_by_rules(
+                decision,
+                config.router_rules,
+                fallback_profile,
+                available_profiles,
+            )
+
+            if decision.confidence < router.min_confidence:
+                print(
+                    "[magi] request_router fallback_by_confidence "
+                    f"model={full_model} confidence={decision.confidence} threshold={router.min_confidence} "
+                    f"profile={fallback_profile}"
+                )
+                return fallback_profile
+
+            print(
+                "[magi] request_router success "
+                f"model={full_model} latency_ms={latency_ms} "
+                f"intent={decision.intent or '-'} complexity={decision.complexity or '-'} "
+                f"safety={decision.safety or '-'} tier={decision.execution_tier or '-'} "
+                f"profile={selected_profile} confidence={decision.confidence}"
+            )
+            return selected_profile
+        except asyncio.TimeoutError:
+            if attempt < max_attempts:
+                print(f"[magi] request_router timeout attempt={attempt}; retrying once")
+                continue
+            print(f"[magi] request_router failed TimeoutError: ; fallback={fallback_profile}")
+            return fallback_profile
+        except Exception as exc:  # noqa: BLE001
+            print(f"[magi] request_router failed {type(exc).__name__}: {exc}; fallback={fallback_profile}")
             return fallback_profile
 
-        print(
-            "[magi] request_router success "
-            f"model={full_model} latency_ms={latency_ms} "
-            f"intent={decision.intent or '-'} complexity={decision.complexity or '-'} "
-            f"profile={selected_profile} confidence={decision.confidence}"
-        )
-        return selected_profile
-    except Exception as exc:  # noqa: BLE001
-        print(f"[magi] request_router failed {type(exc).__name__}: {exc}; fallback={fallback_profile}")
-        return fallback_profile
+    return fallback_profile
 
 
 async def _resolve_profile_with_router(
@@ -2217,13 +2423,21 @@ async def run_magi(payload: RunRequest) -> RunResponse:
         raise HTTPException(status_code=500, detail=f"invalid config: {exc}") from exc
 
     effective_prompt = await _build_effective_prompt(prompt, fresh_mode)
-    effective_prompt = _build_prompt_with_thread_context(effective_prompt, thread_id)
-    effective_prompt = await _build_prompt_with_history(prompt, effective_prompt, config)
+    if _should_apply_thread_context(profile_name):
+        effective_prompt = _build_prompt_with_thread_context(effective_prompt, thread_id)
+    else:
+        print(f"[magi] thread_context skipped profile={profile_name}")
+    if _should_apply_history_context(profile_name):
+        effective_prompt = await _build_prompt_with_history(prompt, effective_prompt, config)
+    else:
+        print(f"[magi] history_context skipped profile={profile_name}")
     tasks = [_run_single_agent(agent, effective_prompt, profile.timeout_seconds) for agent in profile.agents]
     results = await asyncio.gather(*tasks)
+    if profile_name == "local_only":
+        results = [_postprocess_local_only_result(prompt, item) for item in results]
     run_id = str(uuid.uuid4())
     turn_index = _next_turn_index(thread_id)
-    consensus = _build_pending_consensus(profile)
+    consensus = _build_local_only_consensus(results) if profile_name == "local_only" else _build_pending_consensus(profile)
     try:
         _save_run_history(
             run_id,
@@ -2267,8 +2481,13 @@ async def retry_agent(payload: RetryRequest) -> RetryResponse:
         raise HTTPException(status_code=400, detail=f"agent {payload.agent} is not configured")
 
     effective_prompt = await _build_effective_prompt(prompt, fresh_mode)
-    effective_prompt = _build_prompt_with_thread_context(effective_prompt, thread_id)
+    if _should_apply_thread_context(profile_name):
+        effective_prompt = _build_prompt_with_thread_context(effective_prompt, thread_id)
+    else:
+        print(f"[magi] thread_context skipped profile={profile_name}")
     result = await _run_single_agent(target_agent, effective_prompt, profile.timeout_seconds)
+    if profile_name == "local_only":
+        result = _postprocess_local_only_result(prompt, result)
     return RetryResponse(run_id=str(uuid.uuid4()), thread_id=thread_id, turn_index=0, profile=profile_name, result=result)
 
 
@@ -2297,8 +2516,14 @@ async def recalc_consensus(payload: ConsensusRequest) -> ConsensusResponse:
         raise HTTPException(status_code=500, detail=f"invalid config: {exc}") from exc
 
     effective_prompt = await _build_effective_prompt(prompt, fresh_mode)
-    effective_prompt = _build_prompt_with_thread_context(effective_prompt, thread_id)
-    consensus = await _run_consensus(profile, effective_prompt, payload.results)
+    if _should_apply_thread_context(profile_name):
+        effective_prompt = _build_prompt_with_thread_context(effective_prompt, thread_id)
+    else:
+        print(f"[magi] thread_context skipped profile={profile_name}")
+    if profile_name == "local_only":
+        consensus = _build_local_only_consensus(payload.results)
+    else:
+        consensus = await _run_consensus(profile, effective_prompt, payload.results)
     response_run_id = requested_run_id or str(uuid.uuid4())
     if requested_run_id and not _update_run_consensus(requested_run_id, consensus):
         raise HTTPException(status_code=404, detail="run not found")

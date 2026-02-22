@@ -1,8 +1,10 @@
 # RUNBOOK.md
 
-Operational commands for local development and Docker runtime.
+ローカル開発およびDocker実行時の運用コマンド集です。
 
-## Local Start
+対象リリース基準: `v1.0`
+
+## ローカル起動
 
 Backend:
 
@@ -16,27 +18,57 @@ Frontend:
 .\start-frontend.ps1
 ```
 
-## Docker Start / Rebuild
+## Docker起動 / 再ビルド
 
-Start or refresh everything:
+全体を起動または更新:
 
 ```bash
 docker compose up --build -d
 ```
 
-Status:
+状態確認:
 
 ```bash
 docker compose ps
 ```
 
-Stop:
+停止:
 
 ```bash
 docker compose down
 ```
 
-## Quick Health Checks
+## Router / Ollama確認（v1.0）
+
+Ollamaおよびルーター関連サービスを確認:
+
+```bash
+docker compose ps
+```
+
+期待されるサービス:
+- `magi-backend`
+- `magi-frontend`
+- `magi-ollama`
+
+ローカルモデルを明示的に取得/再取得:
+
+```bash
+docker compose up ollama-pull
+```
+
+ルーターログ確認:
+
+```bash
+docker logs --tail 120 magi-backend
+```
+
+確認ポイント:
+- 成功: `[magi] request_router success ...`
+- 信頼度によるフォールバック: `[magi] request_router fallback_by_confidence ...`
+- 失敗（network/provider）: `[magi] request_router failed ...`
+
+## クイックヘルスチェック
 
 Backend:
 
@@ -50,21 +82,21 @@ Frontend:
 Invoke-WebRequest -UseBasicParsing http://localhost:3000
 ```
 
-History API:
+履歴API:
 
 ```powershell
 Invoke-RestMethod -Method Get http://localhost:8000/api/magi/history?limit=5&offset=0 | ConvertTo-Json -Depth 6
 ```
 
-Thread delete API:
+スレッド削除API:
 
 ```powershell
 Invoke-RestMethod -Method Delete http://localhost:8000/api/magi/history/thread/<thread_id>
 ```
 
-## Next.js Cache Recovery
+## Next.jsキャッシュ復旧
 
-Use when dev server shows module/chunk inconsistencies (e.g. missing `_document`, missing chunk files).
+開発サーバーでモジュール/チャンク不整合（例: `_document` 不足、chunk不足）が出た場合に実行します。
 
 ```powershell
 if (Test-Path frontend\.next) { cmd /c rmdir /s /q frontend\.next }
@@ -72,7 +104,7 @@ cd frontend
 npm run dev
 ```
 
-For production build verification:
+本番ビルド検証時:
 
 ```powershell
 if (Test-Path frontend\.next) { cmd /c rmdir /s /q frontend\.next }
@@ -80,37 +112,37 @@ cd frontend
 npm run build
 ```
 
-## Backend Warnings
+## Backend警告
 
-- `trio._core._multierror RuntimeWarning` can appear depending on environment hooks.
-- The app suppresses this warning in code; if seen in ad-hoc scripts, it is usually non-fatal.
+- `trio._core._multierror RuntimeWarning` は環境フックの影響で表示される場合があります。
+- アプリ本体ではこの警告をコード側で抑制しています。単発スクリプトで表示されても、通常は致命的ではありません。
 
-## Provider Quota Errors
+## プロバイダのクォータエラー
 
-- If a single agent shows `ERROR` with Gemini, check backend logs for `429` / `RESOURCE_EXHAUSTED`.
-- This indicates provider quota/rate-limit, not an app crash.
-- Wait and retry, or raise provider quota/billing limits.
+- Geminiで単一エージェントが `ERROR` になる場合、backendログで `429` / `RESOURCE_EXHAUSTED` を確認してください。
+- これはアプリクラッシュではなく、プロバイダ側クォータ/レート制限を示します。
+- 時間を置いて再試行するか、プロバイダ側のクォータ/課金上限を引き上げてください。
 
-## Fresh Mode (Latest Info)
+## Fresh Mode（最新情報）
 
-- Set `TAVILY_API_KEY` in `backend/.env` to enable Fresh mode web retrieval.
-- Optional tuning:
+- `backend/.env` に `TAVILY_API_KEY` を設定すると Fresh mode のWeb取得が有効になります。
+- 任意チューニング:
   - `FRESH_MAX_RESULTS` (default `3`, max `10`)
   - `FRESH_CACHE_TTL_SECONDS` (default `1800`)
   - `FRESH_SEARCH_DEPTH` (`basic` or `advanced`)
   - `FRESH_PRIMARY_TOPIC` (`general` or `news`, default `general`)
-- If key is missing or Tavily request fails, backend falls back to normal prompt (run does not fail).
+- キー未設定、または Tavily リクエスト失敗時は通常プロンプトへフォールバックします（run自体は失敗しません）。
 
-## History DB
+## 履歴DB
 
-- Default DB path: `backend/data/magi.db`
-- Override path with `MAGI_DB_PATH` in `backend/.env`
-- Recommended override (Docker/Local共通): `MAGI_DB_PATH=data/magi.db`
-- Docker uses bind mount `./backend/data:/app/data`; if this mount is absent, history can be lost on container recreation.
-- If history is not needed, you can remove the DB file while backend is stopped and it will be recreated on next start.
+- デフォルトDBパス: `backend/data/magi.db`
+- `backend/.env` の `MAGI_DB_PATH` で上書き可能
+- 推奨上書き（Docker/Local共通）: `MAGI_DB_PATH=data/magi.db`
+- Dockerは `./backend/data:/app/data` をバインドマウントします。これがない場合、コンテナ再作成時に履歴が失われる可能性があります。
+- 履歴が不要なら backend 停止中にDBファイルを削除できます。次回起動時に再生成されます。
 
-## Consensus Modes
+## Consensusモード
 
-- `cost` / `balance`: normal peer-vote consensus.
-- `performance` / `ultra`: strict debate consensus (`min_criticisms=2`).
-- If strict mode yields consensus errors, inspect backend logs for `strict debate requires at least ... criticisms`.
+- `cost` / `balance`: 通常の peer-vote consensus
+- `performance` / `ultra`: strict debate consensus（`min_criticisms=2`）
+- strict mode で consensus エラーが出る場合は、backendログの `strict debate requires at least ... criticisms` を確認してください。

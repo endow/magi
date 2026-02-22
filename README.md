@@ -72,6 +72,10 @@ From repository root:
 docker compose up --build -d
 ```
 
+Note:
+- Docker構成には `ollama` が含まれます。
+- 初回起動時は `ollama-pull` が `qwen2.5:7b-instruct-q4_K_M` を取得するため、少し時間がかかります。
+
 Check status:
 
 ```bash
@@ -112,6 +116,7 @@ URLs:
 - `history_context` を `backend/config.json` で設定している場合は、`HISTORY_FRESHNESS_HALF_LIFE_DAYS` / `HISTORY_STALE_WEIGHT` / `HISTORY_SUPERSEDED_WEIGHT` より `config.json` 側を優先
 - `THREAD_CONTEXT_ENABLED=1` (optional: `0/false` でスレッド文脈注入を無効化)
 - `THREAD_CONTEXT_MAX_TURNS=6` (optional: 参照する直近ターン数)
+- `OLLAMA_API_BASE=http://ollama:11434` (Docker Compose時の推奨値)
 
 `frontend/.env.local`
 
@@ -192,6 +197,11 @@ Edit `backend/config.json` to define profiles and swap models without code chang
 `history_context.strategy`:
 - `embedding`: 外部埋め込みモデルで類似履歴を検索（失敗時は自動でローカル類似検索へフォールバック）
 - `lexical`: ローカル類似検索のみ
+
+`request_router` (optional):
+- `enabled=true` のとき、`POST /api/magi/run` で `profile` 未指定の場合のみ入口LLMで自動ルーティング
+- 入口LLMは JSON (`intent`, `complexity`, `profile`, `confidence`, `reason`) を返し、`min_confidence` 未満は `default_profile` にフォールバック
+- 例: ローカル Ollama で `provider=ollama`, `model=qwen2.5:7b-instruct-q4_K_M`
 
 履歴の扱い:
 - データは削除せず保持

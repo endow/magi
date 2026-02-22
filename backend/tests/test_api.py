@@ -39,6 +39,34 @@ def _profiled_config() -> main.AppConfig:
     )
 
 
+def _profiled_config_with_router(enabled: bool = True, min_confidence: int = 75) -> main.AppConfig:
+    cfg = _profiled_config()
+    cfg.request_router = main.RequestRouterConfig(
+        enabled=enabled,
+        provider="ollama",
+        model="qwen2.5:7b-instruct-q4_K_M",
+        timeout_seconds=4,
+        min_confidence=min_confidence,
+    )
+    cfg.router_rules = main.RouterRulesConfig(
+        default_profile="balance",
+        routes=[
+            main.RouteRule(
+                when_intents_any=["coding", "analysis", "research"],
+                when_complexity_any=["high"],
+                profile="performance",
+            ),
+            main.RouteRule(
+                when_intents_any=["qa", "creative", "other", "translation"],
+                when_complexity_any=["low", "medium"],
+                profile="cost",
+            ),
+        ],
+    )
+    cfg.default_profile = "cost"
+    return cfg
+
+
 def test_profiles_endpoint_returns_profile_list(monkeypatch) -> None:
     monkeypatch.setattr(main, "load_config", _profiled_config)
     response = client.get("/api/magi/profiles")
@@ -477,6 +505,68 @@ def test_run_with_fresh_mode_uses_effective_prompt(monkeypatch) -> None:
     response = client.post("/api/magi/run", json={"prompt": "hello", "profile": "cost", "fresh_mode": True})
     assert response.status_code == 200
     assert response.json()["consensus"]["status"] == "LOADING"
+
+
+def test_run_uses_request_router_when_profile_not_provided(monkeypatch) -> None:
+    monkeypatch.setattr(main, "load_config", lambda: _profiled_config_with_router(enabled=True))
+    monkeypatch.setattr(main, "_save_run_history", lambda *args, **kwargs: None)
+
+    async def fake_route_profile(config, prompt):
+        return "performance"
+
+    async def fake_runner(agent_config, prompt, timeout_seconds):
+        return main.AgentResult(
+            agent=agent_config.agent,
+            provider=agent_config.provider,
+            model=agent_config.model,
+            text=f"ok-{agent_config.agent}",
+            status="OK",
+            latency_ms=100,
+        )
+
+    monkeypatch.setattr(main, "_route_profile", fake_route_profile)
+    monkeypatch.setattr(main, "_run_single_agent", fake_runner)
+
+    response = client.post("/api/magi/run", json={"prompt": "deep architecture review"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["profile"] == "performance"
+
+
+def test_run_skips_request_router_when_profile_is_explicit(monkeypatch) -> None:
+    monkeypatch.setattr(main, "load_config", lambda: _profiled_config_with_router(enabled=True))
+    monkeypatch.setattr(main, "_save_run_history", lambda *args, **kwargs: None)
+
+    async def fail_route_profile(config, prompt):
+        raise AssertionError("router should not be called when profile is explicit")
+
+    async def fake_runner(agent_config, prompt, timeout_seconds):
+        return main.AgentResult(
+            agent=agent_config.agent,
+            provider=agent_config.provider,
+            model=agent_config.model,
+            text=f"ok-{agent_config.agent}",
+            status="OK",
+            latency_ms=100,
+        )
+
+    monkeypatch.setattr(main, "_route_profile", fail_route_profile)
+    monkeypatch.setattr(main, "_run_single_agent", fake_runner)
+
+    response = client.post("/api/magi/run", json={"prompt": "hello", "profile": "cost"})
+    assert response.status_code == 200
+    assert response.json()["profile"] == "cost"
+
+
+def test_route_profile_falls_back_when_confidence_is_low(monkeypatch) -> None:
+    config = _profiled_config_with_router(enabled=True, min_confidence=80)
+
+    async def fake_call(full_model: str, prompt: str, timeout_seconds: int):
+        return '{"intent":"coding","complexity":"high","profile":"performance","confidence":42,"reason":"uncertain"}', 12
+
+    monkeypatch.setattr(main, "_call_model_text", fake_call)
+    selected = asyncio.run(main._route_profile(config, "refactor this service"))
+    assert selected == "cost"
 
 
 def test_run_auto_enables_fresh_mode_for_time_sensitive_prompt(monkeypatch) -> None:

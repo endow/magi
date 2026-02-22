@@ -1,5 +1,27 @@
 {
   "default_profile": "balance",
+  "request_router": {
+    "enabled": true,
+    "provider": "ollama",
+    "model": "qwen2.5:7b-instruct-q4_K_M",
+    "timeout_seconds": 20,
+    "min_confidence": 75
+  },
+  "router_rules": {
+    "default_profile": "balance",
+    "routes": [
+      {
+        "when_intents_any": ["coding", "analysis", "research"],
+        "when_complexity_any": ["high"],
+        "profile": "performance"
+      },
+      {
+        "when_intents_any": ["creative", "translation", "qa", "other"],
+        "when_complexity_any": ["low", "medium"],
+        "profile": "cost"
+      }
+    ]
+  },
   "history_context": {
     "strategy": "embedding",
     "provider": "openai",

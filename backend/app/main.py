@@ -73,6 +73,33 @@ class HistoryDeprecationRule(BaseModel):
     current_terms: list[str]
 
 
+class RequestRouterConfig(BaseModel):
+    enabled: bool = False
+    provider: str = "ollama"
+    model: str = "qwen2.5:7b-instruct-q4_K_M"
+    timeout_seconds: int = 4
+    min_confidence: int = 75
+
+
+class RouteRule(BaseModel):
+    when_intents_any: list[str] = Field(default_factory=list)
+    when_complexity_any: list[str] = Field(default_factory=list)
+    profile: str
+
+
+class RouterRulesConfig(BaseModel):
+    default_profile: str | None = None
+    routes: list[RouteRule] = Field(default_factory=list)
+
+
+class RouteDecision(BaseModel):
+    profile: str
+    confidence: int
+    reason: str | None = None
+    intent: str | None = None
+    complexity: str | None = None
+
+
 class AppConfig(BaseModel):
     default_profile: str | None = None
     profiles: dict[str, ProfileConfig] | None = None
@@ -80,6 +107,8 @@ class AppConfig(BaseModel):
     consensus: ConsensusConfig | None = None
     timeout_seconds: int | None = None
     history_context: HistoryContextConfig | None = None
+    request_router: RequestRouterConfig | None = None
+    router_rules: RouterRulesConfig | None = None
 
 
 HistoryContextConfig.model_rebuild()
@@ -254,6 +283,176 @@ def _resolve_profile(config: AppConfig, requested_profile: str | None) -> tuple[
     )
     _validate_profile(profile)
     return "default", profile
+
+
+def _normalize_confidence(value: Any) -> int:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return 0
+    if 0.0 <= numeric <= 1.0:
+        numeric *= 100.0
+    return max(0, min(100, int(round(numeric))))
+
+
+def _safe_str(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _safe_str_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip().lower() for item in value if str(item).strip()]
+    if isinstance(value, str):
+        cleaned = value.strip().lower()
+        return [cleaned] if cleaned else []
+    return []
+
+
+def _router_enabled(config: AppConfig, requested_profile: str | None) -> bool:
+    if requested_profile:
+        return False
+    return bool(config.request_router and config.request_router.enabled and config.profiles)
+
+
+def _route_rule_matches(
+    rule: RouteRule,
+    intents: list[str],
+    complexity: str,
+) -> bool:
+    normalized_intents = {item.strip().lower() for item in intents if item.strip()}
+    rule_intents = {item.strip().lower() for item in rule.when_intents_any if item.strip()}
+    if rule_intents and not (normalized_intents & rule_intents):
+        return False
+
+    rule_complexities = {item.strip().lower() for item in rule.when_complexity_any if item.strip()}
+    if rule_complexities and complexity.strip().lower() not in rule_complexities:
+        return False
+    return True
+
+
+def _extract_route_decision(text: str, fallback_profile: str) -> RouteDecision:
+    payload: dict[str, Any] = {}
+    match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+    candidate = match.group(0) if match else text
+    try:
+        loaded = json.loads(candidate)
+        if isinstance(loaded, dict):
+            payload = loaded
+    except json.JSONDecodeError:
+        payload = {}
+
+    profile = _safe_str(payload.get("profile")) or fallback_profile
+    confidence = _normalize_confidence(payload.get("confidence"))
+    reason = _safe_str(payload.get("reason")) or None
+    intent = _safe_str(payload.get("intent")) or None
+    complexity = _safe_str(payload.get("complexity")) or None
+    return RouteDecision(
+        profile=profile,
+        confidence=confidence,
+        reason=reason,
+        intent=intent,
+        complexity=complexity,
+    )
+
+
+def _pick_profile_by_rules(
+    route_decision: RouteDecision,
+    rules: RouterRulesConfig | None,
+    default_profile: str,
+    available_profiles: set[str],
+) -> str:
+    candidate_profile = route_decision.profile.strip()
+    intents = _safe_str_list(route_decision.intent)
+    complexity = _safe_str(route_decision.complexity).lower()
+
+    if rules:
+        for rule in rules.routes:
+            if _route_rule_matches(rule, intents, complexity):
+                mapped = rule.profile.strip()
+                if mapped in available_profiles:
+                    return mapped
+
+        if rules.default_profile and rules.default_profile in available_profiles:
+            return rules.default_profile
+
+    if candidate_profile in available_profiles:
+        return candidate_profile
+
+    return default_profile
+
+
+async def _route_profile(config: AppConfig, prompt: str) -> str | None:
+    if not config.profiles or not config.default_profile:
+        return None
+    router = config.request_router
+    if not router or not router.enabled:
+        return None
+
+    fallback_profile = config.default_profile
+    full_model = f"{router.provider}/{router.model}"
+    available_profiles = set(config.profiles.keys())
+    routing_prompt = (
+        "You are a lightweight request router. "
+        "Classify the user request and output strict JSON only.\n"
+        "Allowed values:\n"
+        '- intent: one of ["qa","coding","research","creative","translation","analysis","other"]\n'
+        '- complexity: one of ["low","medium","high"]\n'
+        f'- profile: one of {sorted(available_profiles)}\n'
+        "- confidence: integer 0-100 (not decimal)\n"
+        "Return exactly this shape:\n"
+        '{"intent":"qa","complexity":"low","profile":"cost","confidence":85,"reason":"..."}\n'
+        "If classification is clear, confidence should be >= 80.\n"
+        "No markdown, no extra keys.\n\n"
+        f"User request:\n{prompt}"
+    )
+
+    try:
+        raw_text, latency_ms = await _call_model_text(
+            full_model,
+            routing_prompt,
+            router.timeout_seconds,
+            max_tokens=120,
+        )
+        decision = _extract_route_decision(raw_text, fallback_profile)
+        selected_profile = _pick_profile_by_rules(
+            decision,
+            config.router_rules,
+            fallback_profile,
+            available_profiles,
+        )
+
+        if decision.confidence < router.min_confidence:
+            print(
+                "[magi] request_router fallback_by_confidence "
+                f"model={full_model} confidence={decision.confidence} threshold={router.min_confidence} "
+                f"profile={fallback_profile}"
+            )
+            return fallback_profile
+
+        print(
+            "[magi] request_router success "
+            f"model={full_model} latency_ms={latency_ms} "
+            f"intent={decision.intent or '-'} complexity={decision.complexity or '-'} "
+            f"profile={selected_profile} confidence={decision.confidence}"
+        )
+        return selected_profile
+    except Exception as exc:  # noqa: BLE001
+        print(f"[magi] request_router failed {type(exc).__name__}: {exc}; fallback={fallback_profile}")
+        return fallback_profile
+
+
+async def _resolve_profile_with_router(
+    config: AppConfig,
+    requested_profile: str | None,
+    prompt: str,
+) -> tuple[str, ProfileConfig]:
+    if not _router_enabled(config, requested_profile):
+        return _resolve_profile(config, requested_profile)
+
+    routed_profile = await _route_profile(config, prompt)
+    return _resolve_profile(config, routed_profile or requested_profile)
 
 
 def _extract_text(response: Any) -> str:
@@ -1607,13 +1806,22 @@ def _criticism_quality_score(criticisms: list[str]) -> int:
     return min(60, score)
 
 
-async def _call_model_text(full_model: str, prompt: str, timeout_seconds: int) -> tuple[str, int]:
+async def _call_model_text(
+    full_model: str,
+    prompt: str,
+    timeout_seconds: int,
+    max_tokens: int | None = None,
+) -> tuple[str, int]:
     start = perf_counter()
+    completion_args: dict[str, Any] = {
+        "model": full_model,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    if max_tokens is not None:
+        completion_args["max_tokens"] = max_tokens
+
     response = await asyncio.wait_for(
-        acompletion(
-            model=full_model,
-            messages=[{"role": "user", "content": prompt}],
-        ),
+        acompletion(**completion_args),
         timeout=timeout_seconds,
     )
     text = _extract_text(response)
@@ -2002,7 +2210,7 @@ async def run_magi(payload: RunRequest) -> RunResponse:
 
     try:
         config = load_config()
-        profile_name, profile = _resolve_profile(config, payload.profile)
+        profile_name, profile = await _resolve_profile_with_router(config, payload.profile, prompt)
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001

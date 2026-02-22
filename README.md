@@ -1,5 +1,7 @@
 # MAGI v1.0（ローカル利用）
 
+![MAGI Command Chamber](docs/images/magi-command-chamber-v1.0.png)
+
 1つのプロンプトを3つのLLMへ並列送信し、回答を横並びで表示します。
 
 ## 構成

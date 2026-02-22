@@ -12,10 +12,22 @@ Backend:
 .\start-backend.ps1
 ```
 
+macOS / Linux:
+
+```bash
+./start-backend.sh
+```
+
 Frontend:
 
 ```powershell
 .\start-frontend.ps1
+```
+
+macOS / Linux:
+
+```bash
+./start-frontend.sh
 ```
 
 ## Docker起動 / 再ビルド
@@ -68,6 +80,44 @@ docker logs --tail 120 magi-backend
 - 信頼度によるフォールバック: `[magi] request_router fallback_by_confidence ...`
 - 失敗（network/provider）: `[magi] request_router failed ...`
 
+### ルーティング判定の一括テスト
+
+リポジトリルートで実行:
+
+```powershell
+.\test-routing.ps1
+```
+
+macOS / Linux:
+
+```bash
+./test-routing.sh
+```
+
+境界ケースも含める場合:
+
+```powershell
+.\test-routing.ps1 -IncludeBoundary
+```
+
+macOS / Linux:
+
+```bash
+./test-routing.sh --include-boundary
+```
+
+別URLへ向ける場合:
+
+```powershell
+.\test-routing.ps1 -ApiBaseUrl http://host.docker.internal:8000
+```
+
+macOS / Linux:
+
+```bash
+./test-routing.sh --api-base-url=http://host.docker.internal:8000
+```
+
 ## クイックヘルスチェック
 
 Backend:
@@ -76,10 +126,22 @@ Backend:
 Invoke-WebRequest -UseBasicParsing http://localhost:8000/health
 ```
 
+macOS / Linux:
+
+```bash
+curl -fsS http://localhost:8000/health
+```
+
 Frontend:
 
 ```powershell
 Invoke-WebRequest -UseBasicParsing http://localhost:3000
+```
+
+macOS / Linux:
+
+```bash
+curl -fsS http://localhost:3000
 ```
 
 履歴API:
@@ -88,10 +150,22 @@ Invoke-WebRequest -UseBasicParsing http://localhost:3000
 Invoke-RestMethod -Method Get http://localhost:8000/api/magi/history?limit=5&offset=0 | ConvertTo-Json -Depth 6
 ```
 
+macOS / Linux:
+
+```bash
+curl -fsS "http://localhost:8000/api/magi/history?limit=5&offset=0"
+```
+
 スレッド削除API:
 
 ```powershell
 Invoke-RestMethod -Method Delete http://localhost:8000/api/magi/history/thread/<thread_id>
+```
+
+macOS / Linux:
+
+```bash
+curl -fsS -X DELETE "http://localhost:8000/api/magi/history/thread/<thread_id>"
 ```
 
 ## Next.jsキャッシュ復旧
@@ -104,10 +178,26 @@ cd frontend
 npm run dev
 ```
 
+macOS / Linux:
+
+```bash
+rm -rf frontend/.next
+cd frontend
+npm run dev
+```
+
 本番ビルド検証時:
 
 ```powershell
 if (Test-Path frontend\.next) { cmd /c rmdir /s /q frontend\.next }
+cd frontend
+npm run build
+```
+
+macOS / Linux:
+
+```bash
+rm -rf frontend/.next
 cd frontend
 npm run build
 ```

@@ -25,8 +25,12 @@ cd backend
 python -m venv .venv
 # Windows PowerShell
 .\.venv\Scripts\Activate.ps1
+# macOS / Linux
+source .venv/bin/activate
 pip install -r requirements.txt
 copy .env.example .env
+# macOS / Linux
+cp .env.example .env
 ```
 
 ### Frontend
@@ -35,8 +39,12 @@ copy .env.example .env
 cd frontend
 npm install
 copy .env.example .env.local
+# macOS / Linux
+cp .env.example .env.local
 # Docker MCP で使う場合（任意）
 copy .env.mcp.example .env.local
+# macOS / Linux
+cp .env.mcp.example .env.local
 ```
 
 ## ローカル起動
@@ -51,6 +59,18 @@ copy .env.mcp.example .env.local
 
 ```bash
 .\start-frontend.ps1
+```
+
+macOS / Linux の場合:
+
+```bash
+./start-backend.sh
+```
+
+別ターミナルで実行:
+
+```bash
+./start-frontend.sh
 ```
 
 URL:

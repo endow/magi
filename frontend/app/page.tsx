@@ -435,10 +435,6 @@ export default function HomePage() {
       const nodeB = nodeRefs.current.B;
       const nodeC = nodeRefs.current.C;
       if (!chamber || !local || !peerGroup || !nodeA || !nodeB || !nodeC) return;
-      if (resolvedProfile === "local_only") {
-        setLinkPaths([]);
-        return;
-      }
 
       const chamberRect = chamber.getBoundingClientRect();
       if (window.innerWidth < 768) {

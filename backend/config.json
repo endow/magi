@@ -93,7 +93,7 @@
         "min_ok_results": 2,
         "rounds": 1
       },
-      "timeout_seconds": 25
+      "timeout_seconds": 40
     },
     "balance": {
       "agents": [

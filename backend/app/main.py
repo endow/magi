@@ -197,6 +197,7 @@ class RunResponse(BaseModel):
     profile: str
     results: list[AgentResult]
     consensus: ConsensusResult
+    routing: "RoutingDecisionInfo | None" = None
 
 
 class RetryResponse(BaseModel):
@@ -273,6 +274,19 @@ class RoutingEventItem(BaseModel):
 class RoutingEventsResponse(BaseModel):
     total: int
     items: list[RoutingEventItem]
+
+
+class RoutingDecisionInfo(BaseModel):
+    profile: str
+    reason: str | None = None
+    intent: str | None = None
+    complexity: str | None = None
+    safety: str | None = None
+    execution_tier: str | None = None
+    policy_key: str | None = None
+
+
+RunResponse.model_rebuild()
 
 
 @asynccontextmanager
@@ -3179,6 +3193,15 @@ async def run_magi(payload: RunRequest) -> RunResponse:
         profile=profile_name,
         results=results,
         consensus=consensus,
+        routing=RoutingDecisionInfo(
+            profile=profile_name,
+            reason=_safe_str(router_output.get("reason")) or None,
+            intent=_safe_str(router_input.get("intent")) or None,
+            complexity=_safe_str(router_input.get("complexity")) or None,
+            safety=_safe_str(router_input.get("safety")) or None,
+            execution_tier=_safe_str(router_input.get("execution_tier")) or None,
+            policy_key=_safe_str(router_output.get("policy_key")) or None,
+        ),
     )
 
 

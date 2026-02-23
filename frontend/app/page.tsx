@@ -17,6 +17,16 @@ type AgentResult = {
   error_message?: string | null;
 };
 
+type RoutingInfo = {
+  profile: string;
+  reason?: string | null;
+  intent?: string | null;
+  complexity?: string | null;
+  safety?: string | null;
+  execution_tier?: string | null;
+  policy_key?: string | null;
+};
+
 type RunResponse = {
   run_id: string;
   thread_id: string;
@@ -24,6 +34,7 @@ type RunResponse = {
   profile: string;
   results: AgentResult[];
   consensus: ConsensusResult;
+  routing?: RoutingInfo | null;
 };
 
 type RetryResponse = {
@@ -71,6 +82,13 @@ type ProfilesResponse = {
 type HistoryListResponse = {
   total: number;
   items: RunHistoryItem[];
+};
+
+type RoutingFeedbackResponse = {
+  thread_id: string;
+  request_id: string;
+  rating: number;
+  policy_key?: string | null;
 };
 
 type ThreadGroup = {
@@ -208,6 +226,11 @@ export default function HomePage() {
   const [runId, setRunId] = useState("");
   const [threadId, setThreadId] = useState("");
   const [turnIndex, setTurnIndex] = useState(0);
+  const [routingInfo, setRoutingInfo] = useState<RoutingInfo | null>(null);
+  const [feedbackRating, setFeedbackRating] = useState<-1 | 0 | 1 | null>(null);
+  const [feedbackReason, setFeedbackReason] = useState("");
+  const [feedbackSubmitting, setFeedbackSubmitting] = useState(false);
+  const [feedbackMessage, setFeedbackMessage] = useState("");
   const [threadNames, setThreadNames] = useState<ThreadNameMap>({});
   const [collapsedThreads, setCollapsedThreads] = useState<ThreadCollapsedMap>({});
   const [editingThreadId, setEditingThreadId] = useState<string | null>(null);
@@ -652,6 +675,10 @@ export default function HomePage() {
 
     setError("");
     setRunId("");
+    setRoutingInfo(null);
+    setFeedbackRating(null);
+    setFeedbackReason("");
+    setFeedbackMessage("");
     setIsLoading(true);
     setIsConsensusLoading(false);
     clearNodeTimers();
@@ -681,6 +708,7 @@ export default function HomePage() {
       setRunId(success.run_id);
       setThreadId(success.thread_id || threadId || success.run_id);
       setTurnIndex(success.turn_index || turnIndex);
+      setRoutingInfo(success.routing ?? null);
       setResults(success.results);
       setConsensus(success.consensus);
       runNodeTransition(success.profile, success.results, success.consensus.status);
@@ -727,6 +755,37 @@ export default function HomePage() {
     }
   }
 
+  async function submitRoutingFeedback() {
+    if (!runId || !threadId || feedbackRating === null || feedbackSubmitting) return;
+    setFeedbackSubmitting(true);
+    setFeedbackMessage("");
+    try {
+      const response = await fetch(`${apiBaseUrl}/api/magi/routing/feedback`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          thread_id: threadId,
+          request_id: runId,
+          rating: feedbackRating,
+          reason: feedbackReason.trim() || undefined
+        })
+      });
+      const data = (await response.json()) as RoutingFeedbackResponse | { detail?: string };
+      if (!response.ok) {
+        setFeedbackMessage((data as { detail?: string }).detail ?? "failed to save feedback");
+        return;
+      }
+      const policyKey = (data as RoutingFeedbackResponse).policy_key || routingInfo?.policy_key;
+      setFeedbackMessage(policyKey ? `saved (policy: ${policyKey})` : "saved");
+    } catch {
+      setFeedbackMessage("failed to save feedback");
+    } finally {
+      setFeedbackSubmitting(false);
+    }
+  }
+
   async function copyResultText(result: AgentResult) {
     if (!result.text) return;
     try {
@@ -742,6 +801,10 @@ export default function HomePage() {
     setIsLoading(true);
     clearNodeTimers();
     setShowConclusion(false);
+    setRoutingInfo(null);
+    setFeedbackRating(null);
+    setFeedbackReason("");
+    setFeedbackMessage("");
     markConsensusClockStart();
     setLocalNodeState("RELAY");
     setNodeStates((prev) => ({ ...prev, [agent]: "BLINK" }));
@@ -817,6 +880,10 @@ export default function HomePage() {
     setNodeStates(nodeStatesFromResults(item.results));
     setShowConclusion(item.profile !== "local_only" && item.consensus?.status === "OK");
     setConclusionElapsedMs(item.consensus ? item.consensus.latency_ms : null);
+    setRoutingInfo(null);
+    setFeedbackRating(null);
+    setFeedbackReason("");
+    setFeedbackMessage("");
     consensusClockRef.current = null;
   }
 
@@ -836,6 +903,10 @@ export default function HomePage() {
     setNodeStates({ A: "IDLE", B: "IDLE", C: "IDLE" });
     setShowConclusion(false);
     setConclusionElapsedMs(null);
+    setRoutingInfo(null);
+    setFeedbackRating(null);
+    setFeedbackReason("");
+    setFeedbackMessage("");
     consensusClockRef.current = null;
   }
 
@@ -1234,6 +1305,68 @@ export default function HomePage() {
             Copy
           </button>
         </div>
+        {routingInfo ? (
+          <div className="mt-2 rounded border border-terminal-border bg-[#050a10] px-3 py-2 text-xs text-terminal-dim">
+            <p>
+              routing: <span className="text-terminal-text">{routingInfo.profile}</span>
+              {routingInfo.intent ? ` | intent=${routingInfo.intent}` : ""}
+              {routingInfo.complexity ? ` | complexity=${routingInfo.complexity}` : ""}
+              {routingInfo.execution_tier ? ` | tier=${routingInfo.execution_tier}` : ""}
+            </p>
+            <p className="mt-1">
+              reason: <span className="text-terminal-text">{routingInfo.reason || "-"}</span>
+            </p>
+          </div>
+        ) : null}
+        {runId && threadId ? (
+          <div className="mt-3 rounded border border-terminal-border bg-[#050a10] px-3 py-3 text-xs text-terminal-dim">
+            <p className="font-semibold text-terminal-text">Rate this answer</p>
+            <div className="mt-2 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setFeedbackRating(1)}
+                disabled={isBusy || feedbackSubmitting}
+                className={`rounded border px-2 py-1 text-[11px] disabled:cursor-not-allowed disabled:opacity-50 ${
+                  feedbackRating === 1
+                    ? "border-terminal-ok text-terminal-ok"
+                    : "border-terminal-border text-terminal-dim"
+                }`}
+              >
+                Good
+              </button>
+              <button
+                type="button"
+                onClick={() => setFeedbackRating(-1)}
+                disabled={isBusy || feedbackSubmitting}
+                className={`rounded border px-2 py-1 text-[11px] disabled:cursor-not-allowed disabled:opacity-50 ${
+                  feedbackRating === -1
+                    ? "border-terminal-err text-terminal-err"
+                    : "border-terminal-border text-terminal-dim"
+                }`}
+              >
+                Bad
+              </button>
+            </div>
+            <textarea
+              value={feedbackReason}
+              onChange={(event) => setFeedbackReason(event.target.value)}
+              disabled={isBusy || feedbackSubmitting}
+              placeholder="reason (optional)"
+              className="mt-2 h-20 w-full resize-y rounded border border-terminal-border bg-[#02060b] px-2 py-1 text-xs text-terminal-text outline-none disabled:cursor-not-allowed disabled:opacity-50"
+            />
+            <div className="mt-2 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => void submitRoutingFeedback()}
+                disabled={isBusy || feedbackSubmitting || feedbackRating === null}
+                className="rounded border border-terminal-accent px-2 py-1 text-[11px] text-terminal-accent disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {feedbackSubmitting ? "Saving..." : "Send Feedback"}
+              </button>
+              {feedbackMessage ? <span>{feedbackMessage}</span> : null}
+            </div>
+          </div>
+        ) : null}
 
       </section>
 

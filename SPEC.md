@@ -1,4 +1,4 @@
-# MAGI v1.0 実装仕様（現行）
+# MAGI v1.1 実装仕様（現行）
 
 本書は、MVPから拡張された現行版「MAGI」の実装仕様を定義する。  
 実装・改修時は、本仕様を正とする。
@@ -22,7 +22,7 @@
 
 ---
 
-## 要件（v1.0）
+## 要件（v1.1）
 
 ### 1) バックエンド
 
@@ -85,7 +85,8 @@
 - **各タスク内で try/except を行い、必ず結果オブジェクトを返す**。
 - 失敗したモデルがあっても全体は落とさない。
 - タイムアウトは **profileごとに `backend/config.json` の `timeout_seconds`** を適用（`asyncio.wait_for`）。
-- 現行設定は `local_only: 30s / cost: 25s / balance: 25s / performance: 35s / ultra: 45s`。
+- 現行設定は `local_only: 30s / cost: 40s / balance: 45s / performance: 35s / ultra: 45s`。
+- OpenAI/Gemini は timeout 時に 1 回リトライする（Anthropic/Ollama は単回）。
 - `run_id` はUUIDで毎回発行し、レスポンスに含める（履歴はSQLiteに保存する）。
 - `thread_id` は会話スレッドを識別し、未指定時は新規生成する。
 - 同一 `thread_id` のときは直近ターン文脈をプロンプトに注入し、代名詞参照（「それ」など）に対応する。
@@ -132,15 +133,24 @@ messages = [{"role": "user", "content": prompt}]
     "min_confidence": 75
   },
   "router_rules": {
-    "default_profile": "cost",
+    "default_profile": "balance",
     "routes": [
       {
         "when_intents_any": ["translation", "rewrite", "summarize_short"],
         "when_complexity_any": ["low"],
         "when_safety_any": ["low"],
+        "when_execution_tiers_any": ["local"],
         "profile": "local_only"
       }
     ]
+  },
+  "routing_learning": {
+    "enabled": true,
+    "alpha": 0.05,
+    "weight_min": -2.0,
+    "weight_max": 2.0,
+    "latency_threshold_ms": 8000,
+    "cost_threshold": 2.0
   },
   "history_context": {
     "strategy": "embedding|lexical",
@@ -173,6 +183,11 @@ messages = [{"role": "user", "content": prompt}]
 - `POST /api/magi/run` で `profile` 未指定時、`request_router.enabled=true` なら入口LLMが分類してprofileを自動選択する。
 - ルーター出力は `intent/complexity/safety/execution_tier/profile/confidence/reason` のJSONを想定し、`confidence < min_confidence` は `router_rules.default_profile` にフォールバックする。
 - `profiles` は **最低1エージェント** を許容する（`local_only` は1エージェント想定）。
+- Router学習（MVP）:
+  - `routing_events` に router入出力・実行結果・user feedback を保存する
+  - `routing_policy` に key別の profile weight/stats を保存する
+  - 最終profileは `base_score + policy_weight` で選択する
+  - feedback / 実行結果を契機に `weight += alpha * reward` で更新し、`[weight_min, weight_max]` でclampする
 - `history_context.strategy=embedding` の場合、履歴類似検索は外部埋め込みモデルを使う（失敗時は lexical にフォールバック）。
 - 履歴は削除せず保持し、`validity_state(active|stale|superseded)` と鮮度減衰を使って参照重みを調整する。
 - `deprecations` で技術移行ルール（legacy/current）を定義し、current語を含む新規実行時に過去legacy履歴を `superseded` に更新する。
@@ -250,6 +265,16 @@ OLLAMA_API_BASE=http://ollama:11434
   - フロント側の単体Retry後に、最新結果で合議を再計算するため
 - 備考:
   - `local_only` では再合議せず、受け取ったAgent結果を consensus として返す
+
+### ルーティング学習API（v1.1）
+
+- `POST /api/magi/routing/feedback`
+  - body: `{ thread_id, request_id, rating: -1|0|1, reason? }`
+  - 対象 event の `user_rating/user_reason` を更新し、policy update を即時実行
+- `GET /api/magi/routing/policy?key=...`
+  - key の `weights/stats` を返す
+- `GET /api/magi/routing/events?thread_id=...&limit=...`
+  - ルーティングイベントのデバッグ参照
 
 ---
 
@@ -349,6 +374,22 @@ OLLAMA_API_BASE=http://ollama:11434
 - `profiles.local_only`（1エージェント: `ollama/qwen2.5:7b-instruct-q4_K_M`）を追加する。
 - ルール: `translation|rewrite|summarize_short` かつ `complexity=low` かつ `safety=low` は `local_only` へ、それ以外は `cost` へフォールバックする。
 - UIのprofile選択に `auto (unset)` を追加し、初期値を未設定にする。
+
+### v1.1（routing learning + chamber execution UX）
+
+- routing learning を追加:
+  - `routing_events` / `routing_policy` テーブルを導入
+  - feedback API (`/api/magi/routing/feedback`) で重み更新
+  - Router最終スコアを `base + policy` に拡張
+- local_only ルールを強化:
+  - `execution_tier=local` 条件を追加し、cloud判定の誤配線を抑制
+- 実行耐性を改善:
+  - Gemini timeout 時に1回リトライ
+  - `balance.timeout_seconds` を 45 秒へ調整
+- Chamber UI を改善:
+  - `Routing / Prep`、`Executing`、`Discussion`、`Conclusion` の状態バッジを表示
+  - `Executing` で3ノード点滅を維持
+  - `ERROR` カードは `Retry` 優先表示（`Copy` 非表示）
 
 ---
 

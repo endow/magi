@@ -1,9 +1,26 @@
-# MAGI v1.0（ローカル利用）
+# MAGI v1.1（ローカル利用）
 
 ![MAGI Command Chamber](docs/images/magi-command-chamber.png)
 
 MAGI は、単一プロンプトを入口ルーターで自動振り分けし、軽量タスクは `local_only`（ローカル1モデル）、それ以外は複数LLMの並列実行と合議で処理するローカル実行向けアプリです。  
-回答表示だけでなく、モデル別リトライ、合議の再計算、Fresh mode（Web最新情報の補強）、SQLiteへの履歴永続化、`thread_id` ベースの会話継続までを1画面で扱えます。
+回答表示だけでなく、モデル別リトライ、合議の再計算、Fresh mode（Web最新情報の補強）、SQLiteへの履歴永続化、`thread_id` ベースの会話継続までを1画面で扱えます。  
+v1.1 では、ルーティング学習（feedbackで重み更新）、ルーター誤判定の抑制、実行フェーズを可視化するUI改善（`Routing / Prep`、`Executing`、`Discussion`、`Conclusion`）を追加しています。
+
+## v1.1 ハイライト
+
+- Routing learning（MVP）:
+  - `routing_events` / `routing_policy` をSQLiteへ追加
+  - `POST /api/magi/routing/feedback` による重み更新
+  - Router最終スコアを `base_score + policy_weight` に拡張
+- Routerルール改善:
+  - `local_only` へのマッピングに `execution_tier=local` 条件を追加
+- レイテンシ耐性改善:
+  - Geminiは timeout 時に1回リトライ
+  - `balance.timeout_seconds` を 45 秒へ調整
+- Chamber UI改善:
+  - 前処理と実行の表示を分離（`Routing / Prep` → `Executing`）
+  - `Executing` 中は3ノードを点滅表示
+  - エラーカードのヘッダー操作を `Retry` 優先（`ERROR` 時は `Copy` 非表示）
 
 ## 構成
 
@@ -223,7 +240,7 @@ URL:
 - `enabled=true` のとき、`POST /api/magi/run` で `profile` 未指定の場合のみ入口LLMで自動ルーティング
 - 入口LLMは JSON (`intent`, `complexity`, `safety`, `execution_tier`, `profile`, `confidence`, `reason`) を返し、`min_confidence` 未満は `router_rules.default_profile` にフォールバック
 - 例: ローカル Ollama で `provider=ollama`, `model=qwen2.5:7b-instruct-q4_K_M`
-- 現行ルール: `translation|rewrite|summarize_short` + `complexity=low` + `safety=low` は `local_only` へ、それ以外は `cost`
+- 現行ルール: `translation|rewrite|summarize_short` + `complexity=low` + `safety=low` + `execution_tier=local` は `local_only` へ、それ以外は `balance`
 
 `routing_learning`（任意）:
 - ルーティングイベントをSQLiteに保存し、`feedback` と実行結果から profile 重みを更新
@@ -258,7 +275,7 @@ URL:
 - ルーティングevents参照: `GET /api/magi/routing/events?thread_id=...&limit=20`
 - 同一 `thread_id` の場合、backend はスレッド文脈を有効プロンプトに注入し、最新ターンを専用の `[High Priority Latest Turn]` ブロックとして優先注入します
 - 空プロンプトまたは4000文字超過は `400` を返します
-- モデルごとのタイムアウトは profile 設定（`backend/config.json`）に従います（現行: local_only 20s / cost 25s / balance 25s / performance 35s / ultra 45s）
+- モデルごとのタイムアウトは profile 設定（`backend/config.json`）に従います（現行: local_only 30s / cost 40s / balance 45s / performance 35s / ultra 45s）
 - 部分失敗は許容されます（`status: ERROR`）
 - Backend は `run_id` を UUID で返します
 
@@ -311,6 +328,8 @@ python -m pytest backend/tests -q
   - 3つの結果カードより先に表示
   - 3者合議の最終結論を表示
   - `OK/ERROR` と latency 表示に対応
+  - Chamber上部に状態バッジ表示（`Routing / Prep`、`Executing`、`Discussion`、`Conclusion`）
+  - `Conclusion` 時は経過時間（分/秒）を表示
 - Profileセレクター:
   - `auto (unset)`, `local_only`, `cost`, `balance`, `performance`, `ultra` を選択可能
   - デフォルトは `auto (unset)`。初回実行は `profile` を省略し backend routing を使用
@@ -318,6 +337,9 @@ python -m pytest backend/tests -q
   - `performance` と `ultra` は strict debate consensus（具体的な相互批判が必要）を有効化
   - `performance` / `ultra` 選択時は `strict debate` バッジを表示
   - `ultra` 選択時は `high cost` バッジを表示
+- Chamberカード操作:
+  - `ERROR` カードは `Retry` のみ表示（`Copy` は非表示）
+  - `Executing` 状態では3ノードを点滅表示
 - Fresh modeトグル:
   - デフォルトは ON
   - ON時は backend が Tavily で最新Web証拠を取得（`TAVILY_API_KEY` 設定時）

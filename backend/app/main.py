@@ -62,12 +62,22 @@ class HistoryContextConfig(BaseModel):
     stale_weight: float = 0.55
     superseded_weight: float = 0.20
     deprecations: list["HistoryDeprecationRule"] = Field(default_factory=list)
+    deprecations_source: "DeprecationsSourceConfig | None" = None
 
 
 class HistoryDeprecationRule(BaseModel):
     id: str
     legacy_terms: list[str]
     current_terms: list[str]
+
+
+class DeprecationsSourceConfig(BaseModel):
+    enabled: bool = False
+    url: str | None = None
+    mode: Literal["merge", "replace"] = "merge"
+    timeout_seconds: int = 5
+    refresh_interval_seconds: int = 86400
+    allow_http: bool = False
 
 
 class RequestRouterConfig(BaseModel):
@@ -312,13 +322,94 @@ app.add_middleware(
 )
 
 _FRESH_CACHE: dict[str, tuple[float, list[FreshSource]]] = {}
+_DEPRECATIONS_SOURCE_CACHE: dict[str, tuple[float, list[HistoryDeprecationRule]]] = {}
+
+
+def _extract_deprecations_rules(payload: Any) -> list[HistoryDeprecationRule]:
+    raw_rules: Any = payload
+    if isinstance(payload, dict):
+        if isinstance(payload.get("deprecations"), list):
+            raw_rules = payload["deprecations"]
+        elif isinstance(payload.get("rules"), list):
+            raw_rules = payload["rules"]
+    if not isinstance(raw_rules, list):
+        raise ValueError("deprecations payload must be a list or object with 'deprecations'")
+    return [HistoryDeprecationRule.model_validate(item) for item in raw_rules]
+
+
+def _merge_deprecations_by_id(
+    local_rules: list[HistoryDeprecationRule],
+    remote_rules: list[HistoryDeprecationRule],
+) -> list[HistoryDeprecationRule]:
+    merged: dict[str, HistoryDeprecationRule] = {}
+    for rule in local_rules:
+        merged[rule.id] = rule
+    for rule in remote_rules:
+        merged[rule.id] = rule
+    return list(merged.values())
+
+
+def _fetch_remote_deprecations(source: DeprecationsSourceConfig) -> list[HistoryDeprecationRule]:
+    url = (source.url or "").strip()
+    if not url:
+        raise ValueError("deprecations_source.url is required when enabled=true")
+    if url.startswith("http://") and not source.allow_http:
+        raise ValueError("deprecations_source.url must use https unless allow_http=true")
+    response = httpx.get(
+        url,
+        timeout=max(1, int(source.timeout_seconds)),
+        follow_redirects=True,
+    )
+    response.raise_for_status()
+    return _extract_deprecations_rules(response.json())
+
+
+def _resolve_history_deprecations(cfg: HistoryContextConfig) -> list[HistoryDeprecationRule]:
+    local_rules = list(cfg.deprecations)
+    source = cfg.deprecations_source
+    if not source or not source.enabled:
+        return local_rules
+
+    url = (source.url or "").strip()
+    if not url:
+        print("[magi] deprecations_source enabled but url is empty; using local rules")
+        return local_rules
+
+    now = perf_counter()
+    cache_entry = _DEPRECATIONS_SOURCE_CACHE.get(url)
+    refresh_seconds = max(0, int(source.refresh_interval_seconds))
+    remote_rules: list[HistoryDeprecationRule] | None = None
+
+    if cache_entry and refresh_seconds > 0 and (now - cache_entry[0]) < refresh_seconds:
+        remote_rules = list(cache_entry[1])
+    else:
+        try:
+            remote_rules = _fetch_remote_deprecations(source)
+            _DEPRECATIONS_SOURCE_CACHE[url] = (now, list(remote_rules))
+            print(f"[magi] deprecations_source loaded count={len(remote_rules)} url={url}")
+        except Exception as exc:  # noqa: BLE001
+            if cache_entry:
+                remote_rules = list(cache_entry[1])
+                print(f"[magi] deprecations_source fetch failed; using cache url={url}: {type(exc).__name__}: {exc}")
+            else:
+                print(f"[magi] deprecations_source fetch failed; using local rules url={url}: {type(exc).__name__}: {exc}")
+                remote_rules = None
+
+    if source.mode == "replace":
+        return list(remote_rules or [])
+    if not remote_rules:
+        return local_rules
+    return _merge_deprecations_by_id(local_rules, remote_rules)
 
 
 def load_config() -> AppConfig:
     config_path = Path(__file__).resolve().parents[1] / "config.json"
     with config_path.open("r", encoding="utf-8") as fp:
         data = json.load(fp)
-    return AppConfig.model_validate(data)
+    config = AppConfig.model_validate(data)
+    if config.history_context:
+        config.history_context.deprecations = _resolve_history_deprecations(config.history_context)
+    return config
 
 
 def _validate_profile(profile: ProfileConfig) -> None:

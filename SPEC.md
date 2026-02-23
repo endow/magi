@@ -161,6 +161,13 @@ messages = [{"role": "user", "content": prompt}]
     "freshness_half_life_days": 180,
     "stale_weight": 0.55,
     "superseded_weight": 0.20,
+    "deprecations_source": {
+      "enabled": false,
+      "url": "https://example.com/magi/deprecations.json",
+      "mode": "merge|replace",
+      "timeout_seconds": 5,
+      "refresh_interval_seconds": 86400
+    },
     "deprecations": [
       {
         "id": "example-migration",
@@ -190,6 +197,7 @@ messages = [{"role": "user", "content": prompt}]
   - feedback / 実行結果を契機に `weight += alpha * reward` で更新し、`[weight_min, weight_max]` でclampする
 - `history_context.strategy=embedding` の場合、履歴類似検索は外部埋め込みモデルを使う（失敗時は lexical にフォールバック）。
 - 履歴は削除せず保持し、`validity_state(active|stale|superseded)` と鮮度減衰を使って参照重みを調整する。
+- `deprecations_source.enabled=true` の場合、外部JSONを取得して `deprecations` を `merge|replace` で解決する。取得失敗時はローカル `deprecations` へフォールバックする。
 - `deprecations` で技術移行ルール（legacy/current）を定義し、current語を含む新規実行時に過去legacy履歴を `superseded` に更新する。
 
 ---

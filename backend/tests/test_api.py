@@ -984,6 +984,85 @@ def test_save_run_history_marks_legacy_as_superseded(monkeypatch, tmp_path) -> N
     assert row["superseded_by"] == "authjs-migration"
 
 
+def test_resolve_history_deprecations_merges_remote_rules(monkeypatch) -> None:
+    main._DEPRECATIONS_SOURCE_CACHE.clear()
+    cfg = main.HistoryContextConfig(
+        deprecations=[
+            main.HistoryDeprecationRule(
+                id="authjs-migration",
+                legacy_terms=["nextauth"],
+                current_terms=["auth.js"],
+            ),
+            main.HistoryDeprecationRule(
+                id="react-query-rename",
+                legacy_terms=["react-query"],
+                current_terms=["tanstack query"],
+            ),
+        ],
+        deprecations_source=main.DeprecationsSourceConfig(
+            enabled=True,
+            url="https://example.com/deprecations.json",
+            mode="merge",
+            refresh_interval_seconds=3600,
+        ),
+    )
+
+    class _FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):
+            return {
+                "deprecations": [
+                    {
+                        "id": "authjs-migration",
+                        "legacy_terms": ["nextauth", "next-auth"],
+                        "current_terms": ["auth.js", "authjs"],
+                    },
+                    {
+                        "id": "next-font-migration",
+                        "legacy_terms": ["@next/font"],
+                        "current_terms": ["next/font"],
+                    },
+                ]
+            }
+
+    monkeypatch.setattr(main.httpx, "get", lambda *args, **kwargs: _FakeResponse())
+
+    merged = main._resolve_history_deprecations(cfg)
+    by_id = {item.id: item for item in merged}
+    assert set(by_id.keys()) == {"authjs-migration", "react-query-rename", "next-font-migration"}
+    assert by_id["authjs-migration"].legacy_terms == ["nextauth", "next-auth"]
+
+
+def test_resolve_history_deprecations_falls_back_to_local_when_fetch_fails(monkeypatch) -> None:
+    main._DEPRECATIONS_SOURCE_CACHE.clear()
+    cfg = main.HistoryContextConfig(
+        deprecations=[
+            main.HistoryDeprecationRule(
+                id="authjs-migration",
+                legacy_terms=["nextauth"],
+                current_terms=["auth.js"],
+            )
+        ],
+        deprecations_source=main.DeprecationsSourceConfig(
+            enabled=True,
+            url="https://example.com/deprecations.json",
+            mode="merge",
+            refresh_interval_seconds=3600,
+        ),
+    )
+
+    def _raise_get(*args, **kwargs):
+        raise RuntimeError("network error")
+
+    monkeypatch.setattr(main.httpx, "get", _raise_get)
+
+    merged = main._resolve_history_deprecations(cfg)
+    assert len(merged) == 1
+    assert merged[0].id == "authjs-migration"
+
+
 def test_rank_history_matches_lexical_downweights_superseded() -> None:
     rows = [
         {

@@ -38,46 +38,19 @@
     "freshness_half_life_days": 180,
     "stale_weight": 0.55,
     "superseded_weight": 0.20,
+    "deprecations_source": {
+      "enabled": true,
+      "url": "https://raw.githubusercontent.com/endow/magi/master/backend/deprecations.community.json",
+      "mode": "replace",
+      "timeout_seconds": 5,
+      "refresh_interval_seconds": 86400,
+      "allow_http": false
+    },
     "deprecations": [
       {
         "id": "authjs-migration",
         "legacy_terms": ["nextauth", "next-auth"],
         "current_terms": ["auth.js", "authjs", "better auth"]
-      },
-      {
-        "id": "next-app-router-migration",
-        "legacy_terms": ["pages router", "getserversideprops", "getstaticprops", "_app.tsx", "_document.tsx"],
-        "current_terms": ["app router", "route handler", "server component", "layout.tsx"]
-      },
-      {
-        "id": "react-query-rename",
-        "legacy_terms": ["react-query", "react query v3"],
-        "current_terms": ["tanstack query", "@tanstack/react-query"]
-      },
-      {
-        "id": "next-image-legacy",
-        "legacy_terms": ["next/legacy/image", "legacy image component"],
-        "current_terms": ["next/image"]
-      },
-      {
-        "id": "prisma-major-upgrade",
-        "legacy_terms": ["prisma 4", "prisma4", "previewfeatures"],
-        "current_terms": ["prisma 5", "prisma5"]
-      },
-      {
-        "id": "eslint-flat-config",
-        "legacy_terms": [".eslintrc", ".eslintrc.js", ".eslintrc.json"],
-        "current_terms": ["eslint.config.js", "flat config"]
-      },
-      {
-        "id": "next-font-migration",
-        "legacy_terms": ["@next/font", "next font package"],
-        "current_terms": ["next/font"]
-      },
-      {
-        "id": "turbo-repo-rename",
-        "legacy_terms": ["turborepo", "turbo repo"],
-        "current_terms": ["turbo", "turbo.json"]
       }
     ]
   },

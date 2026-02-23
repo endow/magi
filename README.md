@@ -180,6 +180,14 @@ URL:
     "freshness_half_life_days": 180,
     "stale_weight": 0.55,
     "superseded_weight": 0.20,
+    "deprecations_source": {
+      "enabled": true,
+      "url": "https://raw.githubusercontent.com/endow/magi/master/backend/deprecations.community.json",
+      "mode": "replace",
+      "timeout_seconds": 5,
+      "refresh_interval_seconds": 86400,
+      "allow_http": false
+    },
     "deprecations": [
       {
         "id": "authjs-migration",
@@ -251,6 +259,8 @@ URL:
 - データは削除せず保持
 - `validity_state` (`active|stale|superseded`) を保持
 - 類似検索は `similarity × freshness × validity_weight` でスコアリング
+- `deprecations_source.enabled=true` の場合、外部JSONから deprecations を取得（`mode=merge|replace`、取得失敗時はローカル定義へフォールバック）
+- community-driven 運用では `backend/deprecations.community.json` を更新して `master` へ push すると、Raw URL経由で自動反映される
 - `deprecations` の `current_terms` を含む新規実行が入ると、`legacy_terms` を含む過去履歴を `superseded` に更新
 - 現在のサンプルは `nextauth->auth.js`, `pages router->app router`, `react-query->tanstack query` などを含む
 

@@ -10,8 +10,9 @@ body {
   @apply bg-terminal-bg text-terminal-text antialiased;
   font-family: var(--font-space-grotesk), "Segoe UI", "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif;
   background-image:
-    radial-gradient(circle at 14% 8%, rgba(77, 170, 229, 0.2), transparent 32%),
-    radial-gradient(circle at 88% 10%, rgba(255, 105, 56, 0.15), transparent 26%),
+    radial-gradient(circle at 15% 8%, rgba(83, 170, 228, 0.14), transparent 30%),
+    radial-gradient(circle at 82% 12%, rgba(255, 102, 60, 0.13), transparent 28%),
+    radial-gradient(circle at 50% 45%, rgba(25, 65, 110, 0.2), transparent 55%),
     linear-gradient(to bottom, rgba(4, 8, 15, 0.99), rgba(2, 4, 9, 1));
   background-attachment: fixed;
 }
@@ -63,10 +64,10 @@ body {
 }
 
 .magi-wire {
-  border: 1px solid rgba(255, 111, 74, 0.75);
+  border: 1px solid rgba(255, 113, 74, 0.7);
   box-shadow:
-    0 0 0 1px rgba(68, 133, 183, 0.35) inset,
-    0 0 18px rgba(255, 110, 70, 0.16);
+    0 0 0 1px rgba(64, 132, 182, 0.28) inset,
+    0 0 22px rgba(255, 110, 70, 0.14);
 }
 
 .magi-node {
@@ -76,18 +77,21 @@ body {
   min-height: 170px;
   position: relative;
   isolation: isolate;
-  --node-stroke: rgba(255, 115, 72, 0.95);
+  --node-stroke: rgba(255, 116, 73, 0.88);
   flex-direction: column;
   align-items: center;
   justify-content: center;
   text-align: center;
   gap: 0.25rem;
-  border-radius: 10px;
-  outline: 3px solid var(--node-stroke);
-  outline-offset: -3px;
-  background: linear-gradient(145deg, rgb(153, 209, 250), rgb(122, 185, 232));
-  color: #0c2034;
-  box-shadow: 0 0 0 1px rgba(41, 84, 120, 0.35) inset;
+  border-radius: 16px;
+  outline: 2px solid var(--node-stroke);
+  outline-offset: -2px;
+  background:
+    linear-gradient(160deg, rgba(37, 58, 90, 0.94), rgba(16, 27, 43, 0.95));
+  color: #d4ecff;
+  box-shadow:
+    0 0 0 1px rgba(52, 98, 147, 0.4) inset,
+    0 16px 30px rgba(0, 0, 0, 0.38);
 }
 
 .magi-node-idle {
@@ -99,28 +103,28 @@ body {
 }
 
 .magi-node-on {
-  --node-stroke: rgba(255, 188, 109, 1);
-  background: linear-gradient(145deg, rgb(255, 211, 143), rgb(255, 174, 96));
-  color: #2f150b;
+  --node-stroke: rgba(255, 194, 115, 0.98);
+  background: linear-gradient(155deg, rgba(83, 55, 33, 0.95), rgba(38, 27, 19, 0.95));
+  color: #ffd8a5;
   box-shadow:
-    0 0 0 1px rgba(41, 84, 120, 0.45) inset,
-    0 0 18px rgba(255, 191, 116, 0.6),
-    0 8px 20px rgba(0, 0, 0, 0.35);
+    0 0 0 1px rgba(117, 77, 49, 0.52) inset,
+    0 0 20px rgba(255, 190, 116, 0.42),
+    0 14px 28px rgba(0, 0, 0, 0.34);
 }
 
 .magi-node-relay {
-  --node-stroke: rgba(255, 188, 109, 0.95);
-  background: linear-gradient(145deg, rgb(255, 227, 179), rgb(255, 196, 130));
-  color: #2f180b;
+  --node-stroke: rgba(255, 178, 105, 0.95);
+  background: linear-gradient(160deg, rgba(55, 45, 28, 0.95), rgba(28, 23, 18, 0.95));
+  color: #f6c88f;
   box-shadow:
-    0 0 0 1px rgba(41, 84, 120, 0.4) inset,
-    0 0 12px rgba(255, 191, 116, 0.46);
+    0 0 0 1px rgba(94, 73, 53, 0.4) inset,
+    0 0 14px rgba(255, 177, 103, 0.32);
 }
 
 .magi-node-error {
-  --node-stroke: rgba(255, 176, 104, 1);
-  background: linear-gradient(145deg, rgb(255, 196, 132), rgb(255, 158, 88));
-  color: #3d170b;
+  --node-stroke: rgba(255, 108, 123, 0.95);
+  background: linear-gradient(160deg, rgba(77, 35, 45, 0.95), rgba(36, 19, 28, 0.95));
+  color: #ffb9c4;
 }
 
 .magi-node-rejected {
@@ -135,11 +139,11 @@ body {
 
 .magi-node-conclusion {
   --node-stroke: rgba(132, 216, 255, 0.95);
-  background: linear-gradient(145deg, rgb(182, 231, 255), rgb(142, 206, 243));
-  color: #0a2a3e;
+  background: linear-gradient(165deg, rgba(34, 82, 114, 0.96), rgba(17, 49, 74, 0.96));
+  color: #bde8ff;
   box-shadow:
-    0 0 0 1px rgba(56, 111, 150, 0.4) inset,
-    0 0 18px rgba(140, 219, 255, 0.45),
+    0 0 0 1px rgba(66, 133, 177, 0.4) inset,
+    0 0 22px rgba(140, 219, 255, 0.4),
     0 8px 20px rgba(0, 0, 0, 0.32);
 }
 
@@ -154,7 +158,8 @@ body {
   font-size: 1.12rem;
   font-weight: 900;
   letter-spacing: 0.07em;
-  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.25);
+  text-transform: uppercase;
+  text-shadow: 0 0 8px rgba(132, 198, 245, 0.28);
 }
 
 .magi-node-model {
@@ -206,14 +211,82 @@ body {
 
 .magi-chamber {
   position: relative;
+  overflow: hidden;
+  isolation: isolate;
+}
+
+.magi-chamber::before {
+  content: "";
+  position: absolute;
+  inset: 6px;
+  border-radius: 18px;
+  background:
+    radial-gradient(circle at 50% 52%, rgba(38, 79, 126, 0.3), rgba(6, 13, 24, 0.15) 55%, transparent 78%),
+    linear-gradient(135deg, rgba(255, 102, 64, 0.04), rgba(102, 191, 255, 0.05));
+  pointer-events: none;
+  z-index: 0;
+}
+
+.magi-chamber::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 56%;
+  width: min(70vw, 540px);
+  aspect-ratio: 1 / 1;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  border: 1px solid rgba(90, 162, 220, 0.24);
+  box-shadow:
+    0 0 0 16px rgba(36, 69, 104, 0.12) inset,
+    0 0 0 32px rgba(255, 111, 74, 0.08) inset;
+  pointer-events: none;
+  z-index: 0;
+  transition:
+    border-color 280ms ease,
+    box-shadow 280ms ease,
+    filter 280ms ease;
+}
+
+.magi-chamber-discussion::after {
+  border-color: rgba(255, 179, 98, 0.46);
+  box-shadow:
+    0 0 0 16px rgba(63, 95, 132, 0.16) inset,
+    0 0 0 34px rgba(255, 121, 78, 0.14) inset,
+    0 0 22px rgba(255, 138, 91, 0.2);
+  animation:
+    magi-ring-spin 12s linear infinite,
+    magi-ring-pulse 1.9s ease-in-out infinite;
+}
+
+.magi-chamber-conclusion::after {
+  border-color: rgba(126, 214, 255, 0.58);
+  box-shadow:
+    0 0 0 16px rgba(52, 119, 164, 0.2) inset,
+    0 0 0 34px rgba(108, 200, 255, 0.2) inset,
+    0 0 28px rgba(111, 205, 255, 0.45);
+  filter: saturate(1.12) brightness(1.08);
+}
+
+.magi-chamber-discussion .magi-peer-group {
+  border-color: rgba(255, 188, 111, 0.58);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 205, 137, 0.15),
+    0 0 20px rgba(255, 126, 78, 0.22);
+}
+
+.magi-chamber-conclusion .magi-peer-group {
+  border-color: rgba(132, 214, 255, 0.5);
+  box-shadow:
+    inset 0 0 0 1px rgba(165, 225, 255, 0.2),
+    0 0 22px rgba(121, 206, 255, 0.25);
 }
 
 .magi-node-wrap {
   position: relative;
   z-index: 2;
-  border-radius: 10px;
+  border-radius: 16px;
   overflow: hidden;
-  background: linear-gradient(145deg, rgb(153, 209, 250), rgb(122, 185, 232));
 }
 
 .magi-links {
@@ -222,8 +295,8 @@ body {
 
 .magi-link-path {
   fill: none;
-  stroke: rgba(255, 184, 108, 0.72);
-  stroke-width: 4;
+  stroke: rgba(255, 170, 94, 0.74);
+  stroke-width: 3.5;
   vector-effect: non-scaling-stroke;
 }
 
@@ -243,7 +316,7 @@ body {
   padding: 7px 14px;
   border: 1px solid rgba(136, 218, 255, 0.72);
   border-radius: 8px;
-  background: rgba(14, 38, 56, 0.8);
+  background: rgba(14, 38, 56, 0.86);
   font-size: 22px;
   font-weight: 900;
   letter-spacing: 0.05em;
@@ -261,7 +334,7 @@ body {
   padding: 7px 14px;
   border: 1px solid rgba(255, 192, 124, 0.72);
   border-radius: 8px;
-  background: rgba(40, 28, 12, 0.78);
+  background: rgba(40, 28, 12, 0.86);
   font-size: 22px;
   font-weight: 900;
   letter-spacing: 0.05em;
@@ -306,14 +379,18 @@ body {
   .magi-peer-group {
     display: block;
     position: absolute;
-    left: 1%;
-    right: 1%;
-    top: 154px;
-    bottom: 8px;
-    border: 2px solid rgba(255, 195, 120, 0.42);
-    border-radius: 14px;
-    background: linear-gradient(180deg, rgba(255, 194, 114, 0.05), rgba(255, 194, 114, 0.01));
-    box-shadow: inset 0 0 0 1px rgba(255, 205, 137, 0.12);
+    left: 50%;
+    top: 56%;
+    width: min(70vw, 540px);
+    aspect-ratio: 1 / 1;
+    transform: translate(-50%, -50%);
+    border: 2px solid rgba(255, 188, 110, 0.4);
+    border-radius: 999px;
+    background:
+      radial-gradient(circle at 50% 40%, rgba(255, 141, 94, 0.08), rgba(7, 14, 22, 0.02) 72%);
+    box-shadow:
+      inset 0 0 0 1px rgba(255, 205, 137, 0.1),
+      0 0 18px rgba(255, 122, 78, 0.14);
     z-index: 0;
     pointer-events: none;
   }
@@ -327,25 +404,25 @@ body {
 
   .magi-node-wrap {
     position: absolute;
-    width: 31%;
+    width: 30%;
   }
 
   .magi-node-local {
     left: 50%;
     top: 8px;
-    width: 32%;
+    width: 30%;
     transform: translateX(-50%);
   }
 
   .magi-node-local .magi-node {
-    min-height: 120px;
-    padding-top: 0.6rem;
-    padding-bottom: 0.6rem;
+    min-height: 88px;
+    padding-top: 0.45rem;
+    padding-bottom: 0.45rem;
   }
 
   .magi-node-a {
-    left: 2%;
-    bottom: 24px;
+    left: 3%;
+    bottom: 32px;
   }
 
   .magi-node-a .magi-node,
@@ -358,13 +435,13 @@ body {
 
   .magi-node-b {
     left: 50%;
-    top: 170px;
+    top: 168px;
     transform: translateX(-50%);
   }
 
   .magi-node-c {
-    right: 2%;
-    bottom: 24px;
+    right: 3%;
+    bottom: 32px;
   }
 }
 
@@ -394,5 +471,26 @@ body {
   100% {
     opacity: 1;
     filter: brightness(1.08);
+  }
+}
+
+@keyframes magi-ring-pulse {
+  0% {
+    filter: brightness(0.92);
+  }
+  50% {
+    filter: brightness(1.1);
+  }
+  100% {
+    filter: brightness(0.92);
+  }
+}
+
+@keyframes magi-ring-spin {
+  from {
+    transform: translate(-50%, -50%) rotate(0deg);
+  }
+  to {
+    transform: translate(-50%, -50%) rotate(360deg);
   }
 }

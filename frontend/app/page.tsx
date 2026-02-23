@@ -344,6 +344,11 @@ export default function HomePage() {
     C: "magi-node-c"
   };
   const chamberActive = localNodeState === "RELAY" || Object.values(nodeStates).some((state) => state === "BLINK");
+  const chamberMode = useMemo(() => {
+    if (showConclusion) return "conclusion";
+    if (showDiscussionBadge || chamberActive) return "discussion";
+    return "idle";
+  }, [chamberActive, showConclusion, showDiscussionBadge]);
 
   function clearNodeTimers() {
     nodeTimerRefs.current.forEach((id) => window.clearTimeout(id));
@@ -458,12 +463,10 @@ export default function HomePage() {
   useEffect(() => {
     function updateLinks() {
       const chamber = chamberRef.current;
-      const local = localNodeRef.current;
-      const peerGroup = peerGroupRef.current;
       const nodeA = nodeRefs.current.A;
       const nodeB = nodeRefs.current.B;
       const nodeC = nodeRefs.current.C;
-      if (!chamber || !local || !peerGroup || !nodeA || !nodeB || !nodeC) return;
+      if (!chamber || !nodeA || !nodeB || !nodeC) return;
 
       const chamberRect = chamber.getBoundingClientRect();
       if (window.innerWidth < 768) {
@@ -480,14 +483,10 @@ export default function HomePage() {
         };
       }
 
-      const l = centerOf(local);
-      const g = centerOf(peerGroup);
       const a = centerOf(nodeA);
       const b = centerOf(nodeB);
       const c = centerOf(nodeC);
 
-      const lBottomCenter = { x: l.x, y: l.y + l.rect.height / 2 };
-      const gTopCenter = { x: g.x, y: g.y - g.rect.height / 2 };
       const aTop = { x: a.x, y: a.y - a.rect.height / 2 };
       const cTop = { x: c.x, y: c.y - c.rect.height / 2 };
       const bLeft = { x: b.x - b.rect.width / 2, y: b.y };
@@ -497,7 +496,6 @@ export default function HomePage() {
 
       setLinkViewBox(`0 0 ${Math.max(1, chamberRect.width)} ${Math.max(1, chamberRect.height)}`);
       setLinkPaths([
-        `M ${lBottomCenter.x} ${lBottomCenter.y} L ${gTopCenter.x} ${gTopCenter.y}`,
         `M ${bLeft.x} ${bLeft.y} L ${aTop.x} ${aTop.y}`,
         `M ${bRight.x} ${bRight.y} L ${cTop.x} ${cTop.y}`,
         `M ${aRight.x} ${aRight.y} L ${cLeft.x} ${cLeft.y}`
@@ -1034,7 +1032,7 @@ export default function HomePage() {
         <p className="mt-2 text-sm text-terminal-dim">Command chamber: local pre-router, then three models, then one consensus core.</p>
 
         <div className="magi-wire mt-4 rounded-md p-3">
-          <div ref={chamberRef} className="magi-chamber grid grid-cols-1 gap-3 md:block">
+          <div ref={chamberRef} className={`magi-chamber magi-chamber-${chamberMode} grid grid-cols-1 gap-3 md:block`}>
             <svg
               className={`magi-links ${chamberActive ? "is-active" : ""}`}
               viewBox={linkViewBox}

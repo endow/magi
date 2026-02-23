@@ -225,6 +225,11 @@ URL:
 - 例: ローカル Ollama で `provider=ollama`, `model=qwen2.5:7b-instruct-q4_K_M`
 - 現行ルール: `translation|rewrite|summarize_short` + `complexity=low` + `safety=low` は `local_only` へ、それ以外は `cost`
 
+`routing_learning`（任意）:
+- ルーティングイベントをSQLiteに保存し、`feedback` と実行結果から profile 重みを更新
+- 最終スコアは `base_score + policy_weight`
+- 主要設定: `alpha`, `weight_min`, `weight_max`, `latency_threshold_ms`, `cost_threshold`
+
 履歴の扱い:
 - データは削除せず保持
 - `validity_state` (`active|stale|superseded`) を保持
@@ -248,11 +253,47 @@ URL:
 - 履歴一覧エンドポイント: `GET /api/magi/history?limit=20&offset=0`
 - 履歴詳細エンドポイント: `GET /api/magi/history/{run_id}`
 - スレッド削除エンドポイント: `DELETE /api/magi/history/thread/{thread_id}`
+- ルーティングfeedback: `POST /api/magi/routing/feedback`
+- ルーティングpolicy参照: `GET /api/magi/routing/policy?key=...`
+- ルーティングevents参照: `GET /api/magi/routing/events?thread_id=...&limit=20`
 - 同一 `thread_id` の場合、backend はスレッド文脈を有効プロンプトに注入し、最新ターンを専用の `[High Priority Latest Turn]` ブロックとして優先注入します
 - 空プロンプトまたは4000文字超過は `400` を返します
 - モデルごとのタイムアウトは profile 設定（`backend/config.json`）に従います（現行: local_only 20s / cost 25s / balance 25s / performance 35s / ultra 45s）
 - 部分失敗は許容されます（`status: ERROR`）
 - Backend は `run_id` を UUID で返します
+
+### Routing Learning 追加内容（MVP）
+
+- `routing_events` テーブル:
+  - router input/output、実行結果、user rating を保存
+- `routing_policy` テーブル:
+  - keyごとの profile weight と統計（`n`, `avg_reward`）を保存
+- reward:
+  - `rating(+1/-1)`、`error`、`latency_threshold_ms`、`cost_threshold` で計算
+- 更新式:
+  - `weight += alpha * reward`（`weight_min/weight_max` でclamp）
+
+### 新API curl例
+
+```bash
+curl -X POST http://localhost:8000/api/magi/routing/feedback ^
+  -H "Content-Type: application/json" ^
+  -d "{\"thread_id\":\"<thread_id>\",\"request_id\":\"<run_id>\",\"rating\":1,\"reason\":\"good answer\"}"
+```
+
+```bash
+curl "http://localhost:8000/api/magi/routing/policy?key=intent=qa|complexity=high|lang=ja"
+```
+
+```bash
+curl "http://localhost:8000/api/magi/routing/events?thread_id=<thread_id>&limit=20"
+```
+
+### テスト実行方法
+
+```bash
+python -m pytest backend/tests -q
+```
 
 ## 現在のUI機能
 

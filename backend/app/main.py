@@ -91,6 +91,15 @@ class RouterRulesConfig(BaseModel):
     routes: list[RouteRule] = Field(default_factory=list)
 
 
+class RoutingLearningConfig(BaseModel):
+    enabled: bool = True
+    alpha: float = 0.05
+    weight_min: float = -2.0
+    weight_max: float = 2.0
+    latency_threshold_ms: int = 8000
+    cost_threshold: float = 2.0
+
+
 class RouteDecision(BaseModel):
     profile: str
     confidence: int
@@ -110,6 +119,7 @@ class AppConfig(BaseModel):
     history_context: HistoryContextConfig | None = None
     request_router: RequestRouterConfig | None = None
     router_rules: RouterRulesConfig | None = None
+    routing_learning: RoutingLearningConfig | None = None
 
 
 HistoryContextConfig.model_rebuild()
@@ -227,6 +237,44 @@ class HistoryListResponse(BaseModel):
     items: list[HistoryItem]
 
 
+class RoutingFeedbackRequest(BaseModel):
+    thread_id: str
+    request_id: str
+    rating: Literal[-1, 0, 1]
+    reason: str | None = None
+
+
+class RoutingFeedbackResponse(BaseModel):
+    thread_id: str
+    request_id: str
+    rating: int
+    policy_key: str | None = None
+
+
+class RoutingPolicyResponse(BaseModel):
+    key: str
+    weights: dict[str, float]
+    stats: dict[str, float | int]
+    updated_at: str | None = None
+
+
+class RoutingEventItem(BaseModel):
+    id: int
+    thread_id: str
+    request_id: str
+    created_at: str
+    router_input: dict[str, Any]
+    router_output: dict[str, Any]
+    execution_result: dict[str, Any]
+    user_rating: int
+    user_reason: str | None = None
+
+
+class RoutingEventsResponse(BaseModel):
+    total: int
+    items: list[RoutingEventItem]
+
+
 @asynccontextmanager
 async def app_lifespan(_: FastAPI):
     _init_db()
@@ -309,6 +357,81 @@ def _safe_str_list(value: Any) -> list[str]:
         cleaned = value.strip().lower()
         return [cleaned] if cleaned else []
     return []
+
+
+def _routing_learning_config(config: AppConfig | None = None) -> RoutingLearningConfig:
+    if config and config.routing_learning:
+        return config.routing_learning
+    return RoutingLearningConfig()
+
+
+def _detect_language(prompt: str) -> str:
+    text = prompt.strip()
+    if not text:
+        return "unknown"
+    if re.search(r"[ぁ-んァ-ン一-龥]", text):
+        return "ja"
+    if re.search(r"[A-Za-z]", text):
+        return "en"
+    return "other"
+
+
+def _build_router_input_snapshot(
+    prompt: str,
+    decision: RouteDecision | None = None,
+    fallback_profile: str | None = None,
+) -> dict[str, Any]:
+    intent = _safe_str(decision.intent if decision else None).lower() or "other"
+    complexity = _safe_str(decision.complexity if decision else None).lower() or "medium"
+    safety = _safe_str(decision.safety if decision else None).lower() or ("low" if _is_low_safety_prompt(prompt) else "medium")
+    execution_tier = _safe_str(decision.execution_tier if decision else None).lower() or "cloud"
+    return {
+        "intent": intent,
+        "complexity": complexity,
+        "safety": safety,
+        "execution_tier": execution_tier,
+        "language": _detect_language(prompt),
+        "prompt_length": len(prompt.strip()),
+        "fallback_profile": fallback_profile or "",
+    }
+
+
+def _routing_policy_key_from_input(router_input: dict[str, Any]) -> str:
+    intent = _safe_str(router_input.get("intent")).lower() or "other"
+    complexity = _safe_str(router_input.get("complexity")).lower() or "medium"
+    lang = _safe_str(router_input.get("language")).lower() or "unknown"
+    return f"intent={intent}|complexity={complexity}|lang={lang}"
+
+
+def _select_profile_with_policy(
+    available_profiles: set[str],
+    base_selected: str,
+    router_input: dict[str, Any],
+) -> tuple[str, dict[str, dict[str, float]], str]:
+    profile_names = sorted(available_profiles)
+    base_scores = {name: (1.0 if name == base_selected else 0.0) for name in profile_names}
+    policy_key = _routing_policy_key_from_input(router_input)
+    policy = _get_routing_policy(policy_key)
+    weights = policy.get("weights", {})
+    candidates: dict[str, dict[str, float]] = {}
+    for name in profile_names:
+        policy_weight = float(weights.get(name, 0.0))
+        final_score = float(base_scores[name] + policy_weight)
+        candidates[name] = {
+            "base_score": float(base_scores[name]),
+            "policy_weight": policy_weight,
+            "final_score": final_score,
+        }
+    selected = profile_names[0]
+    for name in profile_names[1:]:
+        current = candidates[selected]
+        contender = candidates[name]
+        if contender["final_score"] > current["final_score"]:
+            selected = name
+            continue
+        if contender["final_score"] == current["final_score"] and contender["base_score"] > current["base_score"]:
+            selected = name
+    return selected, candidates, policy_key
 
 
 def _router_enabled(config: AppConfig, requested_profile: str | None) -> bool:
@@ -563,12 +686,22 @@ def _pick_profile_by_rules(
     return default_profile
 
 
-async def _route_profile(config: AppConfig, prompt: str) -> str | None:
+async def _route_profile_with_trace(
+    config: AppConfig,
+    prompt: str,
+) -> tuple[str | None, dict[str, Any], dict[str, Any]]:
     if not config.profiles or not config.default_profile:
-        return None
+        router_input = _build_router_input_snapshot(prompt, None, None)
+        return None, router_input, {"chosen_profile": None, "candidates": {}, "policy_key": _routing_policy_key_from_input(router_input)}
     router = config.request_router
     if not router or not router.enabled:
-        return None
+        router_input = _build_router_input_snapshot(prompt, None, config.default_profile)
+        chosen, candidates, policy_key = _select_profile_with_policy(
+            set(config.profiles.keys()),
+            config.default_profile,
+            router_input,
+        )
+        return chosen, router_input, {"chosen_profile": chosen, "candidates": candidates, "policy_key": policy_key}
 
     fallback_profile = config.default_profile
     full_model = f"{router.provider}/{router.model}"
@@ -580,11 +713,35 @@ async def _route_profile(config: AppConfig, prompt: str) -> str | None:
         and _is_low_safety_prompt(prompt)
         and "local_only" in available_profiles
     ):
+        decision = RouteDecision(
+            profile="local_only",
+            confidence=100,
+            reason="fast_path",
+            intent=fast_intent,
+            complexity="low",
+            safety="low",
+            execution_tier="local",
+        )
+        router_input = _build_router_input_snapshot(prompt, decision, fallback_profile)
+        selected_profile, candidates, policy_key = _select_profile_with_policy(
+            available_profiles,
+            "local_only",
+            router_input,
+        )
         print(
             "[magi] request_router fast_path "
-            f"intent={fast_intent} complexity=low safety=low tier=local profile=local_only"
+            f"intent={fast_intent} complexity=low safety=low tier=local profile={selected_profile}"
         )
-        return "local_only"
+        return (
+            selected_profile,
+            router_input,
+            {
+                "chosen_profile": selected_profile,
+                "candidates": candidates,
+                "policy_key": policy_key,
+                "reason": "fast_path",
+            },
+        )
 
     routing_prompt = (
         "You are a lightweight request router. "
@@ -613,20 +770,40 @@ async def _route_profile(config: AppConfig, prompt: str) -> str | None:
                 max_tokens=120,
             )
             decision = _extract_route_decision(raw_text, fallback_profile)
-            selected_profile = _pick_profile_by_rules(
+            base_profile = _pick_profile_by_rules(
                 decision,
                 config.router_rules,
                 fallback_profile,
                 available_profiles,
+            )
+            router_input = _build_router_input_snapshot(prompt, decision, fallback_profile)
+            if decision.confidence < router.min_confidence:
+                base_profile = fallback_profile
+                reason = "fallback_by_confidence"
+            else:
+                reason = decision.reason or "router"
+            selected_profile, candidates, policy_key = _select_profile_with_policy(
+                available_profiles,
+                base_profile,
+                router_input,
             )
 
             if decision.confidence < router.min_confidence:
                 print(
                     "[magi] request_router fallback_by_confidence "
                     f"model={full_model} confidence={decision.confidence} threshold={router.min_confidence} "
-                    f"profile={fallback_profile}"
+                    f"profile={selected_profile}"
                 )
-                return fallback_profile
+                return (
+                    selected_profile,
+                    router_input,
+                    {
+                        "chosen_profile": selected_profile,
+                        "candidates": candidates,
+                        "policy_key": policy_key,
+                        "reason": reason,
+                    },
+                )
 
             print(
                 "[magi] request_router success "
@@ -635,18 +812,72 @@ async def _route_profile(config: AppConfig, prompt: str) -> str | None:
                 f"safety={decision.safety or '-'} tier={decision.execution_tier or '-'} "
                 f"profile={selected_profile} confidence={decision.confidence}"
             )
-            return selected_profile
+            return (
+                selected_profile,
+                router_input,
+                {
+                    "chosen_profile": selected_profile,
+                    "candidates": candidates,
+                    "policy_key": policy_key,
+                    "reason": reason,
+                },
+            )
         except asyncio.TimeoutError:
+            router_input = _build_router_input_snapshot(prompt, None, fallback_profile)
+            selected_profile, candidates, policy_key = _select_profile_with_policy(
+                available_profiles,
+                fallback_profile,
+                router_input,
+            )
             if attempt < max_attempts:
                 print(f"[magi] request_router timeout attempt={attempt}; retrying once")
                 continue
             print(f"[magi] request_router failed TimeoutError: ; fallback={fallback_profile}")
-            return fallback_profile
+            return (
+                selected_profile,
+                router_input,
+                {
+                    "chosen_profile": selected_profile,
+                    "candidates": candidates,
+                    "policy_key": policy_key,
+                    "reason": "timeout_fallback",
+                },
+            )
         except Exception as exc:  # noqa: BLE001
+            router_input = _build_router_input_snapshot(prompt, None, fallback_profile)
+            selected_profile, candidates, policy_key = _select_profile_with_policy(
+                available_profiles,
+                fallback_profile,
+                router_input,
+            )
             print(f"[magi] request_router failed {type(exc).__name__}: {exc}; fallback={fallback_profile}")
-            return fallback_profile
+            return (
+                selected_profile,
+                router_input,
+                {
+                    "chosen_profile": selected_profile,
+                    "candidates": candidates,
+                    "policy_key": policy_key,
+                    "reason": "error_fallback",
+                },
+            )
 
-    return fallback_profile
+    router_input = _build_router_input_snapshot(prompt, None, fallback_profile)
+    selected_profile, candidates, policy_key = _select_profile_with_policy(
+        available_profiles,
+        fallback_profile,
+        router_input,
+    )
+    return (
+        selected_profile,
+        router_input,
+        {"chosen_profile": selected_profile, "candidates": candidates, "policy_key": policy_key, "reason": "fallback"},
+    )
+
+
+async def _route_profile(config: AppConfig, prompt: str) -> str | None:
+    selected, _, _ = await _route_profile_with_trace(config, prompt)
+    return selected
 
 
 async def _resolve_profile_with_router(
@@ -659,6 +890,40 @@ async def _resolve_profile_with_router(
 
     routed_profile = await _route_profile(config, prompt)
     return _resolve_profile(config, routed_profile or requested_profile)
+
+
+async def _resolve_profile_with_router_trace(
+    config: AppConfig,
+    requested_profile: str | None,
+    prompt: str,
+) -> tuple[str, ProfileConfig, dict[str, Any], dict[str, Any]]:
+    if not _router_enabled(config, requested_profile):
+        profile_name, profile = _resolve_profile(config, requested_profile)
+        available_profiles = set(config.profiles.keys()) if config.profiles else {profile_name}
+        router_input = _build_router_input_snapshot(prompt, None, profile_name)
+        selected_profile, candidates, policy_key = _select_profile_with_policy(
+            available_profiles,
+            profile_name,
+            router_input,
+        )
+        # Explicit profile selection must remain authoritative.
+        if requested_profile:
+            selected_profile = profile_name
+            candidates = {
+                key: {"base_score": (1.0 if key == profile_name else 0.0), "policy_weight": 0.0, "final_score": (1.0 if key == profile_name else 0.0)}
+                for key in sorted(available_profiles)
+            }
+        return selected_profile, profile, router_input, {
+            "chosen_profile": selected_profile,
+            "candidates": candidates,
+            "policy_key": policy_key,
+            "reason": "manual" if requested_profile else "default",
+        }
+
+    routed_profile, router_input, router_output = await _route_profile_with_trace(config, prompt)
+    resolved_profile_name, profile = _resolve_profile(config, routed_profile or requested_profile)
+    router_output = {**router_output, "chosen_profile": resolved_profile_name}
+    return resolved_profile_name, profile, router_input, router_output
 
 
 def _extract_text(response: Any) -> str:
@@ -1561,9 +1826,30 @@ def _init_db() -> None:
                 error_message TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_agent_results_run_id ON agent_results(run_id);
+            CREATE TABLE IF NOT EXISTS routing_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                thread_id TEXT NOT NULL,
+                request_id TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                router_input_json TEXT NOT NULL,
+                router_output_json TEXT NOT NULL,
+                execution_result_json TEXT NOT NULL,
+                user_rating INTEGER NOT NULL DEFAULT 0,
+                user_reason TEXT
+            );
+            CREATE TABLE IF NOT EXISTS routing_policy (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                key TEXT NOT NULL UNIQUE,
+                weights_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                stats_json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_routing_events_thread_id ON routing_events(thread_id);
+            CREATE INDEX IF NOT EXISTS idx_routing_events_request_id ON routing_events(request_id);
             """
         )
         _ensure_runs_columns(conn)
+        _ensure_routing_columns(conn)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_validity_state ON runs(validity_state)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_thread_turn ON runs(thread_id, turn_index)")
 
@@ -1600,6 +1886,349 @@ def _ensure_runs_columns(conn: sqlite3.Connection) -> None:
         SET turn_index = 1
         WHERE turn_index IS NULL OR turn_index < 1
         """
+    )
+
+
+def _ensure_routing_columns(conn: sqlite3.Connection) -> None:
+    event_columns = {row["name"] for row in conn.execute("PRAGMA table_info(routing_events)").fetchall()}
+    if "user_rating" not in event_columns:
+        conn.execute("ALTER TABLE routing_events ADD COLUMN user_rating INTEGER NOT NULL DEFAULT 0")
+    if "user_reason" not in event_columns:
+        conn.execute("ALTER TABLE routing_events ADD COLUMN user_reason TEXT")
+
+
+def _json_dump(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def _json_load_dict(payload: str | None) -> dict[str, Any]:
+    if not payload:
+        return {}
+    try:
+        loaded = json.loads(payload)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(loaded, dict):
+        return {}
+    return loaded
+
+
+def _normalize_policy_weights(weights: dict[str, Any], available_profiles: set[str] | None = None) -> dict[str, float]:
+    normalized: dict[str, float] = {}
+    for key, value in weights.items():
+        if available_profiles is not None and key not in available_profiles:
+            continue
+        try:
+            normalized[key] = float(value)
+        except (TypeError, ValueError):
+            normalized[key] = 0.0
+    if available_profiles:
+        for profile in available_profiles:
+            normalized.setdefault(profile, 0.0)
+    return normalized
+
+
+def _default_policy_stats() -> dict[str, float | int]:
+    return {"n": 0, "avg_reward": 0.0}
+
+
+def _routing_latency_threshold_ms(config: AppConfig | None = None) -> int:
+    return max(1, int(_routing_learning_config(config).latency_threshold_ms))
+
+
+def _routing_cost_threshold(config: AppConfig | None = None) -> float:
+    return float(_routing_learning_config(config).cost_threshold)
+
+
+def _routing_alpha(config: AppConfig | None = None) -> float:
+    return float(_routing_learning_config(config).alpha)
+
+
+def _routing_clamp_range(config: AppConfig | None = None) -> tuple[float, float]:
+    cfg = _routing_learning_config(config)
+    lower = float(cfg.weight_min)
+    upper = float(cfg.weight_max)
+    if lower > upper:
+        return upper, lower
+    return lower, upper
+
+
+def _clamp_weight(value: float, lower: float, upper: float) -> float:
+    return max(lower, min(upper, value))
+
+
+def _build_execution_result_snapshot(
+    profile: str,
+    results: list[AgentResult],
+    consensus: ConsensusResult | None = None,
+    failure_message: str | None = None,
+) -> dict[str, Any]:
+    models = [
+        {
+            "agent": item.agent,
+            "provider": item.provider,
+            "model": item.model,
+            "status": item.status,
+            "latency_ms": item.latency_ms,
+            "error_message": item.error_message,
+        }
+        for item in results
+    ]
+    max_latency = max((item.latency_ms for item in results), default=0)
+    token_estimate = max(0, sum(max(0, len(item.text)) // 4 for item in results))
+    cost_estimate = round(token_estimate / 1000.0, 4)
+    has_error = any(item.status == "ERROR" for item in results) or bool(failure_message)
+    payload: dict[str, Any] = {
+        "profile": profile,
+        "models": models,
+        "latency_ms": max_latency,
+        "token_estimate": token_estimate,
+        "cost_estimate": cost_estimate,
+        "error": has_error,
+        "error_message": failure_message,
+    }
+    if consensus:
+        payload["consensus"] = {
+            "provider": consensus.provider,
+            "model": consensus.model,
+            "status": consensus.status,
+            "latency_ms": consensus.latency_ms,
+            "error_message": consensus.error_message,
+        }
+    return payload
+
+
+def _compute_routing_reward(
+    user_rating: int,
+    execution_result: dict[str, Any],
+    config: AppConfig | None = None,
+) -> float:
+    reward = float(user_rating)
+    if bool(execution_result.get("error")):
+        reward -= 1.0
+    latency_ms = int(execution_result.get("latency_ms") or 0)
+    if latency_ms > _routing_latency_threshold_ms(config):
+        reward -= 0.2
+    profile = _safe_str(execution_result.get("profile")).lower()
+    if profile != "local_only":
+        cost_estimate = float(execution_result.get("cost_estimate") or 0.0)
+        if cost_estimate > _routing_cost_threshold(config):
+            reward -= 0.2
+    return reward
+
+
+def _next_policy_stats(stats: dict[str, Any], reward: float) -> dict[str, float | int]:
+    prev_n = int(stats.get("n") or 0)
+    prev_avg = float(stats.get("avg_reward") or 0.0)
+    next_n = prev_n + 1
+    next_avg = ((prev_avg * prev_n) + reward) / next_n
+    return {"n": next_n, "avg_reward": next_avg}
+
+
+def _get_routing_policy(key: str) -> dict[str, Any]:
+    _init_db()
+    with _get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT key, weights_json, stats_json, updated_at FROM routing_policy WHERE key = ?",
+            (key,),
+        ).fetchone()
+    if row is None:
+        return {"key": key, "weights": {}, "stats": _default_policy_stats(), "updated_at": None}
+    return {
+        "key": str(row["key"]),
+        "weights": _normalize_policy_weights(_json_load_dict(row["weights_json"])),
+        "stats": _json_load_dict(row["stats_json"]) or _default_policy_stats(),
+        "updated_at": row["updated_at"],
+    }
+
+
+def _upsert_routing_policy(key: str, weights: dict[str, float], stats: dict[str, float | int]) -> None:
+    _init_db()
+    now = datetime.now(timezone.utc).isoformat()
+    with _get_db_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO routing_policy (key, weights_json, updated_at, stats_json)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                weights_json = excluded.weights_json,
+                updated_at = excluded.updated_at,
+                stats_json = excluded.stats_json
+            """,
+            (key, _json_dump(weights), now, _json_dump(stats)),
+        )
+
+
+def _save_routing_event(
+    thread_id: str,
+    request_id: str,
+    router_input: dict[str, Any],
+    router_output: dict[str, Any],
+) -> None:
+    _init_db()
+    created_at = datetime.now(timezone.utc).isoformat()
+    with _get_db_connection() as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO routing_events (
+                thread_id, request_id, created_at, router_input_json, router_output_json,
+                execution_result_json, user_rating, user_reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                thread_id,
+                request_id,
+                created_at,
+                _json_dump(router_input),
+                _json_dump(router_output),
+                _json_dump({}),
+                0,
+                None,
+            ),
+        )
+
+
+def _apply_policy_update_for_event(request_id: str, config: AppConfig | None = None) -> str | None:
+    _init_db()
+    learning = _routing_learning_config(config)
+    if not learning.enabled:
+        return None
+    with _get_db_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT request_id, router_output_json, execution_result_json, user_rating
+            FROM routing_events
+            WHERE request_id = ?
+            """,
+            (request_id,),
+        ).fetchone()
+        if row is None:
+            return None
+
+        router_output = _json_load_dict(row["router_output_json"])
+        execution_result = _json_load_dict(row["execution_result_json"])
+        user_rating = int(row["user_rating"] or 0)
+        policy_key = _safe_str(router_output.get("policy_key")) or None
+        chosen_profile = _safe_str(router_output.get("chosen_profile"))
+        if not policy_key or not chosen_profile:
+            return None
+
+        policy_row = conn.execute(
+            "SELECT weights_json, stats_json FROM routing_policy WHERE key = ?",
+            (policy_key,),
+        ).fetchone()
+        if policy_row is None:
+            weights: dict[str, float] = {}
+            stats: dict[str, Any] = _default_policy_stats()
+        else:
+            weights = _normalize_policy_weights(_json_load_dict(policy_row["weights_json"]))
+            stats = _json_load_dict(policy_row["stats_json"]) or _default_policy_stats()
+
+        reward = _compute_routing_reward(user_rating, execution_result, config)
+        delta = _routing_alpha(config) * reward
+        lower, upper = _routing_clamp_range(config)
+        current_weight = float(weights.get(chosen_profile, 0.0))
+        weights[chosen_profile] = _clamp_weight(current_weight + delta, lower, upper)
+        next_stats = _next_policy_stats(stats, reward)
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            """
+            INSERT INTO routing_policy (key, weights_json, updated_at, stats_json)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                weights_json = excluded.weights_json,
+                updated_at = excluded.updated_at,
+                stats_json = excluded.stats_json
+            """,
+            (policy_key, _json_dump(weights), now, _json_dump(next_stats)),
+        )
+        return policy_key
+
+
+def _update_routing_event_execution(request_id: str, execution_result: dict[str, Any], config: AppConfig | None = None) -> str | None:
+    _init_db()
+    with _get_db_connection() as conn:
+        updated = conn.execute(
+            "UPDATE routing_events SET execution_result_json = ? WHERE request_id = ?",
+            (_json_dump(execution_result), request_id),
+        ).rowcount
+    if updated == 0:
+        return None
+    return _apply_policy_update_for_event(request_id, config)
+
+
+def _update_routing_event_feedback(
+    thread_id: str,
+    request_id: str,
+    rating: int,
+    reason: str | None,
+    config: AppConfig | None = None,
+) -> str | None:
+    _init_db()
+    with _get_db_connection() as conn:
+        updated = conn.execute(
+            """
+            UPDATE routing_events
+            SET user_rating = ?, user_reason = ?
+            WHERE thread_id = ? AND request_id = ?
+            """,
+            (int(rating), reason, thread_id, request_id),
+        ).rowcount
+    if updated == 0:
+        return None
+    return _apply_policy_update_for_event(request_id, config)
+
+
+def _list_routing_events(thread_id: str | None, limit: int) -> RoutingEventsResponse:
+    _init_db()
+    with _get_db_connection() as conn:
+        if thread_id:
+            total_row = conn.execute(
+                "SELECT COUNT(1) AS count FROM routing_events WHERE thread_id = ?",
+                (thread_id,),
+            ).fetchone()
+            rows = conn.execute(
+                """
+                SELECT id, thread_id, request_id, created_at, router_input_json, router_output_json,
+                       execution_result_json, user_rating, user_reason
+                FROM routing_events
+                WHERE thread_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (thread_id, limit),
+            ).fetchall()
+            total = int(total_row["count"] if total_row else 0)
+        else:
+            total_row = conn.execute("SELECT COUNT(1) AS count FROM routing_events").fetchone()
+            rows = conn.execute(
+                """
+                SELECT id, thread_id, request_id, created_at, router_input_json, router_output_json,
+                       execution_result_json, user_rating, user_reason
+                FROM routing_events
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            total = int(total_row["count"] if total_row else 0)
+
+    return RoutingEventsResponse(
+        total=total,
+        items=[
+            RoutingEventItem(
+                id=int(row["id"]),
+                thread_id=str(row["thread_id"]),
+                request_id=str(row["request_id"]),
+                created_at=str(row["created_at"]),
+                router_input=_json_load_dict(row["router_input_json"]),
+                router_output=_json_load_dict(row["router_output_json"]),
+                execution_result=_json_load_dict(row["execution_result_json"]),
+                user_rating=int(row["user_rating"] or 0),
+                user_reason=row["user_reason"],
+            )
+            for row in rows
+        ],
     )
 
 
@@ -2039,7 +2668,7 @@ async def _run_single_agent(agent_config: AgentConfig, prompt: str, timeout_seco
     full_model = f"{agent_config.provider}/{agent_config.model}"
     start = perf_counter()
     print(f"[magi] agent={agent_config.agent} start model={full_model}")
-    should_retry_on_timeout = agent_config.provider.strip().lower() == "openai"
+    should_retry_on_timeout = agent_config.provider.strip().lower() in {"openai", "gemini"}
     max_attempts = 2 if should_retry_on_timeout else 1
 
     for attempt in range(1, max_attempts + 1):
@@ -2408,49 +3037,140 @@ async def delete_thread_history(thread_id: str) -> dict[str, int | str]:
     return {"thread_id": thread_id, "deleted_runs": deleted}
 
 
+@app.post("/api/magi/routing/feedback", response_model=RoutingFeedbackResponse)
+async def submit_routing_feedback(payload: RoutingFeedbackRequest) -> RoutingFeedbackResponse:
+    normalized_thread_id = _normalize_thread_id(payload.thread_id)
+    if not normalized_thread_id:
+        raise HTTPException(status_code=400, detail="thread_id is required")
+    request_id = payload.request_id.strip()
+    if not request_id:
+        raise HTTPException(status_code=400, detail="request_id is required")
+    reason = payload.reason.strip() if payload.reason else None
+    try:
+        config = load_config()
+        policy_key = _update_routing_event_feedback(
+            normalized_thread_id,
+            request_id,
+            int(payload.rating),
+            reason,
+            config,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"failed to persist routing feedback: {exc}") from exc
+    if policy_key is None:
+        raise HTTPException(status_code=404, detail="routing event not found")
+    return RoutingFeedbackResponse(
+        thread_id=normalized_thread_id,
+        request_id=request_id,
+        rating=int(payload.rating),
+        policy_key=policy_key,
+    )
+
+
+@app.get("/api/magi/routing/policy", response_model=RoutingPolicyResponse)
+async def get_routing_policy(key: str) -> RoutingPolicyResponse:
+    normalized = key.strip()
+    if not normalized:
+        raise HTTPException(status_code=400, detail="key is required")
+    try:
+        policy = _get_routing_policy(normalized)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"failed to load routing policy: {exc}") from exc
+    return RoutingPolicyResponse(
+        key=normalized,
+        weights={name: float(value) for name, value in policy["weights"].items()},
+        stats={
+            "n": int(policy["stats"].get("n", 0)),
+            "avg_reward": float(policy["stats"].get("avg_reward", 0.0)),
+        },
+        updated_at=policy.get("updated_at"),
+    )
+
+
+@app.get("/api/magi/routing/events", response_model=RoutingEventsResponse)
+async def get_routing_events(thread_id: str | None = None, limit: int = 20) -> RoutingEventsResponse:
+    if limit < 1 or limit > 100:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 100")
+    normalized_thread_id = _normalize_thread_id(thread_id) if thread_id is not None else None
+    try:
+        return _list_routing_events(normalized_thread_id, limit)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"failed to load routing events: {exc}") from exc
+
+
 @app.post("/api/magi/run", response_model=RunResponse)
 async def run_magi(payload: RunRequest) -> RunResponse:
     prompt = _validate_prompt(payload.prompt)
     fresh_mode = _resolve_fresh_mode(prompt, payload.fresh_mode)
     thread_id = _normalize_thread_id(payload.thread_id) or str(uuid.uuid4())
+    run_id = str(uuid.uuid4())
+    turn_index = _next_turn_index(thread_id)
+    profile_name = payload.profile or ""
+    profile: ProfileConfig | None = None
+    router_input: dict[str, Any] = {}
+    router_output: dict[str, Any] = {}
+    routing_event_saved = False
 
     try:
         config = load_config()
-        profile_name, profile = await _resolve_profile_with_router(config, payload.profile, prompt)
+        profile_name, profile, router_input, router_output = await _resolve_profile_with_router_trace(config, payload.profile, prompt)
+        _save_routing_event(thread_id, run_id, router_input, router_output)
+        routing_event_saved = True
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"invalid config: {exc}") from exc
 
-    effective_prompt = await _build_effective_prompt(prompt, fresh_mode)
-    if _should_apply_thread_context(profile_name):
-        effective_prompt = _build_prompt_with_thread_context(effective_prompt, thread_id)
-    else:
-        print(f"[magi] thread_context skipped profile={profile_name}")
-    if _should_apply_history_context(profile_name):
-        effective_prompt = await _build_prompt_with_history(prompt, effective_prompt, config)
-    else:
-        print(f"[magi] history_context skipped profile={profile_name}")
-    tasks = [_run_single_agent(agent, effective_prompt, profile.timeout_seconds) for agent in profile.agents]
-    results = await asyncio.gather(*tasks)
-    if profile_name == "local_only":
-        results = [_postprocess_local_only_result(prompt, item) for item in results]
-    run_id = str(uuid.uuid4())
-    turn_index = _next_turn_index(thread_id)
-    consensus = _build_local_only_consensus(results) if profile_name == "local_only" else _build_pending_consensus(profile)
     try:
-        _save_run_history(
-            run_id,
-            profile_name,
-            prompt,
-            results,
-            consensus,
-            config,
-            thread_id=thread_id,
-            turn_index=turn_index,
-        )
+        effective_prompt = await _build_effective_prompt(prompt, fresh_mode)
+        if _should_apply_thread_context(profile_name):
+            effective_prompt = _build_prompt_with_thread_context(effective_prompt, thread_id)
+        else:
+            print(f"[magi] thread_context skipped profile={profile_name}")
+        if _should_apply_history_context(profile_name):
+            effective_prompt = await _build_prompt_with_history(prompt, effective_prompt, config)
+        else:
+            print(f"[magi] history_context skipped profile={profile_name}")
+        tasks = [_run_single_agent(agent, effective_prompt, profile.timeout_seconds) for agent in profile.agents]
+        results = await asyncio.gather(*tasks)
+        if profile_name == "local_only":
+            results = [_postprocess_local_only_result(prompt, item) for item in results]
+        consensus = _build_local_only_consensus(results) if profile_name == "local_only" else _build_pending_consensus(profile)
+        try:
+            _save_run_history(
+                run_id,
+                profile_name,
+                prompt,
+                results,
+                consensus,
+                config,
+                thread_id=thread_id,
+                turn_index=turn_index,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"failed to persist history: {exc}") from exc
+
+        if routing_event_saved:
+            execution_result = _build_execution_result_snapshot(profile_name, results, consensus=consensus)
+            _update_routing_event_execution(run_id, execution_result, config)
+    except HTTPException:
+        if routing_event_saved:
+            failure_result = _build_execution_result_snapshot(
+                profile_name or "unknown",
+                [],
+                failure_message="request failed",
+            )
+            _update_routing_event_execution(run_id, failure_result, config)
+        raise
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"failed to persist history: {exc}") from exc
+        if routing_event_saved:
+            failure_result = _build_execution_result_snapshot(
+                profile_name or "unknown",
+                [],
+                failure_message=f"{type(exc).__name__}: {exc}",
+            )
+            _update_routing_event_execution(run_id, failure_result, config)
+        raise
 
     return RunResponse(
         run_id=run_id,
@@ -2527,6 +3247,9 @@ async def recalc_consensus(payload: ConsensusRequest) -> ConsensusResponse:
     response_run_id = requested_run_id or str(uuid.uuid4())
     if requested_run_id and not _update_run_consensus(requested_run_id, consensus):
         raise HTTPException(status_code=404, detail="run not found")
+    if requested_run_id:
+        execution_result = _build_execution_result_snapshot(profile_name, payload.results, consensus=consensus)
+        _update_routing_event_execution(requested_run_id, execution_result, config)
 
     return ConsensusResponse(
         run_id=response_run_id,

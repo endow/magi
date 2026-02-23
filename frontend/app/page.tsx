@@ -224,6 +224,7 @@ export default function HomePage() {
   const [localNodeState, setLocalNodeState] = useState<NodeState>("IDLE");
   const [showConclusion, setShowConclusion] = useState(false);
   const [conclusionElapsedMs, setConclusionElapsedMs] = useState<number | null>(null);
+  const [loadingElapsedMs, setLoadingElapsedMs] = useState<number>(0);
   const [freshMode, setFreshMode] = useState(false);
   const isBusy = isLoading || isConsensusLoading;
   const isStrictDebate = selectedProfile === "performance" || selectedProfile === "ultra";
@@ -289,11 +290,17 @@ export default function HomePage() {
     return base.map((node) => byAgent.get(node.agent) ?? node);
   }, [downstreamProfile, isLoading, profileAgents, resolvedProfile, results]);
   const localRouteHint = useMemo(() => {
+    if (isLoading && !resolvedProfile) {
+      if (loadingElapsedMs < 7000) return "routing + context prep";
+      return "waiting provider responses";
+    }
+    if (isLoading && resolvedProfile && resolvedProfile !== "local_only") return `dispatching to ${resolvedProfile}`;
+    if (isConsensusLoading) return "consensus in progress";
     if (localNodeState === "BLINK") return "classifying";
     if (resolvedProfile === "local_only") return "handled local_only";
     if (resolvedProfile) return `routed to ${resolvedProfile}`;
     return "pre-routing";
-  }, [localNodeState, resolvedProfile]);
+  }, [isConsensusLoading, isLoading, loadingElapsedMs, localNodeState, resolvedProfile]);
   const localOnlyHandled = useMemo(
     () => resolvedProfile === "local_only" && (results.length > 0 || consensus?.status === "OK"),
     [consensus?.status, resolvedProfile, results.length]
@@ -314,6 +321,14 @@ export default function HomePage() {
       resolvedProfile !== "local_only" &&
       (isConsensusLoading || consensus?.status === "LOADING"),
     [consensus?.status, isConsensusLoading, resolvedProfile, showConclusion]
+  );
+  const showRoutingBadge = useMemo(
+    () => !showConclusion && isLoading && loadingElapsedMs < 7000,
+    [isLoading, loadingElapsedMs, showConclusion]
+  );
+  const showExecutingBadge = useMemo(
+    () => !showConclusion && isLoading && loadingElapsedMs >= 7000,
+    [isLoading, loadingElapsedMs, showConclusion]
   );
   const threadGroups = useMemo(() => {
     const byThread = new Map<string, RunHistoryItem[]>();
@@ -459,6 +474,20 @@ export default function HomePage() {
       clearNodeTimers();
     };
   }, []);
+
+  useEffect(() => {
+    if (!isLoading) {
+      setLoadingElapsedMs(0);
+      return;
+    }
+    const startedAt = Date.now();
+    const id = window.setInterval(() => {
+      setLoadingElapsedMs(Date.now() - startedAt);
+    }, 250);
+    return () => {
+      window.clearInterval(id);
+    };
+  }, [isLoading]);
 
   useEffect(() => {
     function updateLinks() {
@@ -1061,48 +1090,64 @@ export default function HomePage() {
               </div>
             </div>
             {chamberNodes.map((node) => (
-              <div
-                key={`node-${node.agent}`}
-                ref={(el) => {
-                  nodeRefs.current[node.agent] = el;
-                }}
-                className={`magi-node-wrap ${nodePositionClass[node.agent]}`}
-              >
-                <div
-                  className={`magi-node p-4 magi-node-${nodeStates[node.agent].toLowerCase()} ${
-                    winnerAgent && nodeStates[node.agent] === "ON" && node.agent !== winnerAgent
-                      ? "magi-node-rejected"
-                      : ""
-                  } ${localOnlyHandled ? "magi-node-skipped" : ""} ${showConclusion ? "magi-node-conclusion" : ""}`}
-                >
-                  <p className="magi-node-label">{buildLlmLabel(node.provider, node.model, node.agent)}</p>
-                  <p className="magi-node-model mt-2 text-sm font-semibold">
-                    {node.provider === "-" ? `AGENT ${node.agent}` : `${node.provider}/${node.model}`}
-                  </p>
-                  <div className="magi-node-status-slot mt-2 w-full px-6">
-                    {localOnlyHandled ? (
-                      <p className="mt-1 text-[11px] font-semibold">skipped (not routed)</p>
-                    ) : confidenceMap[node.agent] !== null ? (
-                      <div className="magi-confidence-track">
-                        <div className="magi-confidence-fill" style={{ width: `${confidenceMap[node.agent]}%` }} />
+              (() => {
+                const displayNodeState: NodeState =
+                  showExecutingBadge && !resolvedProfile && !localOnlyHandled ? "BLINK" : nodeStates[node.agent];
+                return (
+                  <div
+                    key={`node-${node.agent}`}
+                    ref={(el) => {
+                      nodeRefs.current[node.agent] = el;
+                    }}
+                    className={`magi-node-wrap ${nodePositionClass[node.agent]}`}
+                  >
+                    <div
+                      className={`magi-node p-4 magi-node-${displayNodeState.toLowerCase()} ${
+                        winnerAgent && displayNodeState === "ON" && node.agent !== winnerAgent
+                          ? "magi-node-rejected"
+                          : ""
+                      } ${localOnlyHandled ? "magi-node-skipped" : ""} ${showConclusion ? "magi-node-conclusion" : ""}`}
+                    >
+                      <p className="magi-node-label">{buildLlmLabel(node.provider, node.model, node.agent)}</p>
+                      <p className="magi-node-model mt-2 text-sm font-semibold">
+                        {node.provider === "-" ? `AGENT ${node.agent}` : `${node.provider}/${node.model}`}
+                      </p>
+                      <div className="magi-node-status-slot mt-2 w-full px-6">
+                        {localOnlyHandled ? (
+                          <p className="mt-1 text-[11px] font-semibold">skipped (not routed)</p>
+                        ) : confidenceMap[node.agent] !== null ? (
+                          <div className="magi-confidence-track">
+                            <div className="magi-confidence-fill" style={{ width: `${confidenceMap[node.agent]}%` }} />
+                          </div>
+                        ) : null}
+                        {!localOnlyHandled && confidenceMap[node.agent] !== null ? (
+                          <p className="mt-1 text-[11px] font-semibold">confidence {confidenceMap[node.agent]}</p>
+                        ) : (
+                          <p className="mt-1 text-[11px] font-semibold opacity-0">confidence --</p>
+                        )}
+                        {!localOnlyHandled && displayNodeState === "BLINK" ? (
+                          <div className="magi-node-progress" />
+                        ) : null}
                       </div>
-                    ) : null}
-                    {!localOnlyHandled && confidenceMap[node.agent] !== null ? (
-                      <p className="mt-1 text-[11px] font-semibold">confidence {confidenceMap[node.agent]}</p>
-                    ) : (
-                      <p className="mt-1 text-[11px] font-semibold opacity-0">confidence --</p>
-                    )}
-                    {!localOnlyHandled && nodeStates[node.agent] === "BLINK" ? (
-                      <div className="magi-node-progress" />
-                    ) : null}
+                    </div>
                   </div>
-                </div>
-              </div>
+                );
+              })()
             ))}
-            {showConclusion || showDiscussionBadge ? (
+            {showConclusion || showDiscussionBadge || showRoutingBadge || showExecutingBadge ? (
               <>
-                <div className={showConclusion ? "magi-conclusion-badge" : "magi-discussion-badge"}>
-                  {showConclusion ? "Conclusion" : "Discussion"}
+                <div
+                  className={
+                    showConclusion
+                      ? "magi-conclusion-badge"
+                      : showExecutingBadge
+                        ? "magi-executing-badge"
+                      : showRoutingBadge
+                        ? "magi-routing-badge"
+                        : "magi-discussion-badge"
+                  }
+                >
+                  {showConclusion ? "Conclusion" : showRoutingBadge ? "Routing / Prep" : showExecutingBadge ? "Executing" : "Discussion"}
                 </div>
                 {showConclusion && conclusionElapsedMs !== null ? (
                   <div className="magi-conclusion-time">elapsed {formatElapsedMsToMinSec(conclusionElapsedMs)}</div>
@@ -1240,14 +1285,6 @@ export default function HomePage() {
                 </div>
                 <div className="flex items-center gap-2">
                   <span className={statusClass(result.status)}>{result.status}</span>
-                  <button
-                    type="button"
-                    onClick={() => copyResultText(result)}
-                    disabled={!result.text || isBusy}
-                    className="rounded border border-terminal-border px-2 py-1 text-[11px] disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    Copy
-                  </button>
                   {result.status === "ERROR" ? (
                     <button
                       type="button"
@@ -1257,7 +1294,16 @@ export default function HomePage() {
                     >
                       Retry
                     </button>
-                  ) : null}
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => copyResultText(result)}
+                      disabled={!result.text || isBusy}
+                      className="rounded border border-terminal-border px-2 py-1 text-[11px] disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Copy
+                    </button>
+                  )}
                 </div>
               </div>
 

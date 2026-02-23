@@ -344,6 +344,42 @@ body {
   pointer-events: none;
 }
 
+.magi-routing-badge {
+  position: absolute;
+  left: 12px;
+  top: 10px;
+  z-index: 3;
+  padding: 7px 14px;
+  border: 1px solid rgba(122, 191, 255, 0.72);
+  border-radius: 8px;
+  background: rgba(20, 35, 56, 0.9);
+  font-size: 22px;
+  font-weight: 900;
+  letter-spacing: 0.05em;
+  color: #9fd4ff;
+  text-shadow: 0 0 10px rgba(133, 206, 255, 0.4);
+  box-shadow: 0 0 14px rgba(133, 206, 255, 0.24);
+  pointer-events: none;
+}
+
+.magi-executing-badge {
+  position: absolute;
+  left: 12px;
+  top: 10px;
+  z-index: 3;
+  padding: 7px 14px;
+  border: 1px solid rgba(255, 196, 132, 0.72);
+  border-radius: 8px;
+  background: rgba(46, 30, 14, 0.9);
+  font-size: 22px;
+  font-weight: 900;
+  letter-spacing: 0.05em;
+  color: #ffc986;
+  text-shadow: 0 0 10px rgba(255, 197, 132, 0.4);
+  box-shadow: 0 0 14px rgba(255, 197, 132, 0.22);
+  pointer-events: none;
+}
+
 .magi-conclusion-time {
   position: absolute;
   right: 12px;

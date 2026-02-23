@@ -62,6 +62,7 @@ def _profiled_config_with_router(enabled: bool = True, min_confidence: int = 75)
                 when_intents_any=["translation", "rewrite", "summarize_short"],
                 when_complexity_any=["low"],
                 when_safety_any=["low"],
+                when_execution_tiers_any=["local"],
                 profile="local_only",
             ),
         ],
@@ -515,7 +516,11 @@ def test_run_uses_request_router_when_profile_not_provided(monkeypatch) -> None:
     monkeypatch.setattr(main, "_save_run_history", lambda *args, **kwargs: None)
 
     async def fake_route_profile(config, prompt):
-        return "local_only"
+        return (
+            "local_only",
+            {"intent": "rewrite", "complexity": "low", "safety": "low", "execution_tier": "local", "language": "ja", "prompt_length": len(prompt)},
+            {"chosen_profile": "local_only", "candidates": {"local_only": {"base_score": 1.0, "policy_weight": 0.0, "final_score": 1.0}}, "policy_key": "intent=rewrite|complexity=low|lang=ja"},
+        )
 
     async def fake_runner(agent_config, prompt, timeout_seconds):
         return main.AgentResult(
@@ -527,7 +532,7 @@ def test_run_uses_request_router_when_profile_not_provided(monkeypatch) -> None:
             latency_ms=100,
         )
 
-    monkeypatch.setattr(main, "_route_profile", fake_route_profile)
+    monkeypatch.setattr(main, "_route_profile_with_trace", fake_route_profile)
     monkeypatch.setattr(main, "_run_single_agent", fake_runner)
 
     response = client.post("/api/magi/run", json={"prompt": "deep architecture review"})
@@ -554,7 +559,7 @@ def test_run_skips_request_router_when_profile_is_explicit(monkeypatch) -> None:
             latency_ms=100,
         )
 
-    monkeypatch.setattr(main, "_route_profile", fail_route_profile)
+    monkeypatch.setattr(main, "_route_profile_with_trace", fail_route_profile)
     monkeypatch.setattr(main, "_run_single_agent", fake_runner)
 
     response = client.post("/api/magi/run", json={"prompt": "hello", "profile": "cost"})
@@ -597,6 +602,21 @@ def test_route_profile_fast_path_skips_router_call_for_simple_rewrite(monkeypatc
     monkeypatch.setattr(main, "_call_model_text", fail_call)
     selected = asyncio.run(main._route_profile(config, "日本語の敬語で、丁寧に言い換えて"))
     assert selected == "local_only"
+
+
+def test_route_profile_does_not_use_local_only_when_execution_tier_is_cloud(monkeypatch) -> None:
+    config = _profiled_config_with_router(enabled=True, min_confidence=75)
+
+    async def fake_call(full_model: str, prompt: str, timeout_seconds: int, max_tokens: int | None = None):
+        return (
+            '{"intent":"translation","complexity":"low","safety":"low","execution_tier":"cloud",'
+            '"profile":"local_only","confidence":95,"reason":"classified as cloud"}',
+            10,
+        )
+
+    monkeypatch.setattr(main, "_call_model_text", fake_call)
+    selected = asyncio.run(main._route_profile(config, "最新の米国金利動向を踏まえて、投資戦略を提案して"))
+    assert selected == "cost"
 
 
 def test_run_local_only_skips_history_context(monkeypatch) -> None:
@@ -1026,6 +1046,30 @@ def test_run_single_agent_retries_once_for_openai_timeout(monkeypatch) -> None:
     assert result.text == "ok-after-retry"
 
 
+def test_run_single_agent_retries_once_for_gemini_timeout(monkeypatch) -> None:
+    calls = {"count": 0}
+
+    async def fake_call_model_text(full_model: str, prompt: str, timeout_seconds: int):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise asyncio.TimeoutError()
+        return "ok-after-retry", 123
+
+    monkeypatch.setattr(main, "_call_model_text", fake_call_model_text)
+
+    result = asyncio.run(
+        main._run_single_agent(
+            agent_config=main.AgentConfig(agent="C", provider="gemini", model="gemini-2.5-flash"),
+            prompt="hello",
+            timeout_seconds=1,
+        )
+    )
+
+    assert calls["count"] == 2
+    assert result.status == "OK"
+    assert result.text == "ok-after-retry"
+
+
 def test_run_single_agent_does_not_retry_non_openai_timeout(monkeypatch) -> None:
     calls = {"count": 0}
 
@@ -1046,3 +1090,151 @@ def test_run_single_agent_does_not_retry_non_openai_timeout(monkeypatch) -> None
     assert calls["count"] == 1
     assert result.status == "ERROR"
     assert result.error_message == "timeout"
+
+
+def test_routing_policy_key_is_stable() -> None:
+    router_input = {
+        "intent": "translation",
+        "complexity": "low",
+        "language": "ja",
+    }
+    key1 = main._routing_policy_key_from_input(router_input)
+    key2 = main._routing_policy_key_from_input(dict(router_input))
+    assert key1 == key2 == "intent=translation|complexity=low|lang=ja"
+
+
+def test_policy_update_weight_increase_and_decrease(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("MAGI_DB_PATH", str(tmp_path / "magi-routing-policy.db"))
+    main._init_db()
+    config = main.AppConfig(
+        default_profile="cost",
+        routing_learning=main.RoutingLearningConfig(alpha=0.5, weight_min=-2.0, weight_max=2.0),
+    )
+    main._save_routing_event(
+        thread_id="thread-1",
+        request_id="req-1",
+        router_input={"intent": "qa", "complexity": "high", "language": "en"},
+        router_output={
+            "chosen_profile": "cost",
+            "policy_key": "intent=qa|complexity=high|lang=en",
+            "candidates": {},
+        },
+    )
+
+    main._update_routing_event_execution(
+        "req-1",
+        {
+            "profile": "cost",
+            "latency_ms": 100,
+            "error": False,
+            "cost_estimate": 0.1,
+        },
+        config,
+    )
+    policy_after_run = main._get_routing_policy("intent=qa|complexity=high|lang=en")
+    assert policy_after_run["weights"]["cost"] == 0.0
+
+    main._update_routing_event_feedback("thread-1", "req-1", 1, "good", config)
+    policy_after_positive = main._get_routing_policy("intent=qa|complexity=high|lang=en")
+    assert policy_after_positive["weights"]["cost"] > 0.0
+
+    main._update_routing_event_feedback("thread-1", "req-1", -1, "bad", config)
+    policy_after_negative = main._get_routing_policy("intent=qa|complexity=high|lang=en")
+    assert policy_after_negative["weights"]["cost"] < policy_after_positive["weights"]["cost"]
+
+
+def test_policy_update_clamps_weight(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("MAGI_DB_PATH", str(tmp_path / "magi-routing-clamp.db"))
+    main._init_db()
+    config = main.AppConfig(
+        default_profile="cost",
+        routing_learning=main.RoutingLearningConfig(alpha=1.0, weight_min=-0.1, weight_max=0.1),
+    )
+    main._save_routing_event(
+        thread_id="thread-1",
+        request_id="req-clamp",
+        router_input={"intent": "qa", "complexity": "high", "language": "en"},
+        router_output={
+            "chosen_profile": "cost",
+            "policy_key": "intent=qa|complexity=high|lang=en",
+            "candidates": {},
+        },
+    )
+    main._update_routing_event_execution(
+        "req-clamp",
+        {
+            "profile": "cost",
+            "latency_ms": 100,
+            "error": False,
+            "cost_estimate": 0.1,
+        },
+        config,
+    )
+    for _ in range(4):
+        main._update_routing_event_feedback("thread-1", "req-clamp", 1, "good", config)
+    positive = main._get_routing_policy("intent=qa|complexity=high|lang=en")
+    assert positive["weights"]["cost"] == 0.1
+
+    for _ in range(4):
+        main._update_routing_event_feedback("thread-1", "req-clamp", -1, "bad", config)
+    negative = main._get_routing_policy("intent=qa|complexity=high|lang=en")
+    assert negative["weights"]["cost"] == -0.1
+
+
+def test_routing_feedback_affects_next_auto_route(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("MAGI_DB_PATH", str(tmp_path / "magi-routing-integration.db"))
+    main._init_db()
+
+    config = _profiled_config_with_router(enabled=True)
+    config.profiles["balance"] = main.ProfileConfig(
+        agents=[
+            main.AgentConfig(agent="A", provider="openai", model="gpt-4.1"),
+            main.AgentConfig(agent="B", provider="anthropic", model="claude-sonnet-4-20250514"),
+            main.AgentConfig(agent="C", provider="gemini", model="gemini-2.5-flash"),
+        ],
+        consensus=main.ConsensusConfig(strategy="peer_vote", min_ok_results=2, rounds=1),
+        timeout_seconds=20,
+    )
+    config.default_profile = "cost"
+    config.routing_learning = main.RoutingLearningConfig(alpha=1.5, weight_min=-2.0, weight_max=2.0)
+    monkeypatch.setattr(main, "load_config", lambda: config)
+
+    async def fake_route_llm(full_model: str, prompt: str, timeout_seconds: int, max_tokens: int | None = None):
+        return (
+            '{"intent":"qa","complexity":"high","safety":"low","execution_tier":"cloud","profile":"cost","confidence":95,"reason":"default"}',
+            10,
+        )
+
+    async def fake_runner(agent_config, prompt, timeout_seconds):
+        return main.AgentResult(
+            agent=agent_config.agent,
+            provider=agent_config.provider,
+            model=agent_config.model,
+            text=f"ok-{agent_config.agent}",
+            status="OK",
+            latency_ms=100,
+        )
+
+    monkeypatch.setattr(main, "_call_model_text", fake_route_llm)
+    monkeypatch.setattr(main, "_run_single_agent", fake_runner)
+
+    first = client.post("/api/magi/run", json={"prompt": "design a backend architecture"})
+    assert first.status_code == 200
+    first_body = first.json()
+    assert first_body["profile"] == "cost"
+
+    feedback = client.post(
+        "/api/magi/routing/feedback",
+        json={
+            "thread_id": first_body["thread_id"],
+            "request_id": first_body["run_id"],
+            "rating": -1,
+            "reason": "too expensive",
+        },
+    )
+    assert feedback.status_code == 200
+
+    second = client.post("/api/magi/run", json={"prompt": "design a backend architecture"})
+    assert second.status_code == 200
+    second_body = second.json()
+    assert second_body["profile"] == "balance"

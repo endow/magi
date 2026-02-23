@@ -98,6 +98,8 @@ class RoutingLearningConfig(BaseModel):
     weight_max: float = 2.0
     latency_threshold_ms: int = 8000
     cost_threshold: float = 2.0
+    decay_lambda_per_day: float = 0.0
+    stats_ema_beta: float = 0.0
 
 
 class RouteDecision(BaseModel):
@@ -1976,6 +1978,14 @@ def _routing_alpha(config: AppConfig | None = None) -> float:
     return float(_routing_learning_config(config).alpha)
 
 
+def _routing_decay_lambda_per_day(config: AppConfig | None = None) -> float:
+    return max(0.0, float(_routing_learning_config(config).decay_lambda_per_day))
+
+
+def _routing_stats_ema_beta(config: AppConfig | None = None) -> float:
+    return max(0.0, min(1.0, float(_routing_learning_config(config).stats_ema_beta)))
+
+
 def _routing_clamp_range(config: AppConfig | None = None) -> tuple[float, float]:
     cfg = _routing_learning_config(config)
     lower = float(cfg.weight_min)
@@ -2049,12 +2059,50 @@ def _compute_routing_reward(
     return reward
 
 
-def _next_policy_stats(stats: dict[str, Any], reward: float) -> dict[str, float | int]:
+def _next_policy_stats(stats: dict[str, Any], reward: float, config: AppConfig | None = None) -> dict[str, float | int]:
     prev_n = int(stats.get("n") or 0)
     prev_avg = float(stats.get("avg_reward") or 0.0)
     next_n = prev_n + 1
-    next_avg = ((prev_avg * prev_n) + reward) / next_n
+    ema_beta = _routing_stats_ema_beta(config)
+    if ema_beta > 0.0:
+        next_avg = (ema_beta * reward) + ((1.0 - ema_beta) * prev_avg)
+    else:
+        next_avg = ((prev_avg * prev_n) + reward) / next_n
     return {"n": next_n, "avg_reward": next_avg}
+
+
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    candidate = value.strip()
+    if not candidate:
+        return None
+    try:
+        dt = datetime.fromisoformat(candidate)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _apply_weight_decay(
+    weights: dict[str, float],
+    updated_at: str | None,
+    config: AppConfig | None = None,
+) -> dict[str, float]:
+    decay_lambda = _routing_decay_lambda_per_day(config)
+    if decay_lambda <= 0.0 or not weights:
+        return dict(weights)
+    previous_time = _parse_iso_datetime(updated_at)
+    if previous_time is None:
+        return dict(weights)
+    now = datetime.now(timezone.utc)
+    elapsed_days = max(0.0, (now - previous_time).total_seconds() / 86400.0)
+    if elapsed_days <= 0.0:
+        return dict(weights)
+    factor = math.exp(-decay_lambda * elapsed_days)
+    return {name: float(value) * factor for name, value in weights.items()}
 
 
 def _get_routing_policy(key: str) -> dict[str, Any]:
@@ -2146,22 +2194,26 @@ def _apply_policy_update_for_event(request_id: str, config: AppConfig | None = N
             return None
 
         policy_row = conn.execute(
-            "SELECT weights_json, stats_json FROM routing_policy WHERE key = ?",
+            "SELECT weights_json, stats_json, updated_at FROM routing_policy WHERE key = ?",
             (policy_key,),
         ).fetchone()
         if policy_row is None:
             weights: dict[str, float] = {}
             stats: dict[str, Any] = _default_policy_stats()
+            previous_updated_at: str | None = None
         else:
             weights = _normalize_policy_weights(_json_load_dict(policy_row["weights_json"]))
             stats = _json_load_dict(policy_row["stats_json"]) or _default_policy_stats()
+            previous_updated_at = policy_row["updated_at"]
+
+        weights = _apply_weight_decay(weights, previous_updated_at, config)
 
         reward = _compute_routing_reward(user_rating, execution_result, config)
         delta = _routing_alpha(config) * reward
         lower, upper = _routing_clamp_range(config)
         current_weight = float(weights.get(chosen_profile, 0.0))
         weights[chosen_profile] = _clamp_weight(current_weight + delta, lower, upper)
-        next_stats = _next_policy_stats(stats, reward)
+        next_stats = _next_policy_stats(stats, reward, config)
         now = datetime.now(timezone.utc).isoformat()
         conn.execute(
             """

@@ -25,7 +25,9 @@
     "weight_min": -2.0,
     "weight_max": 2.0,
     "latency_threshold_ms": 8000,
-    "cost_threshold": 2.0
+    "cost_threshold": 2.0,
+    "decay_lambda_per_day": 0.05,
+    "stats_ema_beta": 0.2
   },
   "history_context": {
     "strategy": "embedding",

@@ -2,6 +2,7 @@ from fastapi.testclient import TestClient
 
 import backend.app.main as main
 import asyncio
+from datetime import datetime, timedelta, timezone
 
 
 client = TestClient(main.app)
@@ -1179,6 +1180,51 @@ def test_policy_update_clamps_weight(monkeypatch, tmp_path) -> None:
         main._update_routing_event_feedback("thread-1", "req-clamp", -1, "bad", config)
     negative = main._get_routing_policy("intent=qa|complexity=high|lang=en")
     assert negative["weights"]["cost"] == -0.1
+
+
+def test_policy_update_applies_time_decay(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("MAGI_DB_PATH", str(tmp_path / "magi-routing-decay.db"))
+    main._init_db()
+    config = main.AppConfig(
+        default_profile="cost",
+        routing_learning=main.RoutingLearningConfig(
+            alpha=0.0,
+            weight_min=-2.0,
+            weight_max=2.0,
+            decay_lambda_per_day=1.0,
+            stats_ema_beta=0.0,
+        ),
+    )
+    key = "intent=qa|complexity=high|lang=en"
+    main._save_routing_event(
+        thread_id="thread-1",
+        request_id="req-decay",
+        router_input={"intent": "qa", "complexity": "high", "language": "en"},
+        router_output={"chosen_profile": "cost", "policy_key": key, "candidates": {}},
+    )
+    main._upsert_routing_policy(key, {"cost": 1.0}, {"n": 0, "avg_reward": 0.0})
+    stale_time = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    with main._get_db_connection() as conn:
+        conn.execute("UPDATE routing_policy SET updated_at = ? WHERE key = ?", (stale_time, key))
+
+    main._update_routing_event_execution(
+        "req-decay",
+        {"profile": "cost", "latency_ms": 100, "error": False, "cost_estimate": 0.1},
+        config,
+    )
+    updated = main._get_routing_policy(key)
+    decayed = float(updated["weights"]["cost"])
+    assert 0.3 < decayed < 0.5
+
+
+def test_policy_stats_ema_is_used_when_configured() -> None:
+    config = main.AppConfig(
+        default_profile="cost",
+        routing_learning=main.RoutingLearningConfig(stats_ema_beta=0.2),
+    )
+    updated = main._next_policy_stats({"n": 2, "avg_reward": 0.5}, reward=-1.0, config=config)
+    assert updated["n"] == 3
+    assert abs(float(updated["avg_reward"]) - 0.2) < 1e-9
 
 
 def test_routing_feedback_affects_next_auto_route(monkeypatch, tmp_path) -> None:

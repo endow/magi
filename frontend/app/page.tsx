@@ -324,7 +324,7 @@ export default function HomePage() {
   function nodeStatesFromResults(items: AgentResult[]): Record<AgentId, NodeState> {
     const base: Record<AgentId, NodeState> = { A: "IDLE", B: "IDLE", C: "IDLE" };
     for (const item of items) {
-      base[item.agent] = item.status === "OK" ? "ON" : "ERROR";
+      base[item.agent] = item.status === "OK" ? "ON" : item.status === "LOADING" ? "BLINK" : "ERROR";
     }
     return base;
   }
@@ -746,7 +746,13 @@ export default function HomePage() {
     setResults(item.results);
     setConsensus(item.consensus);
     clearNodeTimers();
-    setLocalNodeState(item.profile === "local_only" ? "ON" : "RELAY");
+    const hasLoading =
+      item.consensus?.status === "LOADING" || item.results.some((result) => result.status === "LOADING");
+    if (item.profile === "local_only") {
+      setLocalNodeState(hasLoading ? "BLINK" : "ON");
+    } else {
+      setLocalNodeState(hasLoading ? "RELAY" : "ON");
+    }
     setNodeStates(nodeStatesFromResults(item.results));
     setShowConclusion(item.profile !== "local_only" && item.consensus?.status === "OK");
   }

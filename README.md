@@ -2,7 +2,8 @@
 
 ![MAGI Command Chamber](docs/images/magi-command-chamber-v1.0.png)
 
-1つのプロンプトを3つのLLMへ並列送信し、回答を横並びで表示します。
+MAGI は、単一プロンプトを入口ルーターで自動振り分けし、軽量タスクは `local_only`（ローカル1モデル）、それ以外は複数LLMの並列実行と合議で処理するローカル実行向けアプリです。  
+回答表示だけでなく、モデル別リトライ、合議の再計算、Fresh mode（Web最新情報の補強）、SQLiteへの履歴永続化、`thread_id` ベースの会話継続までを1画面で扱えます。
 
 ## 構成
 

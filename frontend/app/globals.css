@@ -8,7 +8,7 @@
 
 body {
   @apply bg-terminal-bg text-terminal-text antialiased;
-  font-family: "IBM Plex Mono", "Consolas", "Menlo", monospace;
+  font-family: var(--font-space-grotesk), "Segoe UI", "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif;
   background-image:
     radial-gradient(circle at 14% 8%, rgba(77, 170, 229, 0.2), transparent 32%),
     radial-gradient(circle at 88% 10%, rgba(255, 105, 56, 0.15), transparent 26%),
@@ -133,6 +133,16 @@ body {
     0 8px 20px rgba(0, 0, 0, 0.3);
 }
 
+.magi-node-conclusion {
+  --node-stroke: rgba(132, 216, 255, 0.95);
+  background: linear-gradient(145deg, rgb(182, 231, 255), rgb(142, 206, 243));
+  color: #0a2a3e;
+  box-shadow:
+    0 0 0 1px rgba(56, 111, 150, 0.4) inset,
+    0 0 18px rgba(140, 219, 255, 0.45),
+    0 8px 20px rgba(0, 0, 0, 0.32);
+}
+
 .magi-node-label {
   display: block;
   width: 100%;
@@ -225,17 +235,56 @@ body {
   opacity: 0.45;
 }
 
-.magi-conclusion {
+.magi-conclusion-badge {
   position: absolute;
-  left: 50%;
-  top: 62%;
-  transform: translate(-50%, -50%);
+  left: 12px;
+  top: 10px;
   z-index: 3;
-  font-size: 36px;
+  padding: 7px 14px;
+  border: 1px solid rgba(136, 218, 255, 0.72);
+  border-radius: 8px;
+  background: rgba(14, 38, 56, 0.8);
+  font-size: 22px;
   font-weight: 900;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.05em;
+  color: #8fdcff;
+  text-shadow: 0 0 10px rgba(138, 218, 255, 0.45);
+  box-shadow: 0 0 14px rgba(138, 218, 255, 0.28);
+  pointer-events: none;
+}
+
+.magi-discussion-badge {
+  position: absolute;
+  left: 12px;
+  top: 10px;
+  z-index: 3;
+  padding: 7px 14px;
+  border: 1px solid rgba(255, 192, 124, 0.72);
+  border-radius: 8px;
+  background: rgba(40, 28, 12, 0.78);
+  font-size: 22px;
+  font-weight: 900;
+  letter-spacing: 0.05em;
   color: #ffbf74;
-  text-shadow: 0 0 16px rgba(255, 198, 116, 0.62);
+  text-shadow: 0 0 10px rgba(255, 193, 125, 0.42);
+  box-shadow: 0 0 14px rgba(255, 193, 125, 0.24);
+  pointer-events: none;
+}
+
+.magi-conclusion-time {
+  position: absolute;
+  right: 12px;
+  top: 10px;
+  z-index: 3;
+  padding: 4px 10px;
+  border: 1px solid rgba(144, 198, 242, 0.52);
+  border-radius: 8px;
+  background: rgba(14, 28, 44, 0.76);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  color: #9acaf2;
+  box-shadow: 0 0 10px rgba(144, 198, 242, 0.2);
   pointer-events: none;
 }
 
@@ -259,8 +308,8 @@ body {
     position: absolute;
     left: 1%;
     right: 1%;
-    top: 156px;
-    bottom: 20px;
+    top: 154px;
+    bottom: 8px;
     border: 2px solid rgba(255, 195, 120, 0.42);
     border-radius: 14px;
     background: linear-gradient(180deg, rgba(255, 194, 114, 0.05), rgba(255, 194, 114, 0.01));
@@ -296,7 +345,7 @@ body {
 
   .magi-node-a {
     left: 2%;
-    bottom: 36px;
+    bottom: 24px;
   }
 
   .magi-node-a .magi-node,
@@ -309,13 +358,13 @@ body {
 
   .magi-node-b {
     left: 50%;
-    top: 186px;
+    top: 170px;
     transform: translateX(-50%);
   }
 
   .magi-node-c {
     right: 2%;
-    bottom: 36px;
+    bottom: 24px;
   }
 }
 

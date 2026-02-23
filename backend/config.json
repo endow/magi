@@ -8,7 +8,7 @@
     "min_confidence": 75
   },
   "router_rules": {
-    "default_profile": "cost",
+    "default_profile": "balance",
     "routes": [
       {
         "when_intents_any": ["translation", "rewrite", "summarize_short"],

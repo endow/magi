@@ -161,6 +161,13 @@ function splitConsensusText(text: string | null | undefined): { main: string; vo
   };
 }
 
+function formatElapsedMsToMinSec(elapsedMs: number): string {
+  const totalSeconds = Math.max(0, Math.round(elapsedMs / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}m ${seconds}s`;
+}
+
 function buildConfiguredLoadingCards(
   profileAgents: ProfilesResponse["profile_agents"],
   selectedProfile: string
@@ -216,6 +223,7 @@ export default function HomePage() {
   });
   const [localNodeState, setLocalNodeState] = useState<NodeState>("IDLE");
   const [showConclusion, setShowConclusion] = useState(false);
+  const [conclusionElapsedMs, setConclusionElapsedMs] = useState<number | null>(null);
   const [freshMode, setFreshMode] = useState(false);
   const isBusy = isLoading || isConsensusLoading;
   const isStrictDebate = selectedProfile === "performance" || selectedProfile === "ultra";
@@ -227,6 +235,19 @@ export default function HomePage() {
   const [linkPaths, setLinkPaths] = useState<string[]>([]);
   const [linkViewBox, setLinkViewBox] = useState("0 0 100 100");
   const nodeTimerRefs = useRef<number[]>([]);
+  const consensusClockRef = useRef<number | null>(null);
+
+  function markConsensusClockStart() {
+    consensusClockRef.current = typeof performance !== "undefined" ? performance.now() : Date.now();
+    setConclusionElapsedMs(null);
+  }
+
+  function markConsensusClockEnd() {
+    if (consensusClockRef.current === null) return;
+    const end = typeof performance !== "undefined" ? performance.now() : Date.now();
+    setConclusionElapsedMs(Math.max(0, Math.round(end - consensusClockRef.current)));
+    consensusClockRef.current = null;
+  }
 
   async function fetchHistory() {
     try {
@@ -286,6 +307,14 @@ export default function HomePage() {
     [consensus]
   );
   const parsedConsensus = useMemo(() => splitConsensusText(consensus?.text), [consensus?.text]);
+  const showDiscussionBadge = useMemo(
+    () =>
+      !showConclusion &&
+      resolvedProfile !== "" &&
+      resolvedProfile !== "local_only" &&
+      (isConsensusLoading || consensus?.status === "LOADING"),
+    [consensus?.status, isConsensusLoading, resolvedProfile, showConclusion]
+  );
   const threadGroups = useMemo(() => {
     const byThread = new Map<string, RunHistoryItem[]>();
     for (const item of history) {
@@ -369,7 +398,7 @@ export default function HomePage() {
     }
 
     const endTimer = window.setTimeout(() => {
-      setLocalNodeState("ON");
+      setLocalNodeState(consensusStatus === "LOADING" ? "RELAY" : "ON");
       setShowConclusion(consensusStatus === "OK" && profile !== "local_only");
     }, doneAt + 200);
     nodeTimerRefs.current.push(endTimer);
@@ -612,6 +641,7 @@ export default function HomePage() {
       latency_ms: 0
     });
     setLastRunPrompt(trimmed);
+    markConsensusClockStart();
 
     try {
       const success = await requestRun(trimmed);
@@ -631,6 +661,7 @@ export default function HomePage() {
       setIsLoading(false);
 
       if (success.consensus.status !== "LOADING") {
+        markConsensusClockEnd();
         return;
       }
 
@@ -650,6 +681,7 @@ export default function HomePage() {
         setResolvedProfile(finalized.profile);
         setConsensus(finalized.consensus);
         runNodeTransition(finalized.profile, success.results, finalized.consensus.status);
+        markConsensusClockEnd();
         await fetchHistory();
       } finally {
         setIsConsensusLoading(false);
@@ -683,6 +715,7 @@ export default function HomePage() {
     setIsLoading(true);
     clearNodeTimers();
     setShowConclusion(false);
+    markConsensusClockStart();
     setLocalNodeState("RELAY");
     setNodeStates((prev) => ({ ...prev, [agent]: "BLINK" }));
 
@@ -720,6 +753,7 @@ export default function HomePage() {
         if ((recalculated.turn_index ?? 0) > 0) setTurnIndex(recalculated.turn_index);
         setConsensus(recalculated.consensus);
         runNodeTransition(recalculated.profile, updatedResults, recalculated.consensus.status);
+        markConsensusClockEnd();
       } else {
         setNodeStates(nodeStatesFromResults(updatedResults));
       }
@@ -755,6 +789,8 @@ export default function HomePage() {
     }
     setNodeStates(nodeStatesFromResults(item.results));
     setShowConclusion(item.profile !== "local_only" && item.consensus?.status === "OK");
+    setConclusionElapsedMs(item.consensus ? item.consensus.latency_ms : null);
+    consensusClockRef.current = null;
   }
 
   function startNewChat() {
@@ -772,6 +808,8 @@ export default function HomePage() {
     setLocalNodeState("IDLE");
     setNodeStates({ A: "IDLE", B: "IDLE", C: "IDLE" });
     setShowConclusion(false);
+    setConclusionElapsedMs(null);
+    consensusClockRef.current = null;
   }
 
   function threadLabel(threadKey: string): string {
@@ -1013,7 +1051,7 @@ export default function HomePage() {
               aria-hidden="true"
             />
             <div ref={localNodeRef} className="magi-node-wrap magi-node-local">
-              <div className={`magi-node p-4 magi-node-${localNodeState.toLowerCase()}`}>
+              <div className={`magi-node p-4 magi-node-${localNodeState.toLowerCase()} ${showConclusion ? "magi-node-conclusion" : ""}`}>
                 <p className="magi-node-label">Local LLM</p>
                 <p className="magi-node-model mt-2 text-sm font-semibold">
                   {localAgent ? `${localAgent.provider}/${localAgent.model}` : "ollama/local"}
@@ -1037,7 +1075,7 @@ export default function HomePage() {
                     winnerAgent && nodeStates[node.agent] === "ON" && node.agent !== winnerAgent
                       ? "magi-node-rejected"
                       : ""
-                  } ${localOnlyHandled ? "magi-node-skipped" : ""}`}
+                  } ${localOnlyHandled ? "magi-node-skipped" : ""} ${showConclusion ? "magi-node-conclusion" : ""}`}
                 >
                   <p className="magi-node-label">{buildLlmLabel(node.provider, node.model, node.agent)}</p>
                   <p className="magi-node-model mt-2 text-sm font-semibold">
@@ -1063,7 +1101,16 @@ export default function HomePage() {
                 </div>
               </div>
             ))}
-            {showConclusion ? <div className="magi-conclusion">Conclusion</div> : null}
+            {showConclusion || showDiscussionBadge ? (
+              <>
+                <div className={showConclusion ? "magi-conclusion-badge" : "magi-discussion-badge"}>
+                  {showConclusion ? "Conclusion" : "Discussion"}
+                </div>
+                {showConclusion && conclusionElapsedMs !== null ? (
+                  <div className="magi-conclusion-time">elapsed {formatElapsedMsToMinSec(conclusionElapsedMs)}</div>
+                ) : null}
+              </>
+            ) : null}
           </div>
         </div>
 
@@ -1074,6 +1121,7 @@ export default function HomePage() {
             value={prompt}
             onChange={(event) => setPrompt(event.target.value)}
             onKeyDown={onTextareaKeyDown}
+            disabled={isBusy}
           />
           <div className="flex items-center gap-3">
             <button

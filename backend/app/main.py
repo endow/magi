@@ -373,6 +373,24 @@ def _safe_str_list(value: Any) -> list[str]:
     return []
 
 
+def _build_routing_reason_display(
+    selected_profile: str,
+    router_input: dict[str, Any],
+    raw_reason: str | None,
+) -> str:
+    intent = _safe_str(router_input.get("intent")) or "other"
+    complexity = _safe_str(router_input.get("complexity")) or "medium"
+    safety = _safe_str(router_input.get("safety")) or "low"
+    tier = _safe_str(router_input.get("execution_tier")) or "cloud"
+    base = f"intent={intent}, complexity={complexity}, safety={safety}, tier={tier} の判定で {selected_profile} を選択"
+    if not raw_reason:
+        return base
+    # Keep original reason only when it includes Japanese kana/ASCII text; otherwise prefer deterministic display.
+    if re.search(r"[ぁ-んァ-ンA-Za-z]", raw_reason):
+        return f"{base} ({raw_reason})"
+    return base
+
+
 def _routing_learning_config(config: AppConfig | None = None) -> RoutingLearningConfig:
     if config and config.routing_learning:
         return config.routing_learning
@@ -3195,7 +3213,11 @@ async def run_magi(payload: RunRequest) -> RunResponse:
         consensus=consensus,
         routing=RoutingDecisionInfo(
             profile=profile_name,
-            reason=_safe_str(router_output.get("reason")) or None,
+            reason=_build_routing_reason_display(
+                profile_name,
+                router_input,
+                _safe_str(router_output.get("reason")) or None,
+            ),
             intent=_safe_str(router_input.get("intent")) or None,
             complexity=_safe_str(router_input.get("complexity")) or None,
             safety=_safe_str(router_input.get("safety")) or None,

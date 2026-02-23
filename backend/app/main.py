@@ -1053,7 +1053,8 @@ def _is_fresh_sensitive_prompt(prompt: str) -> bool:
     if not lowered:
         return False
 
-    keywords = (
+    # Keep auto mode conservative: only enable when user explicitly requests recency.
+    latest_keywords = (
         "latest",
         "today",
         "current",
@@ -1079,12 +1080,7 @@ def _is_fresh_sensitive_prompt(prompt: str) -> bool:
         "アップデート",
         "リリース",
     )
-    if any(token in lowered for token in keywords):
-        return True
-
-    if re.search(r"\b(19|20)\d{2}\b", lowered):
-        return True
-    if re.search(r"\b(q[1-4]|fy\d{2,4})\b", lowered):
+    if any(token in lowered for token in latest_keywords):
         return True
     return False
 

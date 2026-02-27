@@ -1,0 +1,70 @@
+{
+  "global": {
+    "color": {
+      "terminal": {
+        "bg": { "value": "#04070c", "type": "color" },
+        "panel": { "value": "#09111a", "type": "color" },
+        "border": { "value": "#1a3248", "type": "color" },
+        "text": { "value": "#d5e7f7", "type": "color" },
+        "dim": { "value": "#89a4bc", "type": "color" },
+        "ok": { "value": "#72f0a0", "type": "color" },
+        "err": { "value": "#ff6f7f", "type": "color" },
+        "accent": { "value": "#ff8a5c", "type": "color" }
+      },
+      "surface": {
+        "deep": { "value": "#02060b", "type": "color" },
+        "ink": { "value": "#050a10", "type": "color" },
+        "wire": { "value": "#0d1d2a", "type": "color" }
+      }
+    },
+    "spacing": {
+      "0": { "value": 0, "type": "spacing" },
+      "1": { "value": 4, "type": "spacing" },
+      "2": { "value": 8, "type": "spacing" },
+      "3": { "value": 12, "type": "spacing" },
+      "4": { "value": 16, "type": "spacing" },
+      "6": { "value": 24, "type": "spacing" },
+      "8": { "value": 32, "type": "spacing" }
+    },
+    "radius": {
+      "sm": { "value": 4, "type": "borderRadius" },
+      "md": { "value": 6, "type": "borderRadius" },
+      "lg": { "value": 8, "type": "borderRadius" },
+      "xl": { "value": 12, "type": "borderRadius" },
+      "2xl": { "value": 16, "type": "borderRadius" },
+      "full": { "value": 999, "type": "borderRadius" }
+    },
+    "font": {
+      "family": {
+        "base": { "value": "Space Grotesk", "type": "fontFamilies" }
+      },
+      "size": {
+        "xs": { "value": 12, "type": "fontSizes" },
+        "sm": { "value": 14, "type": "fontSizes" },
+        "base": { "value": 16, "type": "fontSizes" },
+        "lg": { "value": 18, "type": "fontSizes" },
+        "xl": { "value": 20, "type": "fontSizes" },
+        "2xl": { "value": 24, "type": "fontSizes" }
+      },
+      "weight": {
+        "regular": { "value": "400", "type": "fontWeights" },
+        "semibold": { "value": "600", "type": "fontWeights" },
+        "bold": { "value": "700", "type": "fontWeights" },
+        "black": { "value": "900", "type": "fontWeights" }
+      },
+      "lineHeight": {
+        "tight": { "value": 1.25, "type": "lineHeights" },
+        "normal": { "value": 1.5, "type": "lineHeights" },
+        "relaxed": { "value": 1.7, "type": "lineHeights" }
+      },
+      "letterSpacing": {
+        "wide": { "value": "0.07em", "type": "letterSpacing" },
+        "wider": { "value": "0.2em", "type": "letterSpacing" }
+      }
+    }
+  },
+  "$themes": [],
+  "$metadata": {
+    "tokenSetOrder": ["global"]
+  }
+}

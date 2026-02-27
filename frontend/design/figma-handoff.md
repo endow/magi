@@ -11,12 +11,12 @@
   - `frontend/app/components/run-meta-bar.tsx`
   - `frontend/app/components/routing-info-panel.tsx`
   - `frontend/app/components/feedback-panel.tsx`
-- Design token source: `frontend/design/tokens.json`
+- Design token source: `frontend/design/tokens.tokens-studio.json`
 
 ## 2. Recommended import flow
 1. Run app (`npm run dev` in `frontend/`) and open the target page.
 2. In Figma, use `html.to.design` (or equivalent) to import the page frame.
-3. Import `frontend/design/tokens.json` into a token plugin (Tokens Studio etc.).
+3. Import `frontend/design/tokens.tokens-studio.json` into a token plugin (Tokens Studio etc.).
 4. Map token groups to Figma Variables:
    - `color.terminal.*` -> Color
    - `typography.*` -> Typography
@@ -33,4 +33,4 @@
 - `Space Grotesk` is loaded via `next/font/google`; install the same font in Figma for close parity.
 
 ## 4. Update policy
-When color/spacing/typography changes in `tailwind.config.ts` or `globals.css`, update `frontend/design/tokens.json` in the same PR.
+When color/spacing/typography changes in `tailwind.config.ts` or `globals.css`, update `frontend/design/tokens.tokens-studio.json` in the same PR.

@@ -1,0 +1,77 @@
+import React from "react";
+
+type FeedbackPanelProps = {
+  runId: string;
+  threadId: string;
+  isBusy: boolean;
+  feedbackSubmitting: boolean;
+  feedbackRating: -1 | 0 | 1 | null;
+  feedbackReason: string;
+  feedbackMessage: string;
+  onSelectGood: () => void;
+  onSelectBad: () => void;
+  onReasonChange: (value: string) => void;
+  onSubmit: () => void;
+};
+
+export default function FeedbackPanel({
+  runId,
+  threadId,
+  isBusy,
+  feedbackSubmitting,
+  feedbackRating,
+  feedbackReason,
+  feedbackMessage,
+  onSelectGood,
+  onSelectBad,
+  onReasonChange,
+  onSubmit
+}: FeedbackPanelProps) {
+  if (!runId || !threadId) return null;
+
+  return (
+    <div className="mt-3 rounded border border-terminal-border bg-[#050a10] px-3 py-3 text-xs text-terminal-dim">
+      <p className="font-semibold text-terminal-text">Rate this answer</p>
+      <div className="mt-2 flex items-center gap-2">
+        <button
+          type="button"
+          onClick={onSelectGood}
+          disabled={isBusy || feedbackSubmitting}
+          className={`rounded border px-2 py-1 text-[11px] disabled:cursor-not-allowed disabled:opacity-50 ${
+            feedbackRating === 1 ? "border-terminal-ok text-terminal-ok" : "border-terminal-border text-terminal-dim"
+          }`}
+        >
+          Good
+        </button>
+        <button
+          type="button"
+          onClick={onSelectBad}
+          disabled={isBusy || feedbackSubmitting}
+          className={`rounded border px-2 py-1 text-[11px] disabled:cursor-not-allowed disabled:opacity-50 ${
+            feedbackRating === -1 ? "border-terminal-err text-terminal-err" : "border-terminal-border text-terminal-dim"
+          }`}
+        >
+          Bad
+        </button>
+      </div>
+      <textarea
+        value={feedbackReason}
+        onChange={(event) => onReasonChange(event.target.value)}
+        disabled={isBusy || feedbackSubmitting}
+        placeholder="reason (optional)"
+        className="mt-2 h-20 w-full resize-y rounded border border-terminal-border bg-[#02060b] px-2 py-1 text-xs text-terminal-text outline-none disabled:cursor-not-allowed disabled:opacity-50"
+      />
+      <div className="mt-2 flex items-center gap-2">
+        <button
+          type="button"
+          onClick={onSubmit}
+          disabled={isBusy || feedbackSubmitting || feedbackRating === null}
+          className="rounded border border-terminal-accent px-2 py-1 text-[11px] text-terminal-accent disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {feedbackSubmitting ? "Saving..." : "Send Feedback"}
+        </button>
+        {feedbackMessage ? <span>{feedbackMessage}</span> : null}
+      </div>
+    </div>
+  );
+}

@@ -1,6 +1,14 @@
 "use client";
 
 import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
+import AgentResultsGrid from "./components/agent-results-grid";
+import ChamberVisualization from "./components/chamber-visualization";
+import ConsensusPanel from "./components/consensus-panel";
+import FeedbackPanel from "./components/feedback-panel";
+import PromptForm from "./components/prompt-form";
+import RoutingInfoPanel from "./components/routing-info-panel";
+import RunMetaBar from "./components/run-meta-bar";
+import ThreadSidebar from "./components/thread-sidebar";
 
 type AgentId = "A" | "B" | "C";
 type AgentStatus = "OK" | "ERROR" | "LOADING";
@@ -124,12 +132,6 @@ const loadingResults: AgentResult[] = [
   { agent: "C", provider: "-", model: "-", text: "Loading...", status: "LOADING", latency_ms: 0 }
 ];
 
-function statusClass(status: AgentStatus): string {
-  if (status === "OK") return "status-ok";
-  if (status === "ERROR") return "status-error";
-  return "status-loading";
-}
-
 function parseConfidenceMap(text: string | null | undefined): ConfidenceMap {
   const map: ConfidenceMap = { A: null, B: null, C: null };
   if (!text) return map;
@@ -152,20 +154,6 @@ function parseWinnerAgent(text: string | null | undefined): AgentId | null {
   const value = match[1].toUpperCase();
   if (value === "A" || value === "B" || value === "C") return value;
   return null;
-}
-
-function providerDisplayName(provider: string): string {
-  const normalized = provider.trim().toLowerCase();
-  if (normalized === "openai") return "OpenAI";
-  if (normalized === "anthropic") return "Claude";
-  if (normalized === "gemini" || normalized === "google") return "Gemini";
-  if (!normalized || normalized === "-") return "-";
-  return provider;
-}
-
-function buildLlmLabel(provider: string, model: string, fallbackAgent: AgentId): string {
-  if (provider === "-" || model === "-") return `LLM-${fallbackAgent}`;
-  return providerDisplayName(provider);
 }
 
 function splitConsensusText(text: string | null | undefined): { main: string; voteDetails: string | null } {
@@ -376,11 +364,6 @@ export default function HomePage() {
 
     return groups.sort((a, b) => new Date(b.latest_at).getTime() - new Date(a.latest_at).getTime());
   }, [history]);
-  const nodePositionClass: Record<AgentId, string> = {
-    A: "magi-node-a",
-    B: "magi-node-b",
-    C: "magi-node-c"
-  };
   const chamberActive = localNodeState === "RELAY" || Object.values(nodeStates).some((state) => state === "BLINK");
   const chamberMode = useMemo(() => {
     if (showConclusion) return "conclusion";
@@ -981,145 +964,27 @@ export default function HomePage() {
   return (
     <main className="magi-grid magi-scan mx-auto min-h-screen w-full max-w-7xl px-4 py-8 md:px-8">
       <div className="grid items-start grid-cols-1 gap-6 md:grid-cols-[280px_1fr]">
-        <aside className="panel p-3 md:max-h-[calc(100vh-3rem)] md:overflow-auto">
-          <button
-            type="button"
-            onClick={startNewChat}
-            disabled={isBusy}
-            className="w-full rounded border border-terminal-accent bg-[#1f120b] px-3 py-2 text-xs font-semibold text-terminal-accent disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            Start New Chat
-          </button>
-          <p className="mt-3 text-xs font-semibold text-terminal-dim">Threads</p>
-          <div className="mt-2 space-y-2">
-            {threadGroups.length ? (
-              threadGroups.map((group) => (
-                <div
-                  key={group.thread_id}
-                  className={`rounded border px-2 py-2 transition-colors ${
-                    group.thread_id === threadId
-                      ? "border-terminal-accent bg-[#091015]"
-                      : "border-terminal-border bg-[#060a0f]"
-                  }`}
-                >
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="min-w-0 flex-1">
-                      {editingThreadId === group.thread_id ? (
-                        <div className="flex items-center gap-1">
-                          <input
-                            value={threadNameDraft}
-                            onChange={(event) => setThreadNameDraft(event.target.value)}
-                            onKeyDown={(event) => {
-                              if (event.key === "Enter") saveRenameThread(group.thread_id);
-                              if (event.key === "Escape") cancelRenameThread();
-                            }}
-                            className="w-full rounded border border-terminal-accent bg-[#02060b] px-2 py-1 text-[11px] text-terminal-text outline-none"
-                            maxLength={64}
-                            autoFocus
-                          />
-                          <button
-                            type="button"
-                            onClick={() => saveRenameThread(group.thread_id)}
-                            className="rounded border border-terminal-accent px-1.5 py-0.5 text-[10px] text-terminal-accent"
-                          >
-                            Save
-                          </button>
-                          <button
-                            type="button"
-                            onClick={cancelRenameThread}
-                            className="rounded border border-terminal-border px-1.5 py-0.5 text-[10px] text-terminal-dim"
-                          >
-                            Cancel
-                          </button>
-                        </div>
-                      ) : (
-                        <p className="truncate text-[11px] font-semibold text-terminal-text">
-                          {threadLabel(group.thread_id)}
-                        </p>
-                      )}
-                      <p className="text-[11px] text-terminal-dim">{group.turns.length} turns</p>
-                    </div>
-                    <div className="flex items-center gap-1 pl-1">
-                      <button
-                        type="button"
-                        onClick={() => toggleThreadCollapse(group.thread_id)}
-                        title={collapsedThreads[group.thread_id] ? "Expand thread" : "Fold thread"}
-                        className="rounded border border-terminal-border px-1.5 py-0.5 text-[10px] text-terminal-dim hover:border-terminal-accent hover:text-terminal-text"
-                      >
-                        {collapsedThreads[group.thread_id] ? ">" : "v"}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => beginRenameThread(group.thread_id)}
-                        title="Rename thread"
-                        className="rounded border border-terminal-border px-1.5 py-0.5 text-[10px] text-terminal-dim hover:border-terminal-accent hover:text-terminal-text"
-                      >
-                        Edit
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setConfirmDeleteThreadId((prev) => (prev === group.thread_id ? null : group.thread_id))
-                        }
-                        title="Delete thread"
-                        className="rounded border border-terminal-err px-1.5 py-0.5 text-[10px] text-terminal-err hover:opacity-90"
-                      >
-                        Del
-                      </button>
-                    </div>
-                  </div>
-
-                  <p className="mt-1 text-[11px] text-terminal-dim">id: {group.thread_id}</p>
-                  <p className="text-[11px] text-terminal-dim">updated: {group.latest_at ? new Date(group.latest_at).toLocaleString() : "-"}</p>
-
-                  {confirmDeleteThreadId === group.thread_id ? (
-                    <div className="mt-2 rounded border border-terminal-err bg-[#160a0a] p-2 text-[11px]">
-                      <p className="text-terminal-err">Delete this thread permanently?</p>
-                      <div className="mt-1 flex items-center gap-1">
-                        <button
-                          type="button"
-                          onClick={() => void deleteThread(group.thread_id)}
-                          className="rounded border border-terminal-err px-2 py-0.5 text-[10px] text-terminal-err"
-                        >
-                          Confirm delete
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setConfirmDeleteThreadId(null)}
-                          className="rounded border border-terminal-border px-2 py-0.5 text-[10px] text-terminal-dim"
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    </div>
-                  ) : null}
-
-                  <div className={`mt-2 space-y-1 ${collapsedThreads[group.thread_id] ? "hidden" : ""}`}>
-                    {group.turns.map((item) => {
-                      const statusSummary = item.results.map((result) => `${result.agent}:${result.status}`).join(" ");
-                      return (
-                        <button
-                          key={item.run_id}
-                          type="button"
-                          onClick={() => restoreHistory(item)}
-                          className="w-full rounded border border-terminal-border bg-[#02060b] px-2 py-2 text-left text-xs text-terminal-dim transition-colors hover:border-terminal-accent hover:text-terminal-text"
-                        >
-                          <p>{new Date(item.created_at).toLocaleString()}</p>
-                          <p>turn: {item.turn_index}</p>
-                          <p>mode: {item.profile}</p>
-                          <p>status: {statusSummary}</p>
-                          <p className="truncate">prompt: {item.prompt}</p>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              ))
-            ) : (
-              <p className="text-xs text-terminal-dim">No history yet.</p>
-            )}
-          </div>
-        </aside>
+        <ThreadSidebar
+          isBusy={isBusy}
+          threadGroups={threadGroups}
+          threadId={threadId}
+          editingThreadId={editingThreadId}
+          threadNameDraft={threadNameDraft}
+          collapsedThreads={collapsedThreads}
+          confirmDeleteThreadId={confirmDeleteThreadId}
+          threadLabel={threadLabel}
+          onStartNewChat={startNewChat}
+          onThreadNameDraftChange={setThreadNameDraft}
+          onSaveRenameThread={saveRenameThread}
+          onCancelRenameThread={cancelRenameThread}
+          onToggleThreadCollapse={toggleThreadCollapse}
+          onBeginRenameThread={beginRenameThread}
+          onToggleDeleteConfirm={(id) =>
+            setConfirmDeleteThreadId((prev) => (prev === id ? null : id))
+          }
+          onDeleteThread={(id) => void deleteThread(id)}
+          onRestoreHistory={restoreHistory}
+        />
 
         <div>
       <section className="panel p-4 md:p-6">
@@ -1131,326 +996,100 @@ export default function HomePage() {
         </div>
         <p className="mt-2 text-sm text-terminal-dim">Command chamber: local pre-router, then three models, then one consensus core.</p>
 
-        <div className="magi-wire mt-4 rounded-md p-3">
-          <div ref={chamberRef} className={`magi-chamber magi-chamber-${chamberMode} grid grid-cols-1 gap-3 md:block`}>
-            <svg
-              className={`magi-links ${chamberActive ? "is-active" : ""}`}
-              viewBox={linkViewBox}
-              preserveAspectRatio="xMidYMid meet"
-              aria-hidden="true"
-            >
-              {linkPaths.map((path, index) => (
-                <path key={`link-${index}`} className="magi-link-path" d={path} />
-              ))}
-            </svg>
-            <div
-              ref={peerGroupRef}
-              className={`magi-peer-group ${localOnlyHandled ? "magi-peer-group-skipped" : ""}`}
-              aria-hidden="true"
-            />
-            <div ref={localNodeRef} className="magi-node-wrap magi-node-local">
-              <div className={`magi-node p-4 magi-node-${localNodeState.toLowerCase()} ${showConclusion ? "magi-node-conclusion" : ""}`}>
-                <p className="magi-node-label">Local LLM</p>
-                <p className="magi-node-model mt-2 text-sm font-semibold">
-                  {localAgent ? `${localAgent.provider}/${localAgent.model}` : "ollama/local"}
-                </p>
-                <div className="magi-node-status-slot mt-2 w-full px-6">
-                  <p className="mt-1 text-[11px] font-semibold">{localRouteHint}</p>
-                  {localNodeState === "BLINK" || localNodeState === "RELAY" ? <div className="magi-node-progress" /> : null}
-                </div>
-              </div>
-            </div>
-            {chamberNodes.map((node) => (
-              (() => {
-                const displayNodeState: NodeState =
-                  showExecutingBadge && !resolvedProfile && !localOnlyHandled ? "BLINK" : nodeStates[node.agent];
-                return (
-                  <div
-                    key={`node-${node.agent}`}
-                    ref={(el) => {
-                      nodeRefs.current[node.agent] = el;
-                    }}
-                    className={`magi-node-wrap ${nodePositionClass[node.agent]}`}
-                  >
-                    <div
-                      className={`magi-node p-4 magi-node-${displayNodeState.toLowerCase()} ${
-                        winnerAgent && displayNodeState === "ON" && node.agent !== winnerAgent
-                          ? "magi-node-rejected"
-                          : ""
-                      } ${localOnlyHandled ? "magi-node-skipped" : ""} ${showConclusion ? "magi-node-conclusion" : ""}`}
-                    >
-                      <p className="magi-node-label">{buildLlmLabel(node.provider, node.model, node.agent)}</p>
-                      <p className="magi-node-model mt-2 text-sm font-semibold">
-                        {node.provider === "-" ? `AGENT ${node.agent}` : `${node.provider}/${node.model}`}
-                      </p>
-                      <div className="magi-node-status-slot mt-2 w-full px-6">
-                        {localOnlyHandled ? (
-                          <p className="mt-1 text-[11px] font-semibold">skipped (not routed)</p>
-                        ) : confidenceMap[node.agent] !== null ? (
-                          <div className="magi-confidence-track">
-                            <div className="magi-confidence-fill" style={{ width: `${confidenceMap[node.agent]}%` }} />
-                          </div>
-                        ) : null}
-                        {!localOnlyHandled && confidenceMap[node.agent] !== null ? (
-                          <p className="mt-1 text-[11px] font-semibold">confidence {confidenceMap[node.agent]}</p>
-                        ) : (
-                          <p className="mt-1 text-[11px] font-semibold opacity-0">confidence --</p>
-                        )}
-                        {!localOnlyHandled && displayNodeState === "BLINK" ? (
-                          <div className="magi-node-progress" />
-                        ) : null}
-                      </div>
-                    </div>
-                  </div>
-                );
-              })()
-            ))}
-            {showConclusion || showDiscussionBadge || showRoutingBadge || showExecutingBadge ? (
-              <>
-                <div
-                  className={
-                    showConclusion
-                      ? "magi-conclusion-badge"
-                      : showExecutingBadge
-                        ? "magi-executing-badge"
-                      : showRoutingBadge
-                        ? "magi-routing-badge"
-                        : "magi-discussion-badge"
-                  }
-                >
-                  {showConclusion ? "Conclusion" : showRoutingBadge ? "Routing / Prep" : showExecutingBadge ? "Executing" : "Discussion"}
-                </div>
-                {showConclusion && conclusionElapsedMs !== null ? (
-                  <div className="magi-conclusion-time">elapsed {formatElapsedMsToMinSec(conclusionElapsedMs)}</div>
-                ) : null}
-              </>
-            ) : null}
-          </div>
-        </div>
+        <ChamberVisualization
+          setChamberRef={(el) => {
+            chamberRef.current = el;
+          }}
+          setPeerGroupRef={(el) => {
+            peerGroupRef.current = el;
+          }}
+          setLocalNodeRef={(el) => {
+            localNodeRef.current = el;
+          }}
+          linkPaths={linkPaths}
+          linkViewBox={linkViewBox}
+          chamberActive={chamberActive}
+          chamberMode={chamberMode}
+          localOnlyHandled={localOnlyHandled}
+          localNodeState={localNodeState}
+          showConclusion={showConclusion}
+          localAgent={localAgent}
+          localRouteHint={localRouteHint}
+          chamberNodes={chamberNodes}
+          showExecutingBadge={showExecutingBadge}
+          resolvedProfile={resolvedProfile}
+          nodeStates={nodeStates}
+          winnerAgent={winnerAgent}
+          confidenceMap={confidenceMap}
+          showDiscussionBadge={showDiscussionBadge}
+          showRoutingBadge={showRoutingBadge}
+          conclusionElapsedMs={conclusionElapsedMs}
+          setNodeRef={(agent, el) => {
+            nodeRefs.current[agent] = el;
+          }}
+          formatElapsedMsToMinSec={formatElapsedMsToMinSec}
+        />
 
-        <form className="mt-4 space-y-3" onSubmit={onSubmit}>
-          <textarea
-            className="h-40 w-full resize-y rounded-md border border-terminal-border bg-[#02060b] p-3 text-sm outline-none ring-terminal-accent focus:ring"
-            placeholder="Type your prompt..."
-            value={prompt}
-            onChange={(event) => setPrompt(event.target.value)}
-            onKeyDown={onTextareaKeyDown}
-            disabled={isBusy}
-          />
-          <div className="flex items-center gap-3">
-            <button
-              type="submit"
-              disabled={isBusy}
-              className="rounded-md border border-terminal-accent bg-[#0d1d2a] px-4 py-2 text-sm text-terminal-accent disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {isLoading ? "Running..." : isConsensusLoading ? "Finalizing..." : "Run MAGI"}
-            </button>
-            <span className="text-xs text-terminal-dim">
-              {prompt.length}/{MAX_PROMPT_LENGTH} chars
-            </span>
-            <label className="text-xs text-terminal-dim">
-              mode:
-              <select
-                className="ml-2 rounded border border-terminal-border bg-[#02060b] px-2 py-1 text-xs"
-                value={selectedProfile}
-                onChange={(event) => setSelectedProfile(event.target.value)}
-                disabled={isBusy}
-              >
-                <option value="">auto (unset)</option>
-                {availableProfiles.map((profile) => (
-                  <option key={profile} value={profile}>
-                    {profile}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="flex items-center gap-2 text-xs text-terminal-dim">
-              <input
-                type="checkbox"
-                checked={freshMode}
-                onChange={(event) => setFreshMode(event.target.checked)}
-                disabled={isBusy}
-                className="h-3.5 w-3.5 accent-terminal-accent"
-              />
-              fresh mode
-            </label>
-            {isStrictDebate ? (
-              <span className="rounded border border-terminal-accent px-2 py-1 text-[11px] text-terminal-accent">
-                strict debate
-              </span>
-            ) : null}
-            {isUltra ? (
-              <span className="rounded border border-terminal-err px-2 py-1 text-[11px] text-terminal-err">
-                high cost
-              </span>
-            ) : null}
-          </div>
-          <p className="text-xs text-terminal-dim">Enter: submit / Shift+Enter: newline</p>
-        </form>
+        <PromptForm
+          prompt={prompt}
+          maxPromptLength={MAX_PROMPT_LENGTH}
+          isBusy={isBusy}
+          isLoading={isLoading}
+          isConsensusLoading={isConsensusLoading}
+          selectedProfile={selectedProfile}
+          availableProfiles={availableProfiles}
+          freshMode={freshMode}
+          isStrictDebate={isStrictDebate}
+          isUltra={isUltra}
+          onSubmit={onSubmit}
+          onPromptChange={setPrompt}
+          onPromptKeyDown={onTextareaKeyDown}
+          onProfileChange={setSelectedProfile}
+          onFreshModeChange={setFreshMode}
+        />
 
         {error ? <p className="mt-3 text-sm status-error">{error}</p> : null}
 
-        <div className="mt-4 flex items-center gap-2 text-xs text-terminal-dim">
-          <span>run_id: {runId || "-"}</span>
-          <span>thread_id: {threadId || "-"}</span>
-          <span>turn: {turnIndex > 0 ? turnIndex : "-"}</span>
-          <span>mode: {selectedProfile || "auto"}</span>
-          <span>fresh: {freshMode ? "on" : "off"}</span>
-          <button
-            type="button"
-            onClick={copyRunId}
-            disabled={!runId}
-            className="rounded border border-terminal-border px-2 py-1 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            Copy
-          </button>
-        </div>
-        {routingInfo ? (
-          <div className="mt-2 rounded border border-terminal-border bg-[#050a10] px-3 py-2 text-xs text-terminal-dim">
-            <p>
-              routing: <span className="text-terminal-text">{routingInfo.profile}</span>
-              {routingInfo.intent ? ` | intent=${routingInfo.intent}` : ""}
-              {routingInfo.complexity ? ` | complexity=${routingInfo.complexity}` : ""}
-              {routingInfo.execution_tier ? ` | tier=${routingInfo.execution_tier}` : ""}
-            </p>
-            <p className="mt-1">
-              reason: <span className="text-terminal-text">{routingInfo.reason || "-"}</span>
-            </p>
-          </div>
-        ) : null}
-        {runId && threadId ? (
-          <div className="mt-3 rounded border border-terminal-border bg-[#050a10] px-3 py-3 text-xs text-terminal-dim">
-            <p className="font-semibold text-terminal-text">Rate this answer</p>
-            <div className="mt-2 flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => setFeedbackRating(1)}
-                disabled={isBusy || feedbackSubmitting}
-                className={`rounded border px-2 py-1 text-[11px] disabled:cursor-not-allowed disabled:opacity-50 ${
-                  feedbackRating === 1
-                    ? "border-terminal-ok text-terminal-ok"
-                    : "border-terminal-border text-terminal-dim"
-                }`}
-              >
-                Good
-              </button>
-              <button
-                type="button"
-                onClick={() => setFeedbackRating(-1)}
-                disabled={isBusy || feedbackSubmitting}
-                className={`rounded border px-2 py-1 text-[11px] disabled:cursor-not-allowed disabled:opacity-50 ${
-                  feedbackRating === -1
-                    ? "border-terminal-err text-terminal-err"
-                    : "border-terminal-border text-terminal-dim"
-                }`}
-              >
-                Bad
-              </button>
-            </div>
-            <textarea
-              value={feedbackReason}
-              onChange={(event) => setFeedbackReason(event.target.value)}
-              disabled={isBusy || feedbackSubmitting}
-              placeholder="reason (optional)"
-              className="mt-2 h-20 w-full resize-y rounded border border-terminal-border bg-[#02060b] px-2 py-1 text-xs text-terminal-text outline-none disabled:cursor-not-allowed disabled:opacity-50"
-            />
-            <div className="mt-2 flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => void submitRoutingFeedback()}
-                disabled={isBusy || feedbackSubmitting || feedbackRating === null}
-                className="rounded border border-terminal-accent px-2 py-1 text-[11px] text-terminal-accent disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {feedbackSubmitting ? "Saving..." : "Send Feedback"}
-              </button>
-              {feedbackMessage ? <span>{feedbackMessage}</span> : null}
-            </div>
-          </div>
-        ) : null}
+        <RunMetaBar
+          runId={runId}
+          threadId={threadId}
+          turnIndex={turnIndex}
+          selectedProfile={selectedProfile}
+          freshMode={freshMode}
+          onCopyRunId={copyRunId}
+        />
+        <RoutingInfoPanel routingInfo={routingInfo} />
+        <FeedbackPanel
+          runId={runId}
+          threadId={threadId}
+          isBusy={isBusy}
+          feedbackSubmitting={feedbackSubmitting}
+          feedbackRating={feedbackRating}
+          feedbackReason={feedbackReason}
+          feedbackMessage={feedbackMessage}
+          onSelectGood={() => setFeedbackRating(1)}
+          onSelectBad={() => setFeedbackRating(-1)}
+          onReasonChange={setFeedbackReason}
+          onSubmit={() => void submitRoutingFeedback()}
+        />
 
       </section>
 
       {consensus ? (
-        <section className="panel mt-6 p-4">
-          <div className="flex items-center justify-between border-b border-terminal-border pb-2 text-sm">
-            <div className="flex items-center gap-2">
-              <span className="font-semibold tracking-wide text-terminal-accent">Consensus Core</span>
-              {isStrictDebate ? (
-                <span className="rounded border border-terminal-accent px-2 py-0.5 text-[11px] text-terminal-accent">
-                  strict debate
-                </span>
-              ) : null}
-              {isUltra ? (
-                <span className="rounded border border-terminal-err px-2 py-0.5 text-[11px] text-terminal-err">
-                  high cost
-                </span>
-              ) : null}
-            </div>
-            <span className={statusClass(consensus.status)}>{consensus.status}</span>
-          </div>
-          <div className="mt-3 space-y-2 text-xs">
-            <p className="text-terminal-dim">model: {consensus.provider}/{consensus.model}</p>
-            <p className="text-terminal-dim">latency_ms: {consensus.latency_ms}</p>
-            {consensus.error_message ? <p className="status-error">error: {consensus.error_message}</p> : null}
-            <pre className="mt-2 whitespace-pre-wrap break-words rounded-md bg-[#02060b] p-3 text-sm leading-6">
-              {parsedConsensus.main}
-            </pre>
-            {parsedConsensus.voteDetails ? (
-              <details className="rounded-md border border-terminal-border bg-[#02060b] p-3">
-                <summary className="cursor-pointer text-sm font-semibold text-terminal-dim">Vote details</summary>
-                <pre className="mt-2 whitespace-pre-wrap break-words text-sm leading-6">{parsedConsensus.voteDetails}</pre>
-              </details>
-            ) : null}
-          </div>
-        </section>
+        <ConsensusPanel
+          consensus={consensus}
+          parsedConsensus={parsedConsensus}
+          isStrictDebate={isStrictDebate}
+          isUltra={isUltra}
+        />
       ) : null}
 
-      {cards.length ? (
-        <section className="mt-6 grid grid-cols-1 gap-4 md:grid-cols-3">
-          {cards.map((result) => (
-            <article key={result.agent} className="panel p-4">
-              <div className="flex items-center justify-between border-b border-terminal-border pb-2 text-sm">
-                <div className="flex items-center gap-2">
-                  <span className="font-semibold text-terminal-accent">
-                    {providerDisplayName(result.provider)}/{result.model}
-                  </span>
-                  <span className="text-[11px] text-terminal-dim">Agent {result.agent}</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className={statusClass(result.status)}>{result.status}</span>
-                  {result.status === "ERROR" ? (
-                    <button
-                      type="button"
-                      onClick={() => retryAgent(result.agent)}
-                      disabled={isBusy}
-                      className="rounded border border-terminal-err px-2 py-1 text-[11px] text-terminal-err disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      Retry
-                    </button>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={() => copyResultText(result)}
-                      disabled={!result.text || isBusy}
-                      className="rounded border border-terminal-border px-2 py-1 text-[11px] disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      Copy
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              <div className="mt-3 space-y-2 text-xs">
-                <p className="text-terminal-dim">latency_ms: {result.latency_ms}</p>
-                {result.error_message ? <p className="status-error">error: {result.error_message}</p> : null}
-                <pre className="mt-2 whitespace-pre-wrap break-words rounded-md bg-[#02060b] p-3 text-sm leading-6">
-                  {result.text}
-                </pre>
-              </div>
-            </article>
-          ))}
-        </section>
-      ) : null}
+      <AgentResultsGrid
+        cards={cards}
+        isBusy={isBusy}
+        onRetry={(agent) => void retryAgent(agent)}
+        onCopy={copyResultText}
+      />
         </div>
       </div>
     </main>

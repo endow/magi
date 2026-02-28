@@ -285,14 +285,12 @@ export default function HomePage() {
   }, [cards, profileAgents, selectedProfile]);
   const localAgent = useMemo(() => (profileAgents.local_only ?? [])[0], [profileAgents]);
   const downstreamProfile = useMemo(() => {
-    const candidate = resolvedProfile || selectedProfile || defaultProfile;
-    if (candidate && candidate !== "local_only") return candidate;
-    if (defaultProfile && defaultProfile !== "local_only") return defaultProfile;
-    if (profileAgents.cost?.length) return "cost";
-    const firstNonLocal = Object.keys(profileAgents).find((name) => name !== "local_only");
-    return firstNonLocal ?? "";
-  }, [defaultProfile, profileAgents, resolvedProfile, selectedProfile]);
+    if (resolvedProfile && resolvedProfile !== "local_only") return resolvedProfile;
+    if (selectedProfile && selectedProfile !== "local_only") return selectedProfile;
+    return "";
+  }, [resolvedProfile, selectedProfile]);
   const chamberNodes = useMemo(() => {
+    if (!downstreamProfile) return buildConfiguredLoadingCards(profileAgents, "");
     const base = buildConfiguredLoadingCards(profileAgents, downstreamProfile);
     if (isLoading) return base;
     if (resolvedProfile === "local_only") return base;

@@ -68,9 +68,9 @@
     },
     "cost": {
       "agents": [
-        { "agent": "A", "provider": "openai", "model": "gpt-4o-mini" },
+        { "agent": "A", "provider": "openai", "model": "gpt-5-mini" },
         { "agent": "B", "provider": "anthropic", "model": "claude-haiku-4-5-20251001" },
-        { "agent": "C", "provider": "gemini", "model": "gemini-2.5-flash" }
+        { "agent": "C", "provider": "gemini", "model": "gemini-3-flash-preview" }
       ],
       "consensus": {
         "strategy": "peer_vote",
@@ -81,9 +81,9 @@
     },
     "balance": {
       "agents": [
-        { "agent": "A", "provider": "openai", "model": "gpt-4.1" },
+        { "agent": "A", "provider": "openai", "model": "gpt-5" },
         { "agent": "B", "provider": "anthropic", "model": "claude-haiku-4-5-20251001" },
-        { "agent": "C", "provider": "gemini", "model": "gemini-2.5-flash" }
+        { "agent": "C", "provider": "gemini", "model": "gemini-3-flash-preview" }
       ],
       "consensus": {
         "strategy": "peer_vote",
@@ -94,9 +94,9 @@
     },
     "performance": {
       "agents": [
-        { "agent": "A", "provider": "openai", "model": "gpt-5.1" },
-        { "agent": "B", "provider": "anthropic", "model": "claude-sonnet-4-20250514" },
-        { "agent": "C", "provider": "gemini", "model": "gemini-2.5-pro" }
+        { "agent": "A", "provider": "openai", "model": "gpt-5.2" },
+        { "agent": "B", "provider": "anthropic", "model": "claude-sonnet-4-6" },
+        { "agent": "C", "provider": "gemini", "model": "gemini-3-pro-preview" }
       ],
       "consensus": {
         "strategy": "peer_vote",
@@ -109,9 +109,9 @@
     },
     "ultra": {
       "agents": [
-        { "agent": "A", "provider": "openai", "model": "gpt-5.1" },
+        { "agent": "A", "provider": "openai", "model": "gpt-5.2" },
         { "agent": "B", "provider": "anthropic", "model": "claude-opus-4-1-20250805" },
-        { "agent": "C", "provider": "gemini", "model": "gemini-2.5-pro" }
+        { "agent": "C", "provider": "gemini", "model": "gemini-3-pro-preview" }
       ],
       "consensus": {
         "strategy": "peer_vote",

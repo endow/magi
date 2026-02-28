@@ -346,7 +346,7 @@ def test_run_with_same_thread_injects_thread_context(monkeypatch, tmp_path) -> N
     main._init_db()
     monkeypatch.setattr(main, "load_config", _profiled_config)
 
-    async def fake_effective(prompt: str, fresh_mode: bool) -> str:
+    async def fake_effective(prompt: str, fresh_mode: bool, source_urls: list[str] | None = None) -> str:
         return prompt
 
     async def fake_history(prompt: str, base_prompt: str, app_config=None) -> str:
@@ -489,7 +489,7 @@ def test_run_with_fresh_mode_uses_effective_prompt(monkeypatch) -> None:
     monkeypatch.setattr(main, "load_config", _profiled_config)
     monkeypatch.setattr(main, "_save_run_history", lambda *args, **kwargs: None)
 
-    async def fake_effective(prompt: str, fresh_mode: bool) -> str:
+    async def fake_effective(prompt: str, fresh_mode: bool, source_urls: list[str] | None = None) -> str:
         assert fresh_mode is True
         return f"fresh::{prompt}"
 
@@ -510,6 +510,75 @@ def test_run_with_fresh_mode_uses_effective_prompt(monkeypatch) -> None:
     response = client.post("/api/magi/run", json={"prompt": "hello", "profile": "cost", "fresh_mode": True})
     assert response.status_code == 200
     assert response.json()["consensus"]["status"] == "LOADING"
+
+
+def test_run_passes_source_urls_to_effective_prompt(monkeypatch) -> None:
+    monkeypatch.setattr(main, "load_config", _profiled_config)
+    monkeypatch.setattr(main, "_save_run_history", lambda *args, **kwargs: None)
+
+    async def fake_effective(prompt: str, fresh_mode: bool, source_urls: list[str] | None = None) -> str:
+        assert source_urls == ["https://example.com/a", "https://example.com/b"]
+        return f"src::{prompt}"
+
+    async def fake_runner(agent_config, prompt, timeout_seconds):
+        assert prompt.startswith("src::")
+        return main.AgentResult(
+            agent=agent_config.agent,
+            provider=agent_config.provider,
+            model=agent_config.model,
+            text=f"ok-{agent_config.agent}",
+            status="OK",
+            latency_ms=100,
+        )
+
+    monkeypatch.setattr(main, "_build_effective_prompt", fake_effective)
+    monkeypatch.setattr(main, "_run_single_agent", fake_runner)
+
+    response = client.post(
+        "/api/magi/run",
+        json={
+            "prompt": "hello",
+            "profile": "cost",
+            "source_urls": ["https://example.com/a", "https://example.com/b"],
+        },
+    )
+    assert response.status_code == 200
+
+
+def test_run_rejects_invalid_source_url(monkeypatch) -> None:
+    monkeypatch.setattr(main, "load_config", _profiled_config)
+    monkeypatch.setattr(main, "_save_run_history", lambda *args, **kwargs: None)
+
+    response = client.post(
+        "/api/magi/run",
+        json={"prompt": "hello", "profile": "cost", "source_urls": ["file:///etc/passwd"]},
+    )
+    assert response.status_code == 400
+    assert "invalid source url" in response.json()["detail"]
+
+
+def test_build_effective_prompt_auto_extracts_url_from_prompt(monkeypatch) -> None:
+    captured: dict[str, list[str]] = {}
+
+    async def fake_fetch_direct_sources(urls: list[str]):
+        captured["urls"] = urls
+        return [
+            main.DirectSourceFetchResult(
+                url=urls[0],
+                status="OK",
+                snippet="source snippet",
+                content_type="text/html",
+            )
+        ]
+
+    monkeypatch.setattr(main, "_fetch_direct_sources", fake_fetch_direct_sources)
+
+    prompt = "https://example.com/guide を読んで要点を説明して"
+    effective = asyncio.run(main._build_effective_prompt(prompt, False))
+
+    assert captured["urls"] == ["https://example.com/guide"]
+    assert "[Direct URL Evidence]" in effective
+    assert "url=https://example.com/guide" in effective
 
 
 def test_run_uses_request_router_when_profile_not_provided(monkeypatch) -> None:
@@ -630,7 +699,7 @@ def test_run_local_only_skips_history_context(monkeypatch) -> None:
     def fail_thread_context(*args, **kwargs):
         raise AssertionError("thread context should be skipped for local_only")
 
-    async def fake_effective(prompt: str, fresh_mode: bool) -> str:
+    async def fake_effective(prompt: str, fresh_mode: bool, source_urls: list[str] | None = None) -> str:
         return prompt
 
     async def fake_runner(agent_config, prompt, timeout_seconds):
@@ -657,11 +726,42 @@ def test_run_local_only_skips_history_context(monkeypatch) -> None:
     assert body["consensus"]["text"] == "ok-local"
 
 
+def test_run_skips_history_context_when_prompt_contains_url(monkeypatch) -> None:
+    monkeypatch.setattr(main, "load_config", _profiled_config)
+    monkeypatch.setattr(main, "_save_run_history", lambda *args, **kwargs: None)
+
+    async def fail_history(*args, **kwargs):
+        raise AssertionError("history context should be skipped for URL-anchored prompts")
+
+    async def fake_effective(prompt: str, fresh_mode: bool, source_urls: list[str] | None = None) -> str:
+        return prompt
+
+    async def fake_runner(agent_config, prompt, timeout_seconds):
+        return main.AgentResult(
+            agent=agent_config.agent,
+            provider=agent_config.provider,
+            model=agent_config.model,
+            text=f"ok-{agent_config.agent}",
+            status="OK",
+            latency_ms=100,
+        )
+
+    monkeypatch.setattr(main, "_build_prompt_with_history", fail_history)
+    monkeypatch.setattr(main, "_build_effective_prompt", fake_effective)
+    monkeypatch.setattr(main, "_run_single_agent", fake_runner)
+
+    response = client.post(
+        "/api/magi/run",
+        json={"prompt": "https://game8.jp/ff14/757988 この攻略記事を解説して", "profile": "cost"},
+    )
+    assert response.status_code == 200
+
+
 def test_run_local_only_normalizes_verbose_rewrite_output(monkeypatch) -> None:
     monkeypatch.setattr(main, "load_config", lambda: _profiled_config_with_router(enabled=False))
     monkeypatch.setattr(main, "_save_run_history", lambda *args, **kwargs: None)
 
-    async def fake_effective(prompt: str, fresh_mode: bool) -> str:
+    async def fake_effective(prompt: str, fresh_mode: bool, source_urls: list[str] | None = None) -> str:
         return prompt
 
     async def fake_runner(agent_config, prompt, timeout_seconds):
@@ -692,7 +792,7 @@ def test_run_local_only_skips_source_quote_when_normalizing(monkeypatch) -> None
     monkeypatch.setattr(main, "load_config", lambda: _profiled_config_with_router(enabled=False))
     monkeypatch.setattr(main, "_save_run_history", lambda *args, **kwargs: None)
 
-    async def fake_effective(prompt: str, fresh_mode: bool) -> str:
+    async def fake_effective(prompt: str, fresh_mode: bool, source_urls: list[str] | None = None) -> str:
         return prompt
 
     async def fake_runner(agent_config, prompt, timeout_seconds):
@@ -724,7 +824,7 @@ def test_run_local_only_rewrites_when_output_equals_source(monkeypatch) -> None:
     monkeypatch.setattr(main, "load_config", lambda: _profiled_config_with_router(enabled=False))
     monkeypatch.setattr(main, "_save_run_history", lambda *args, **kwargs: None)
 
-    async def fake_effective(prompt: str, fresh_mode: bool) -> str:
+    async def fake_effective(prompt: str, fresh_mode: bool, source_urls: list[str] | None = None) -> str:
         return prompt
 
     async def fake_runner(agent_config, prompt, timeout_seconds):
@@ -751,7 +851,7 @@ def test_run_local_only_rewrites_when_output_is_unstable(monkeypatch) -> None:
     monkeypatch.setattr(main, "load_config", lambda: _profiled_config_with_router(enabled=False))
     monkeypatch.setattr(main, "_save_run_history", lambda *args, **kwargs: None)
 
-    async def fake_effective(prompt: str, fresh_mode: bool) -> str:
+    async def fake_effective(prompt: str, fresh_mode: bool, source_urls: list[str] | None = None) -> str:
         return prompt
 
     async def fake_runner(agent_config, prompt, timeout_seconds):
@@ -810,7 +910,7 @@ def test_run_auto_enables_fresh_mode_for_time_sensitive_prompt(monkeypatch) -> N
     monkeypatch.setattr(main, "_save_run_history", lambda *args, **kwargs: None)
     monkeypatch.setenv("FRESH_AUTO_MODE", "1")
 
-    async def fake_effective(prompt: str, fresh_mode: bool) -> str:
+    async def fake_effective(prompt: str, fresh_mode: bool, source_urls: list[str] | None = None) -> str:
         assert fresh_mode is True
         return f"fresh::{prompt}"
 
@@ -837,6 +937,7 @@ def test_resolve_fresh_mode_respects_auto_toggle(monkeypatch) -> None:
     assert main._resolve_fresh_mode("latest ai news", False) is False
     monkeypatch.setenv("FRESH_AUTO_MODE", "1")
     assert main._resolve_fresh_mode("latest ai news", False) is True
+    assert main._resolve_fresh_mode("YouTube攻略動画も参考にして", False) is True
 
 
 def test_build_effective_prompt_falls_back_without_tavily_key(monkeypatch) -> None:
@@ -925,7 +1026,7 @@ def test_run_with_history_context_uses_enriched_prompt(monkeypatch) -> None:
     monkeypatch.setattr(main, "load_config", _profiled_config)
     monkeypatch.setattr(main, "_save_run_history", lambda *args, **kwargs: None)
 
-    async def fake_effective(prompt: str, fresh_mode: bool) -> str:
+    async def fake_effective(prompt: str, fresh_mode: bool, source_urls: list[str] | None = None) -> str:
         return prompt
 
     async def fake_history(original_prompt: str, base_prompt: str, app_config=None) -> str:

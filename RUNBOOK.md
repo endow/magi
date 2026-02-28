@@ -216,6 +216,9 @@ npm run build
 ## Fresh Mode（最新情報）
 
 - `backend/.env` に `TAVILY_API_KEY` を設定すると Fresh mode のWeb取得が有効になります。
+- `source_urls` を明示しなくても、`prompt` 内の `http/https` URL は backend が自動抽出して直取得します。
+- URLアンカー付きリクエスト（`source_urls` 指定 or `prompt` 内URL含有）では、`history_context` は自動スキップされます。
+- `fresh_mode` 自動判定語には `YouTube/動画/攻略動画` も含まれます。
 - 任意チューニング:
   - `FRESH_MAX_RESULTS` (default `3`, max `10`)
   - `FRESH_CACHE_TTL_SECONDS` (default `1800`)

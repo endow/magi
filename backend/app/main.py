@@ -1,4 +1,5 @@
 import asyncio
+import html
 import json
 import math
 import os
@@ -9,9 +10,11 @@ import warnings
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from html.parser import HTMLParser
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 import httpx
 from dotenv import load_dotenv
@@ -142,6 +145,7 @@ class RunRequest(BaseModel):
     profile: str | None = None
     fresh_mode: bool = False
     thread_id: str | None = None
+    source_urls: list[str] = Field(default_factory=list)
 
 
 class RetryRequest(BaseModel):
@@ -150,6 +154,7 @@ class RetryRequest(BaseModel):
     profile: str | None = None
     fresh_mode: bool = False
     thread_id: str | None = None
+    source_urls: list[str] = Field(default_factory=list)
 
 
 class AgentResult(BaseModel):
@@ -169,6 +174,7 @@ class ConsensusRequest(BaseModel):
     fresh_mode: bool = False
     thread_id: str | None = None
     run_id: str | None = None
+    source_urls: list[str] = Field(default_factory=list)
 
 
 class FreshSource(BaseModel):
@@ -176,6 +182,14 @@ class FreshSource(BaseModel):
     url: str
     snippet: str
     published_date: str | None = None
+
+
+class DirectSourceFetchResult(BaseModel):
+    url: str
+    status: Literal["OK", "ERROR"]
+    snippet: str = ""
+    content_type: str | None = None
+    error_message: str | None = None
 
 
 class ConsensusResult(BaseModel):
@@ -1104,6 +1118,163 @@ def _validate_prompt(raw_prompt: str) -> str:
     return prompt
 
 
+def _source_max_urls() -> int:
+    raw = os.getenv("SOURCE_MAX_URLS", "5")
+    try:
+        return max(1, min(10, int(raw)))
+    except ValueError:
+        return 5
+
+
+def _source_timeout_seconds() -> float:
+    raw = os.getenv("SOURCE_FETCH_TIMEOUT_SECONDS", "10")
+    try:
+        return float(max(2, min(30, int(float(raw)))))
+    except ValueError:
+        return 10.0
+
+
+def _source_snippet_chars() -> int:
+    raw = os.getenv("SOURCE_SNIPPET_CHARS", "1200")
+    try:
+        return max(200, min(4000, int(raw)))
+    except ValueError:
+        return 1200
+
+
+def _normalize_space(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _extract_text_from_html(html_text: str) -> str:
+    no_script = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", html_text)
+    no_style = re.sub(r"(?is)<style[^>]*>.*?</style>", " ", no_script)
+    no_tags = re.sub(r"(?is)<[^>]+>", " ", no_style)
+    return _normalize_space(html.unescape(no_tags))
+
+
+def _validate_source_urls(raw_urls: list[str] | None) -> list[str]:
+    if not raw_urls:
+        return []
+    unique: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_urls:
+        value = str(raw or "").strip()
+        if not value:
+            continue
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise HTTPException(status_code=400, detail=f"invalid source url: {value}")
+        normalized = parsed.geturl()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        unique.append(normalized)
+        if len(unique) >= _source_max_urls():
+            break
+    return unique
+
+
+def _extract_urls_from_text(text: str) -> list[str]:
+    if not text:
+        return []
+    # Keep extraction strict enough to avoid accidental captures from punctuation-heavy sentences.
+    pattern = re.compile(r"https?://[^\s<>\"]+")
+    trailing = ".,;:!?)]}>'\"。）、】」』"
+    unique: list[str] = []
+    seen: set[str] = set()
+    for match in pattern.finditer(text):
+        candidate = match.group(0).strip().rstrip(trailing)
+        if not candidate:
+            continue
+        parsed = urlparse(candidate)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            continue
+        normalized = parsed.geturl()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        unique.append(normalized)
+        if len(unique) >= _source_max_urls():
+            break
+    return unique
+
+
+def _resolve_source_urls_for_prompt(prompt: str, source_urls: list[str] | None) -> list[str]:
+    explicit = _validate_source_urls(source_urls)
+    extracted = _extract_urls_from_text(prompt)
+    if not extracted:
+        return explicit
+
+    combined: list[str] = []
+    seen: set[str] = set()
+    for url in [*explicit, *extracted]:
+        if url in seen:
+            continue
+        seen.add(url)
+        combined.append(url)
+        if len(combined) >= _source_max_urls():
+            break
+    return combined
+
+
+async def _fetch_direct_source(client: httpx.AsyncClient, url: str) -> DirectSourceFetchResult:
+    try:
+        response = await client.get(url, follow_redirects=True)
+        response.raise_for_status()
+        content_type = (response.headers.get("content-type") or "").split(";")[0].strip().lower() or None
+        body = response.text
+        if content_type and "html" in content_type:
+            snippet = _extract_text_from_html(body)
+        else:
+            snippet = _normalize_space(body)
+        limited = snippet[: _source_snippet_chars()]
+        if not limited:
+            return DirectSourceFetchResult(url=url, status="ERROR", error_message="empty response body", content_type=content_type)
+        return DirectSourceFetchResult(url=url, status="OK", snippet=limited, content_type=content_type)
+    except Exception as exc:  # noqa: BLE001
+        return DirectSourceFetchResult(url=url, status="ERROR", error_message=f"{type(exc).__name__}: {exc}")
+
+
+async def _fetch_direct_sources(urls: list[str]) -> list[DirectSourceFetchResult]:
+    if not urls:
+        return []
+    timeout = httpx.Timeout(_source_timeout_seconds())
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        results = await asyncio.gather(*[_fetch_direct_source(client, url) for url in urls])
+    return results
+
+
+def _inject_direct_source_context(prompt: str, fetched_sources: list[DirectSourceFetchResult]) -> str:
+    if not fetched_sources:
+        return prompt
+    now_utc = datetime.now(timezone.utc).isoformat()
+    evidence_lines: list[str] = []
+    for idx, source in enumerate(fetched_sources, start=1):
+        if source.status == "OK":
+            evidence_lines.append(
+                f"[U{idx}] url={source.url}\n"
+                f"status=OK\n"
+                f"content_type={source.content_type or 'unknown'}\n"
+                f"snippet={source.snippet}"
+            )
+        else:
+            evidence_lines.append(
+                f"[U{idx}] url={source.url}\n"
+                "status=ERROR\n"
+                f"error={source.error_message or 'fetch failed'}"
+            )
+    evidence_text = "\n\n".join(evidence_lines)
+    return (
+        f"{prompt}\n\n"
+        "[Direct URL Evidence]\n"
+        f"retrieved_at_utc={now_utc}\n"
+        "Prefer direct URL evidence when available.\n"
+        "If a URL fetch failed, explicitly state that limitation.\n\n"
+        f"{evidence_text}"
+    )
+
+
 def _fresh_max_results() -> int:
     raw = os.getenv("FRESH_MAX_RESULTS", "3")
     try:
@@ -1170,6 +1341,9 @@ def _is_fresh_sensitive_prompt(prompt: str) -> bool:
         "直近",
         "アップデート",
         "リリース",
+        "youtube",
+        "動画",
+        "攻略動画",
     )
     if any(token in lowered for token in latest_keywords):
         return True
@@ -1354,14 +1528,21 @@ def _inject_fresh_context(prompt: str, sources: list[FreshSource]) -> str:
     )
 
 
-async def _build_effective_prompt(prompt: str, fresh_mode: bool) -> str:
+async def _build_effective_prompt(prompt: str, fresh_mode: bool, source_urls: list[str] | None = None) -> str:
+    effective = prompt
+    validated_urls = _resolve_source_urls_for_prompt(prompt, source_urls)
+    if validated_urls:
+        fetched = await _fetch_direct_sources(validated_urls)
+        ok_count = sum(1 for item in fetched if item.status == "OK")
+        print(f"[magi] direct_sources requested={len(validated_urls)} ok={ok_count}")
+        effective = _inject_direct_source_context(effective, fetched)
     if not fresh_mode:
-        return prompt
+        return effective
     sources = await _fetch_fresh_sources(prompt, _fresh_max_results())
     if not sources:
-        return prompt
+        return effective
     print(f"[magi] fresh_mode sources={len(sources)}")
-    return _inject_fresh_context(prompt, sources)
+    return _inject_fresh_context(effective, sources)
 
 
 def _history_enabled() -> bool:
@@ -3293,13 +3474,17 @@ async def run_magi(payload: RunRequest) -> RunResponse:
         raise HTTPException(status_code=500, detail=f"invalid config: {exc}") from exc
 
     try:
-        effective_prompt = await _build_effective_prompt(prompt, fresh_mode)
+        resolved_source_urls = _resolve_source_urls_for_prompt(prompt, payload.source_urls)
+        url_anchored_request = bool(resolved_source_urls)
+        effective_prompt = await _build_effective_prompt(prompt, fresh_mode, payload.source_urls)
         if _should_apply_thread_context(profile_name):
             effective_prompt = _build_prompt_with_thread_context(effective_prompt, thread_id)
         else:
             print(f"[magi] thread_context skipped profile={profile_name}")
-        if _should_apply_history_context(profile_name):
+        if _should_apply_history_context(profile_name) and not url_anchored_request:
             effective_prompt = await _build_prompt_with_history(prompt, effective_prompt, config)
+        elif url_anchored_request:
+            print(f"[magi] history_context skipped profile={profile_name} reason=url_anchored")
         else:
             print(f"[magi] history_context skipped profile={profile_name}")
         tasks = [_run_single_agent(agent, effective_prompt, profile.timeout_seconds) for agent in profile.agents]
@@ -3384,7 +3569,7 @@ async def retry_agent(payload: RetryRequest) -> RetryResponse:
     if target_agent is None:
         raise HTTPException(status_code=400, detail=f"agent {payload.agent} is not configured")
 
-    effective_prompt = await _build_effective_prompt(prompt, fresh_mode)
+    effective_prompt = await _build_effective_prompt(prompt, fresh_mode, payload.source_urls)
     if _should_apply_thread_context(profile_name):
         effective_prompt = _build_prompt_with_thread_context(effective_prompt, thread_id)
     else:
@@ -3419,7 +3604,7 @@ async def recalc_consensus(payload: ConsensusRequest) -> ConsensusResponse:
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"invalid config: {exc}") from exc
 
-    effective_prompt = await _build_effective_prompt(prompt, fresh_mode)
+    effective_prompt = await _build_effective_prompt(prompt, fresh_mode, payload.source_urls)
     if _should_apply_thread_context(profile_name):
         effective_prompt = _build_prompt_with_thread_context(effective_prompt, thread_id)
     else:

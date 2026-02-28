@@ -30,7 +30,7 @@
 
 #### リクエスト
 ```json
-{ "prompt": "string", "profile": "optional: cost|balance|performance|ultra|local_only", "fresh_mode": false, "thread_id": "optional-string" }
+{ "prompt": "string", "profile": "optional: cost|balance|performance|ultra|local_only", "fresh_mode": false, "thread_id": "optional-string", "source_urls": ["optional-https://..."] }
 ```
 
 #### レスポンス（成功時）
@@ -91,6 +91,7 @@
 - `thread_id` は会話スレッドを識別し、未指定時は新規生成する。
 - 同一 `thread_id` のときは直近ターン文脈をプロンプトに注入し、代名詞参照（「それ」など）に対応する。
 - ただし `local_only` では thread/history 文脈注入をスキップし、単発処理を優先する。
+- リクエストがURLアンカー（`source_urls` 指定または `prompt` 内に `http/https` URL を含む）の場合、`history_context` はスキップし、古い履歴の混入を抑制する。
 - `cost|balance|performance|ultra` は 3モデル結果を入力にして、**3モデル同士の相互レビュー＋投票で合議（consensus）** を実行する。
 - `local_only` では合議再生成を行わず、Agent Aの結果を consensus にパススルーする。
 - 合議が失敗しても全体レスポンスは返し、`consensus.status="ERROR"` を返す。
@@ -230,6 +231,9 @@ FRESH_MAX_RESULTS=3
 FRESH_CACHE_TTL_SECONDS=1800
 FRESH_SEARCH_DEPTH=basic
 FRESH_PRIMARY_TOPIC=general
+SOURCE_MAX_URLS=5
+SOURCE_FETCH_TIMEOUT_SECONDS=10
+SOURCE_SNIPPET_CHARS=1200
 HISTORY_CONTEXT_ENABLED=1
 HISTORY_SIMILARITY_THRESHOLD=0.78
 HISTORY_SIMILAR_CANDIDATES=120
@@ -289,7 +293,9 @@ OLLAMA_API_BASE=http://ollama:11434
 ### 最新情報対策（Fresh mode）
 
 - `fresh_mode=true` のとき、backend は Tavily 検索で最新のWebソースを取得し、プロンプトに前段コンテキストとして付与する。
+- `source_urls` が未指定でも、`prompt` 内の `http/https` URL を自動抽出して直取得し、`[Direct URL Evidence]` として優先注入する。
 - 検索は `general/news` のフォールバックとクエリ拡張を行い、ニュース以外の「攻略・解説」系トピックも拾えるようにする。
+- fresh auto判定は時系列語に加え `YouTube/動画/攻略動画` などの語も対象とし、外部ソース参照を求める依頼で `fresh_mode` を有効化しやすくする。
 - 取得ソースには `url` と `published_date` を含め、時系列依存の回答で出典明示を促す。
 - `TAVILY_API_KEY` 未設定、または検索失敗時は通常プロンプトへ自動フォールバックする（リクエスト自体は失敗させない）。
 

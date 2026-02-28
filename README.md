@@ -145,6 +145,9 @@ URL:
 - `FRESH_CACHE_TTL_SECONDS=1800`（任意）
 - `FRESH_SEARCH_DEPTH=basic`（任意: `basic|advanced`）
 - `FRESH_PRIMARY_TOPIC=general`（任意: `general|news`）
+- `SOURCE_MAX_URLS=5`（任意: `source_urls` の最大取得件数）
+- `SOURCE_FETCH_TIMEOUT_SECONDS=10`（任意: URL直取得のタイムアウト秒）
+- `SOURCE_SNIPPET_CHARS=1200`（任意: 1URLあたり注入文字数）
 - `MAGI_DB_PATH=data/magi.db`（任意、Docker/Local 共通推奨）
 - `HISTORY_CONTEXT_ENABLED=1`（任意: `0/false` で無効化）
 - `HISTORY_SIMILARITY_THRESHOLD=0.78`（任意: 0.0-1.0）
@@ -267,15 +270,17 @@ URL:
 ## APIメモ
 
 - エンドポイント: `POST /api/magi/run`
-- リクエストボディ: `{ "prompt": "...", "profile": "optional: cost|balance|performance|ultra|local_only", "fresh_mode": false, "thread_id": "optional-string" }`
+- リクエストボディ: `{ "prompt": "...", "profile": "optional: cost|balance|performance|ultra|local_only", "fresh_mode": false, "thread_id": "optional-string", "source_urls": ["optional-https://..."] }`
+- `source_urls` 未指定でも、`prompt` に含まれる `http/https` URL は backend が自動抽出して取得し、`[Direct URL Evidence]` として注入されます
+- URLアンカー付きリクエスト（`source_urls` 指定 or `prompt` 内URL含有）では、古い履歴混入を避けるため `history_context` をスキップします
 - `profile` 未指定の場合、backend router が実行されます（UIの `auto (unset)`）
 - Runレスポンスには `consensus`（3者合議で合成された最終回答）が含まれます
 - Runレスポンスには `thread_id` と `turn_index` が含まれます
 - RunレスポンスはローカルSQLite履歴へ保存されます
 - Retryエンドポイント: `POST /api/magi/retry`
-- Retryボディ: `{ "prompt": "...", "agent": "A|B|C", "profile": "...", "fresh_mode": false, "thread_id": "optional-string" }`
+- Retryボディ: `{ "prompt": "...", "agent": "A|B|C", "profile": "...", "fresh_mode": false, "thread_id": "optional-string", "source_urls": ["optional-https://..."] }`
 - Consensusエンドポイント: `POST /api/magi/consensus`
-- Consensusボディ: `{ "prompt": "...", "results": AgentResult[], "profile": "...", "fresh_mode": false, "thread_id": "optional-string" }`
+- Consensusボディ: `{ "prompt": "...", "results": AgentResult[], "profile": "...", "fresh_mode": false, "thread_id": "optional-string", "source_urls": ["optional-https://..."] }`
 - Profilesエンドポイント: `GET /api/magi/profiles`
 - 履歴一覧エンドポイント: `GET /api/magi/history?limit=20&offset=0`
 - 履歴詳細エンドポイント: `GET /api/magi/history/{run_id}`
@@ -353,6 +358,7 @@ python -m pytest backend/tests -q
 - Fresh modeトグル:
   - デフォルトは ON
   - ON時は backend が Tavily で最新Web証拠を取得（`TAVILY_API_KEY` 設定時）
+  - `fresh_mode` 未指定でも、`latest/最新` などの時系列語に加え `YouTube/動画/攻略動画` を含む依頼では自動で有効化される場合があります
   - `general/news` のフォールバックとクエリ拡張により、非ニュース系（ゲーム攻略など）も取得しやすくする
   - Tavily が利用不可、またはキー未設定の場合は通常プロンプトへ自動フォールバック
 - Run履歴パネル（backend SQLiteに永続化）

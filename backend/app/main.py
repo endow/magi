@@ -37,6 +37,7 @@ class AgentConfig(BaseModel):
     agent: str
     provider: str
     model: str
+    system_prompt: str | None = None
 
 
 class ConsensusConfig(BaseModel):
@@ -3213,11 +3214,16 @@ async def _call_model_text(
     prompt: str,
     timeout_seconds: int,
     max_tokens: int | None = None,
+    system_prompt: str | None = None,
 ) -> tuple[str, int, dict[str, int | float | None]]:
     start = perf_counter()
+    messages: list[dict[str, str]] = []
+    if system_prompt and system_prompt.strip():
+        messages.append({"role": "system", "content": system_prompt.strip()})
+    messages.append({"role": "user", "content": prompt})
     completion_args: dict[str, Any] = {
         "model": full_model,
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": messages,
     }
     if max_tokens is not None:
         completion_args["max_tokens"] = max_tokens
@@ -3241,7 +3247,12 @@ async def _run_single_agent(agent_config: AgentConfig, prompt: str, timeout_seco
 
     for attempt in range(1, max_attempts + 1):
         try:
-            text, latency_ms, usage = await _call_model_text(full_model, prompt, timeout_seconds)
+            text, latency_ms, usage = await _call_model_text(
+                full_model,
+                prompt,
+                timeout_seconds,
+                system_prompt=agent_config.system_prompt,
+            )
             print(f"[magi] agent={agent_config.agent} success latency_ms={latency_ms}")
             return AgentResult(
                 agent=agent_config.agent,

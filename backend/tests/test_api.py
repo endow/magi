@@ -1241,7 +1241,12 @@ def test_fresh_query_attempts_news_primary_keeps_general_fallback() -> None:
 def test_run_single_agent_retries_once_for_openai_timeout(monkeypatch) -> None:
     calls = {"count": 0}
 
-    async def fake_call_model_text(full_model: str, prompt: str, timeout_seconds: int):
+    async def fake_call_model_text(
+        full_model: str,
+        prompt: str,
+        timeout_seconds: int,
+        system_prompt: str | None = None,
+    ):
         calls["count"] += 1
         if calls["count"] == 1:
             raise asyncio.TimeoutError()
@@ -1264,10 +1269,69 @@ def test_run_single_agent_retries_once_for_openai_timeout(monkeypatch) -> None:
     assert result.cost_estimate_usd == 0.000123
 
 
+def test_call_model_text_includes_system_prompt_when_provided(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_acompletion(**kwargs):
+        captured.update(kwargs)
+        return {
+            "choices": [{"message": {"content": "ok"}}],
+            "usage": {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6},
+        }
+
+    monkeypatch.setattr(main, "acompletion", fake_acompletion)
+
+    text, _, _ = asyncio.run(
+        main._call_model_text(
+            "ollama/qwen2.5:7b-instruct-q4_K_M",
+            "hello",
+            timeout_seconds=3,
+            system_prompt="system-rule",
+        )
+    )
+
+    assert text == "ok"
+    messages = captured["messages"]
+    assert isinstance(messages, list)
+    assert messages[0] == {"role": "system", "content": "system-rule"}
+    assert messages[1] == {"role": "user", "content": "hello"}
+
+
+def test_call_model_text_keeps_user_only_when_system_prompt_not_set(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_acompletion(**kwargs):
+        captured.update(kwargs)
+        return {
+            "choices": [{"message": {"content": "ok"}}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4},
+        }
+
+    monkeypatch.setattr(main, "acompletion", fake_acompletion)
+
+    text, _, _ = asyncio.run(
+        main._call_model_text(
+            "ollama/qwen2.5:7b-instruct-q4_K_M",
+            "hello",
+            timeout_seconds=3,
+        )
+    )
+
+    assert text == "ok"
+    messages = captured["messages"]
+    assert isinstance(messages, list)
+    assert messages == [{"role": "user", "content": "hello"}]
+
+
 def test_run_single_agent_retries_once_for_gemini_timeout(monkeypatch) -> None:
     calls = {"count": 0}
 
-    async def fake_call_model_text(full_model: str, prompt: str, timeout_seconds: int):
+    async def fake_call_model_text(
+        full_model: str,
+        prompt: str,
+        timeout_seconds: int,
+        system_prompt: str | None = None,
+    ):
         calls["count"] += 1
         if calls["count"] == 1:
             raise asyncio.TimeoutError()
@@ -1291,7 +1355,12 @@ def test_run_single_agent_retries_once_for_gemini_timeout(monkeypatch) -> None:
 def test_run_single_agent_does_not_retry_non_openai_timeout(monkeypatch) -> None:
     calls = {"count": 0}
 
-    async def fake_call_model_text(full_model: str, prompt: str, timeout_seconds: int):
+    async def fake_call_model_text(
+        full_model: str,
+        prompt: str,
+        timeout_seconds: int,
+        system_prompt: str | None = None,
+    ):
         calls["count"] += 1
         raise asyncio.TimeoutError()
 

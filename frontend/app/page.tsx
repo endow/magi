@@ -110,7 +110,7 @@ type ThreadCollapsedMap = Record<string, boolean>;
 
 const RAW_API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 const MAX_PROMPT_LENGTH = 4000;
-const PHASE_VERSION = "v1.0";
+const PHASE_VERSION = "v1.1";
 
 function resolveApiBaseUrl(): string {
   if (typeof window === "undefined") return RAW_API_BASE_URL;

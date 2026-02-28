@@ -1,4 +1,4 @@
-# MAGI v1.1 実装仕様（現行）
+# MAGI v1.2 実装仕様（現行）
 
 本書は、MVPから拡張された現行版「MAGI」の実装仕様を定義する。  
 実装・改修時は、本仕様を正とする。
@@ -22,7 +22,7 @@
 
 ---
 
-## 要件（v1.1）
+## 要件（v1.2）
 
 ### 1) バックエンド
 
@@ -47,7 +47,11 @@
       "model": "gpt-4.1-mini",
       "text": "...",
       "status": "OK",
-      "latency_ms": 1234
+      "latency_ms": 1234,
+      "prompt_tokens": 120,
+      "completion_tokens": 240,
+      "total_tokens": 360,
+      "cost_estimate_usd": 0.0012
     },
     {
       "agent": "B",
@@ -72,7 +76,8 @@
     "model": "peer_vote_r1",
     "text": "",
     "status": "LOADING",
-    "latency_ms": 0
+    "latency_ms": 0,
+    "error_code": null
   }
 }
 ```
@@ -89,12 +94,14 @@
 - OpenAI/Gemini は timeout 時に 1 回リトライする（Anthropic/Ollama は単回）。
 - `run_id` はUUIDで毎回発行し、レスポンスに含める（履歴はSQLiteに保存する）。
 - `thread_id` は会話スレッドを識別し、未指定時は新規生成する。
+- `run/retry/consensus` で渡される `thread_id` は UUID 形式のみ有効とし、非UUIDは無視して新規UUIDへフォールバックする。
 - 同一 `thread_id` のときは直近ターン文脈をプロンプトに注入し、代名詞参照（「それ」など）に対応する。
 - ただし `local_only` では thread/history 文脈注入をスキップし、単発処理を優先する。
 - リクエストがURLアンカー（`source_urls` 指定または `prompt` 内に `http/https` URL を含む）の場合、`history_context` はスキップし、古い履歴の混入を抑制する。
 - `cost|balance|performance|ultra` は 3モデル結果を入力にして、**3モデル同士の相互レビュー＋投票で合議（consensus）** を実行する。
 - `local_only` では合議再生成を行わず、Agent Aの結果を consensus にパススルーする。
 - 合議が失敗しても全体レスポンスは返し、`consensus.status="ERROR"` を返す。
+- 合議失敗時は `consensus.error_code` を返し、失敗原因を機械可読にする。
 
 ---
 
@@ -278,7 +285,7 @@ OLLAMA_API_BASE=http://ollama:11434
 - 備考:
   - `local_only` では再合議せず、受け取ったAgent結果を consensus として返す
 
-### ルーティング学習API（v1.1）
+### ルーティング学習API（v1.2）
 
 - `POST /api/magi/routing/feedback`
   - body: `{ thread_id, request_id, rating: -1|0|1, reason? }`
@@ -287,6 +294,10 @@ OLLAMA_API_BASE=http://ollama:11434
   - key の `weights/stats` を返す
 - `GET /api/magi/routing/events?thread_id=...&limit=...`
   - ルーティングイベントのデバッグ参照
+- `POST /api/magi/routing/signal`
+  - body: `{ thread_id, request_id, signal }`
+  - `signal`: `retry | copy_result | consensus_recalc | history_helpful | history_not_helpful`
+  - 暗黙シグナルを `implicit_reward` として学習報酬に加算する
 
 ---
 

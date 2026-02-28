@@ -9,6 +9,7 @@ type ConsensusResultView = {
   status: ConsensusStatus;
   latency_ms: number;
   error_message?: string | null;
+  error_code?: string | null;
 };
 
 type ParsedConsensus = {
@@ -56,6 +57,7 @@ export default function ConsensusPanel({
       <div className="mt-3 space-y-2 text-xs">
         <p className="text-terminal-dim">model: {consensus.provider}/{consensus.model}</p>
         <p className="text-terminal-dim">latency_ms: {consensus.latency_ms}</p>
+        {consensus.error_code ? <p className="text-terminal-dim">error_code: {consensus.error_code}</p> : null}
         {consensus.error_message ? <p className="status-error">error: {consensus.error_message}</p> : null}
         <pre className="mt-2 whitespace-pre-wrap break-words rounded-md bg-[#02060b] p-3 text-sm leading-6">
           {parsedConsensus.main}

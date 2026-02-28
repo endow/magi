@@ -6,6 +6,8 @@ type RunMetaBarProps = {
   turnIndex: number;
   selectedProfile: string;
   freshMode: boolean;
+  totalTokens: number | null;
+  totalCostUsd: number | null;
   onCopyRunId: () => void;
 };
 
@@ -15,6 +17,8 @@ export default function RunMetaBar({
   turnIndex,
   selectedProfile,
   freshMode,
+  totalTokens,
+  totalCostUsd,
   onCopyRunId
 }: RunMetaBarProps) {
   return (
@@ -24,6 +28,8 @@ export default function RunMetaBar({
       <span>turn: {turnIndex > 0 ? turnIndex : "-"}</span>
       <span>mode: {selectedProfile || "auto"}</span>
       <span>fresh: {freshMode ? "on" : "off"}</span>
+      <span>tokens: {typeof totalTokens === "number" ? totalTokens : "-"}</span>
+      <span>cost_usd_est: {typeof totalCostUsd === "number" ? totalCostUsd.toFixed(6) : "-"}</span>
       <button
         type="button"
         onClick={onCopyRunId}

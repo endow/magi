@@ -80,6 +80,22 @@ docker logs --tail 120 magi-backend
 - 信頼度によるフォールバック: `[magi] request_router fallback_by_confidence ...`
 - 失敗（network/provider）: `[magi] request_router failed ...`
 
+暗黙シグナル送信（routing learning補助）:
+
+```powershell
+Invoke-RestMethod -Method Post http://localhost:8000/api/magi/routing/signal `
+  -ContentType "application/json" `
+  -Body '{"thread_id":"<thread_uuid>","request_id":"<run_id>","signal":"copy_result"}'
+```
+
+macOS / Linux:
+
+```bash
+curl -fsS -X POST "http://localhost:8000/api/magi/routing/signal" \
+  -H "Content-Type: application/json" \
+  -d '{"thread_id":"<thread_uuid>","request_id":"<run_id>","signal":"copy_result"}'
+```
+
 ### ルーティング判定の一括テスト
 
 リポジトリルートで実行:

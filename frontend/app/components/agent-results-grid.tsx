@@ -11,6 +11,10 @@ type AgentResultView = {
   status: AgentStatus;
   latency_ms: number;
   error_message?: string | null;
+  prompt_tokens?: number | null;
+  completion_tokens?: number | null;
+  total_tokens?: number | null;
+  cost_estimate_usd?: number | null;
 };
 
 type AgentResultsGridProps = {
@@ -75,6 +79,15 @@ export default function AgentResultsGrid({ cards, isBusy, onRetry, onCopy }: Age
 
           <div className="mt-3 space-y-2 text-xs">
             <p className="text-terminal-dim">latency_ms: {result.latency_ms}</p>
+            <p className="text-terminal-dim">
+              tokens: {typeof result.total_tokens === "number" ? result.total_tokens : "-"}
+              {typeof result.prompt_tokens === "number" || typeof result.completion_tokens === "number"
+                ? ` (in:${result.prompt_tokens ?? "-"} out:${result.completion_tokens ?? "-"})`
+                : ""}
+            </p>
+            <p className="text-terminal-dim">
+              cost_usd_est: {typeof result.cost_estimate_usd === "number" ? result.cost_estimate_usd.toFixed(6) : "-"}
+            </p>
             {result.error_message ? <p className="status-error">error: {result.error_message}</p> : null}
             <pre className="mt-2 whitespace-pre-wrap break-words rounded-md bg-[#02060b] p-3 text-sm leading-6">
               {result.text}

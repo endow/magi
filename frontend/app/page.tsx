@@ -23,6 +23,10 @@ type AgentResult = {
   status: AgentStatus;
   latency_ms: number;
   error_message?: string | null;
+  prompt_tokens?: number | null;
+  completion_tokens?: number | null;
+  total_tokens?: number | null;
+  cost_estimate_usd?: number | null;
 };
 
 type RoutingInfo = {
@@ -71,6 +75,7 @@ type ConsensusResult = {
   status: "OK" | "ERROR" | "LOADING";
   latency_ms: number;
   error_message?: string | null;
+  error_code?: string | null;
 };
 
 type ConsensusResponse = {
@@ -99,6 +104,8 @@ type RoutingFeedbackResponse = {
   policy_key?: string | null;
 };
 
+type RoutingSignal = "retry" | "copy_result" | "consensus_recalc" | "history_helpful" | "history_not_helpful";
+
 type ThreadGroup = {
   thread_id: string;
   latest_at: string;
@@ -110,7 +117,7 @@ type ThreadCollapsedMap = Record<string, boolean>;
 
 const RAW_API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 const MAX_PROMPT_LENGTH = 4000;
-const PHASE_VERSION = "v1.1";
+const PHASE_VERSION = "v1.2";
 
 function resolveApiBaseUrl(): string {
   if (typeof window === "undefined") return RAW_API_BASE_URL;
@@ -323,6 +330,22 @@ export default function HomePage() {
     [consensus]
   );
   const parsedConsensus = useMemo(() => splitConsensusText(consensus?.text), [consensus?.text]);
+  const totalTokens = useMemo(() => {
+    if (!results.length) return null;
+    const known = results
+      .map((item) => (typeof item.total_tokens === "number" ? item.total_tokens : null))
+      .filter((value): value is number => value !== null);
+    if (!known.length) return null;
+    return known.reduce((sum, value) => sum + value, 0);
+  }, [results]);
+  const totalCostUsd = useMemo(() => {
+    if (!results.length) return null;
+    const known = results
+      .map((item) => (typeof item.cost_estimate_usd === "number" ? item.cost_estimate_usd : null))
+      .filter((value): value is number => value !== null);
+    if (!known.length) return null;
+    return known.reduce((sum, value) => sum + value, 0);
+  }, [results]);
   const showDiscussionBadge = useMemo(
     () =>
       !showConclusion &&
@@ -767,10 +790,28 @@ export default function HomePage() {
     }
   }
 
+  async function sendRoutingSignal(signal: RoutingSignal) {
+    if (!runId || !threadId) return;
+    try {
+      await fetch(`${apiBaseUrl}/api/magi/routing/signal`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          thread_id: threadId,
+          request_id: runId,
+          signal
+        })
+      });
+    } catch {
+      // implicit signal errors should not affect user flow
+    }
+  }
+
   async function copyResultText(result: AgentResult) {
     if (!result.text) return;
     try {
       await navigator.clipboard.writeText(result.text);
+      void sendRoutingSignal("copy_result");
     } catch {
       setError(`failed to copy Agent ${result.agent} text`);
     }
@@ -789,6 +830,7 @@ export default function HomePage() {
     markConsensusClockStart();
     setLocalNodeState("RELAY");
     setNodeStates((prev) => ({ ...prev, [agent]: "BLINK" }));
+    void sendRoutingSignal("retry");
 
     try {
       const retried = await requestRetry(lastRunPrompt, agent);
@@ -817,6 +859,7 @@ export default function HomePage() {
       })();
 
       setResults(updatedResults);
+      void sendRoutingSignal("consensus_recalc");
       const recalculated = await requestConsensus(lastRunPrompt, updatedResults);
       if (recalculated) {
         setResolvedProfile(recalculated.profile);
@@ -1054,6 +1097,8 @@ export default function HomePage() {
           turnIndex={turnIndex}
           selectedProfile={selectedProfile}
           freshMode={freshMode}
+          totalTokens={totalTokens}
+          totalCostUsd={totalCostUsd}
           onCopyRunId={copyRunId}
         />
         <RoutingInfoPanel routingInfo={routingInfo} />

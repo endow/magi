@@ -2,6 +2,7 @@ from fastapi.testclient import TestClient
 
 import backend.app.main as main
 import asyncio
+import uuid
 from datetime import datetime, timedelta, timezone
 
 
@@ -341,6 +342,29 @@ def test_run_assigns_thread_id_and_turn_index(monkeypatch) -> None:
     assert body["turn_index"] == 1
 
 
+def test_run_ignores_non_uuid_thread_id_and_generates_uuid(monkeypatch) -> None:
+    monkeypatch.setattr(main, "load_config", _profiled_config)
+    monkeypatch.setattr(main, "_save_run_history", lambda *args, **kwargs: None)
+
+    async def fake_runner(agent_config, prompt, timeout_seconds):
+        return main.AgentResult(
+            agent=agent_config.agent,
+            provider=agent_config.provider,
+            model=agent_config.model,
+            text=f"ok-{agent_config.agent}",
+            status="OK",
+            latency_ms=100,
+        )
+
+    monkeypatch.setattr(main, "_run_single_agent", fake_runner)
+
+    response = client.post("/api/magi/run", json={"prompt": "hello", "profile": "cost", "thread_id": "thread-custom"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["thread_id"] != "thread-custom"
+    assert str(uuid.UUID(body["thread_id"])) == body["thread_id"]
+
+
 def test_run_with_same_thread_injects_thread_context(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("MAGI_DB_PATH", str(tmp_path / "magi-thread.db"))
     main._init_db()
@@ -641,7 +665,7 @@ def test_route_profile_falls_back_when_confidence_is_low(monkeypatch) -> None:
     config = _profiled_config_with_router(enabled=True, min_confidence=80)
 
     async def fake_call(full_model: str, prompt: str, timeout_seconds: int, max_tokens: int | None = None):
-        return '{"intent":"coding","complexity":"high","profile":"performance","confidence":42,"reason":"uncertain"}', 12
+        return '{"intent":"coding","complexity":"high","profile":"performance","confidence":42,"reason":"uncertain"}', 12, {}
 
     monkeypatch.setattr(main, "_call_model_text", fake_call)
     selected = asyncio.run(main._route_profile(config, "refactor this service"))
@@ -656,6 +680,7 @@ def test_route_profile_uses_local_only_for_low_risk_translation(monkeypatch) -> 
             '{"intent":"translation","complexity":"low","safety":"low","execution_tier":"local",'
             '"profile":"cost","confidence":92,"reason":"safe text rewrite"}',
             10,
+            {},
         )
 
     monkeypatch.setattr(main, "_call_model_text", fake_call)
@@ -682,6 +707,7 @@ def test_route_profile_does_not_use_local_only_when_execution_tier_is_cloud(monk
             '{"intent":"translation","complexity":"low","safety":"low","execution_tier":"cloud",'
             '"profile":"local_only","confidence":95,"reason":"classified as cloud"}',
             10,
+            {},
         )
 
     monkeypatch.setattr(main, "_call_model_text", fake_call)
@@ -947,6 +973,15 @@ def test_build_effective_prompt_falls_back_without_tavily_key(monkeypatch) -> No
     assert effective == prompt
 
 
+def test_routing_feedback_rejects_non_uuid_thread_id() -> None:
+    response = client.post(
+        "/api/magi/routing/feedback",
+        json={"thread_id": "thread-abc", "request_id": "req-1", "rating": 1},
+    )
+    assert response.status_code == 400
+    assert "thread_id must be a UUID" in response.json()["detail"]
+
+
 def test_find_similar_history_returns_ranked_matches(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("MAGI_DB_PATH", str(tmp_path / "magi-similar.db"))
     monkeypatch.setenv("HISTORY_SIMILARITY_THRESHOLD", "0.20")
@@ -1210,7 +1245,7 @@ def test_run_single_agent_retries_once_for_openai_timeout(monkeypatch) -> None:
         calls["count"] += 1
         if calls["count"] == 1:
             raise asyncio.TimeoutError()
-        return "ok-after-retry", 123
+        return "ok-after-retry", 123, {"prompt_tokens": 10, "completion_tokens": 6, "total_tokens": 16, "cost_estimate_usd": 0.000123}
 
     monkeypatch.setattr(main, "_call_model_text", fake_call_model_text)
 
@@ -1225,6 +1260,8 @@ def test_run_single_agent_retries_once_for_openai_timeout(monkeypatch) -> None:
     assert calls["count"] == 2
     assert result.status == "OK"
     assert result.text == "ok-after-retry"
+    assert result.total_tokens == 16
+    assert result.cost_estimate_usd == 0.000123
 
 
 def test_run_single_agent_retries_once_for_gemini_timeout(monkeypatch) -> None:
@@ -1234,7 +1271,7 @@ def test_run_single_agent_retries_once_for_gemini_timeout(monkeypatch) -> None:
         calls["count"] += 1
         if calls["count"] == 1:
             raise asyncio.TimeoutError()
-        return "ok-after-retry", 123
+        return "ok-after-retry", 123, {"prompt_tokens": 9, "completion_tokens": 5, "total_tokens": 14}
 
     monkeypatch.setattr(main, "_call_model_text", fake_call_model_text)
 
@@ -1429,6 +1466,7 @@ def test_routing_feedback_affects_next_auto_route(monkeypatch, tmp_path) -> None
         return (
             '{"intent":"qa","complexity":"high","safety":"low","execution_tier":"cloud","profile":"cost","confidence":95,"reason":"default"}',
             10,
+            {},
         )
 
     async def fake_runner(agent_config, prompt, timeout_seconds):
@@ -1464,3 +1502,62 @@ def test_routing_feedback_affects_next_auto_route(monkeypatch, tmp_path) -> None
     assert second.status_code == 200
     second_body = second.json()
     assert second_body["profile"] == "balance"
+
+
+def test_routing_signal_updates_implicit_reward(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("MAGI_DB_PATH", str(tmp_path / "magi-routing-signal.db"))
+    main._init_db()
+
+    config = _profiled_config_with_router(enabled=False)
+    monkeypatch.setattr(main, "load_config", lambda: config)
+
+    async def fake_runner(agent_config, prompt, timeout_seconds):
+        return main.AgentResult(
+            agent=agent_config.agent,
+            provider=agent_config.provider,
+            model=agent_config.model,
+            text=f"ok-{agent_config.agent}",
+            status="OK",
+            latency_ms=100,
+        )
+
+    monkeypatch.setattr(main, "_run_single_agent", fake_runner)
+
+    run = client.post("/api/magi/run", json={"prompt": "hello", "profile": "cost"})
+    assert run.status_code == 200
+    run_body = run.json()
+
+    signal = client.post(
+        "/api/magi/routing/signal",
+        json={
+            "thread_id": run_body["thread_id"],
+            "request_id": run_body["run_id"],
+            "signal": "copy_result",
+        },
+    )
+    assert signal.status_code == 200
+    signal_body = signal.json()
+    assert signal_body["implicit_reward"] > 0
+
+    events = client.get(f"/api/magi/routing/events?thread_id={run_body['thread_id']}&limit=5")
+    assert events.status_code == 200
+    items = events.json()["items"]
+    assert items
+    assert items[0]["implicit_signals"].get("copy_result") == 1
+
+
+def test_single_model_consensus_sets_error_code_for_insufficient_results() -> None:
+    cfg = main.ConsensusConfig(
+        strategy="single_model",
+        provider="openai",
+        model="gpt-5-mini",
+        min_ok_results=2,
+    )
+    results = [
+        main.AgentResult(agent="A", provider="openai", model="m1", text="ok", status="OK", latency_ms=10),
+        main.AgentResult(agent="B", provider="anthropic", model="m2", text="", status="ERROR", latency_ms=10, error_message="timeout"),
+    ]
+
+    consensus = asyncio.run(main._run_single_model_consensus(cfg, "hello", results, timeout_seconds=3))
+    assert consensus.status == "ERROR"
+    assert consensus.error_code == "INSUFFICIENT_OK_RESULTS"

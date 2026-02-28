@@ -165,6 +165,10 @@ class AgentResult(BaseModel):
     status: Literal["OK", "ERROR"]
     latency_ms: int
     error_message: str | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
+    cost_estimate_usd: float | None = None
 
 
 class ConsensusRequest(BaseModel):
@@ -199,6 +203,7 @@ class ConsensusResult(BaseModel):
     status: Literal["OK", "ERROR", "LOADING"]
     latency_ms: int
     error_message: str | None = None
+    error_code: str | None = None
 
 
 class DeliberationTurn(BaseModel):
@@ -278,6 +283,26 @@ class RoutingFeedbackResponse(BaseModel):
     policy_key: str | None = None
 
 
+class RoutingSignalRequest(BaseModel):
+    thread_id: str
+    request_id: str
+    signal: Literal[
+        "retry",
+        "copy_result",
+        "consensus_recalc",
+        "history_helpful",
+        "history_not_helpful",
+    ]
+
+
+class RoutingSignalResponse(BaseModel):
+    thread_id: str
+    request_id: str
+    signal: str
+    policy_key: str | None = None
+    implicit_reward: float
+
+
 class RoutingPolicyResponse(BaseModel):
     key: str
     weights: dict[str, float]
@@ -295,6 +320,8 @@ class RoutingEventItem(BaseModel):
     execution_result: dict[str, Any]
     user_rating: int
     user_reason: str | None = None
+    implicit_reward: float = 0.0
+    implicit_signals: dict[str, int] = Field(default_factory=dict)
 
 
 class RoutingEventsResponse(BaseModel):
@@ -321,7 +348,7 @@ async def app_lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="MAGI v1.0 Backend", lifespan=app_lifespan)
+app = FastAPI(title="MAGI v1.2 Backend", lifespan=app_lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -902,7 +929,7 @@ async def _route_profile_with_trace(
     max_attempts = 2
     for attempt in range(1, max_attempts + 1):
         try:
-            raw_text, latency_ms = await _call_model_text(
+            raw_text, latency_ms, _ = await _call_model_text(
                 full_model,
                 routing_prompt,
                 router.timeout_seconds,
@@ -1092,6 +1119,57 @@ def _extract_text(response: Any) -> str:
                 parts.append(item)
         return "\n".join(parts)
     return "" if content is None else str(content)
+
+
+def _extract_usage_value(raw_usage: Any, key: str) -> int | None:
+    value: Any = None
+    if isinstance(raw_usage, dict):
+        value = raw_usage.get(key)
+    elif raw_usage is not None:
+        value = getattr(raw_usage, key, None)
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return max(0, parsed)
+
+
+def _extract_usage_metrics(response: Any) -> dict[str, int | float | None]:
+    raw_usage: Any = getattr(response, "usage", None)
+    if raw_usage is None and isinstance(response, dict):
+        raw_usage = response.get("usage")
+
+    prompt_tokens = _extract_usage_value(raw_usage, "prompt_tokens")
+    completion_tokens = _extract_usage_value(raw_usage, "completion_tokens")
+    total_tokens = _extract_usage_value(raw_usage, "total_tokens")
+    if total_tokens is None and (prompt_tokens is not None or completion_tokens is not None):
+        total_tokens = int((prompt_tokens or 0) + (completion_tokens or 0))
+
+    response_cost: float | None = None
+    hidden_params: Any = getattr(response, "_hidden_params", None)
+    if hidden_params is None and isinstance(response, dict):
+        hidden_params = response.get("_hidden_params")
+    if isinstance(hidden_params, dict):
+        raw_cost = hidden_params.get("response_cost")
+        try:
+            response_cost = float(raw_cost) if raw_cost is not None else None
+        except (TypeError, ValueError):
+            response_cost = None
+    if response_cost is None and isinstance(response, dict):
+        raw_cost = response.get("response_cost")
+        try:
+            response_cost = float(raw_cost) if raw_cost is not None else None
+        except (TypeError, ValueError):
+            response_cost = None
+
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
+        "cost_estimate_usd": response_cost,
+    }
 
 
 def _public_error_message(exc: Exception) -> str:
@@ -1618,7 +1696,20 @@ def _thread_context_max_turns() -> int:
         return 6
 
 
-def _normalize_thread_id(raw_thread_id: str | None) -> str | None:
+def _is_uuid_string(value: str) -> bool:
+    try:
+        parsed = uuid.UUID(value)
+    except (ValueError, AttributeError, TypeError):
+        return False
+    return str(parsed) == value.lower()
+
+
+def _normalize_thread_id(
+    raw_thread_id: str | None,
+    *,
+    require_uuid: bool = False,
+    allow_non_uuid: bool = False,
+) -> str | None:
     if raw_thread_id is None:
         return None
     value = raw_thread_id.strip()
@@ -1626,7 +1717,14 @@ def _normalize_thread_id(raw_thread_id: str | None) -> str | None:
         return None
     if len(value) > 120:
         raise HTTPException(status_code=400, detail="thread_id must be 120 characters or fewer")
-    return value
+    if _is_uuid_string(value):
+        return value.lower()
+    if require_uuid:
+        raise HTTPException(status_code=400, detail="thread_id must be a UUID")
+    if allow_non_uuid:
+        return value
+    print(f"[magi] non-uuid thread_id ignored and regenerated value={value[:24]}")
+    return None
 
 
 def _normalize_similarity_text(text: str) -> str:
@@ -2112,6 +2210,7 @@ def _init_db() -> None:
                 consensus_status TEXT,
                 consensus_latency_ms INTEGER,
                 consensus_error_message TEXT,
+                consensus_error_code TEXT,
                 validity_state TEXT NOT NULL DEFAULT 'active',
                 superseded_by TEXT,
                 superseded_at TEXT
@@ -2125,7 +2224,11 @@ def _init_db() -> None:
                 text TEXT NOT NULL,
                 status TEXT NOT NULL,
                 latency_ms INTEGER NOT NULL,
-                error_message TEXT
+                error_message TEXT,
+                prompt_tokens INTEGER,
+                completion_tokens INTEGER,
+                total_tokens INTEGER,
+                cost_estimate_usd REAL
             );
             CREATE INDEX IF NOT EXISTS idx_agent_results_run_id ON agent_results(run_id);
             CREATE TABLE IF NOT EXISTS routing_events (
@@ -2137,7 +2240,9 @@ def _init_db() -> None:
                 router_output_json TEXT NOT NULL,
                 execution_result_json TEXT NOT NULL,
                 user_rating INTEGER NOT NULL DEFAULT 0,
-                user_reason TEXT
+                user_reason TEXT,
+                implicit_reward REAL NOT NULL DEFAULT 0.0,
+                implicit_signals_json TEXT NOT NULL DEFAULT '{}'
             );
             CREATE TABLE IF NOT EXISTS routing_policy (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2151,6 +2256,7 @@ def _init_db() -> None:
             """
         )
         _ensure_runs_columns(conn)
+        _ensure_agent_result_columns(conn)
         _ensure_routing_columns(conn)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_validity_state ON runs(validity_state)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_thread_turn ON runs(thread_id, turn_index)")
@@ -2168,6 +2274,8 @@ def _ensure_runs_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE runs ADD COLUMN superseded_by TEXT")
     if "superseded_at" not in existing:
         conn.execute("ALTER TABLE runs ADD COLUMN superseded_at TEXT")
+    if "consensus_error_code" not in existing:
+        conn.execute("ALTER TABLE runs ADD COLUMN consensus_error_code TEXT")
     conn.execute(
         """
         UPDATE runs
@@ -2197,6 +2305,22 @@ def _ensure_routing_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE routing_events ADD COLUMN user_rating INTEGER NOT NULL DEFAULT 0")
     if "user_reason" not in event_columns:
         conn.execute("ALTER TABLE routing_events ADD COLUMN user_reason TEXT")
+    if "implicit_reward" not in event_columns:
+        conn.execute("ALTER TABLE routing_events ADD COLUMN implicit_reward REAL NOT NULL DEFAULT 0.0")
+    if "implicit_signals_json" not in event_columns:
+        conn.execute("ALTER TABLE routing_events ADD COLUMN implicit_signals_json TEXT NOT NULL DEFAULT '{}'")
+
+
+def _ensure_agent_result_columns(conn: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(agent_results)").fetchall()}
+    if "prompt_tokens" not in columns:
+        conn.execute("ALTER TABLE agent_results ADD COLUMN prompt_tokens INTEGER")
+    if "completion_tokens" not in columns:
+        conn.execute("ALTER TABLE agent_results ADD COLUMN completion_tokens INTEGER")
+    if "total_tokens" not in columns:
+        conn.execute("ALTER TABLE agent_results ADD COLUMN total_tokens INTEGER")
+    if "cost_estimate_usd" not in columns:
+        conn.execute("ALTER TABLE agent_results ADD COLUMN cost_estimate_usd REAL")
 
 
 def _json_dump(payload: dict[str, Any]) -> str:
@@ -2281,12 +2405,20 @@ def _build_execution_result_snapshot(
             "status": item.status,
             "latency_ms": item.latency_ms,
             "error_message": item.error_message,
+            "prompt_tokens": item.prompt_tokens,
+            "completion_tokens": item.completion_tokens,
+            "total_tokens": item.total_tokens,
+            "cost_estimate_usd": item.cost_estimate_usd,
         }
         for item in results
     ]
     max_latency = max((item.latency_ms for item in results), default=0)
-    token_estimate = max(0, sum(max(0, len(item.text)) // 4 for item in results))
-    cost_estimate = round(token_estimate / 1000.0, 4)
+    token_estimate = sum(
+        (item.total_tokens if isinstance(item.total_tokens, int) else max(0, len(item.text)) // 4)
+        for item in results
+    )
+    exact_cost = sum(float(item.cost_estimate_usd or 0.0) for item in results if item.cost_estimate_usd is not None)
+    cost_estimate = round(exact_cost, 6) if exact_cost > 0 else round(token_estimate / 1000.0, 4)
     has_error = any(item.status == "ERROR" for item in results) or bool(failure_message)
     payload: dict[str, Any] = {
         "profile": profile,
@@ -2311,9 +2443,10 @@ def _build_execution_result_snapshot(
 def _compute_routing_reward(
     user_rating: int,
     execution_result: dict[str, Any],
+    implicit_reward: float = 0.0,
     config: AppConfig | None = None,
 ) -> float:
-    reward = float(user_rating)
+    reward = float(user_rating) + float(implicit_reward)
     if bool(execution_result.get("error")):
         reward -= 1.0
     latency_ms = int(execution_result.get("latency_ms") or 0)
@@ -2420,8 +2553,8 @@ def _save_routing_event(
             """
             INSERT OR REPLACE INTO routing_events (
                 thread_id, request_id, created_at, router_input_json, router_output_json,
-                execution_result_json, user_rating, user_reason
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                execution_result_json, user_rating, user_reason, implicit_reward, implicit_signals_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 thread_id,
@@ -2432,6 +2565,8 @@ def _save_routing_event(
                 _json_dump({}),
                 0,
                 None,
+                0.0,
+                _json_dump({}),
             ),
         )
 
@@ -2445,6 +2580,7 @@ def _apply_policy_update_for_event(request_id: str, config: AppConfig | None = N
         row = conn.execute(
             """
             SELECT request_id, router_output_json, execution_result_json, user_rating
+                 , implicit_reward
             FROM routing_events
             WHERE request_id = ?
             """,
@@ -2456,6 +2592,7 @@ def _apply_policy_update_for_event(request_id: str, config: AppConfig | None = N
         router_output = _json_load_dict(row["router_output_json"])
         execution_result = _json_load_dict(row["execution_result_json"])
         user_rating = int(row["user_rating"] or 0)
+        implicit_reward = float(row["implicit_reward"] or 0.0)
         policy_key = _safe_str(router_output.get("policy_key")) or None
         chosen_profile = _safe_str(router_output.get("chosen_profile"))
         if not policy_key or not chosen_profile:
@@ -2476,7 +2613,7 @@ def _apply_policy_update_for_event(request_id: str, config: AppConfig | None = N
 
         weights = _apply_weight_decay(weights, previous_updated_at, config)
 
-        reward = _compute_routing_reward(user_rating, execution_result, config)
+        reward = _compute_routing_reward(user_rating, execution_result, implicit_reward, config)
         delta = _routing_alpha(config) * reward
         lower, upper = _routing_clamp_range(config)
         current_weight = float(weights.get(chosen_profile, 0.0))
@@ -2531,6 +2668,64 @@ def _update_routing_event_feedback(
     return _apply_policy_update_for_event(request_id, config)
 
 
+_ROUTING_SIGNAL_BASE_REWARD: dict[str, float] = {
+    "retry": -0.35,
+    "copy_result": 0.20,
+    "consensus_recalc": -0.15,
+    "history_helpful": 0.15,
+    "history_not_helpful": -0.25,
+}
+
+
+def _update_routing_event_signal(
+    thread_id: str,
+    request_id: str,
+    signal: str,
+    config: AppConfig | None = None,
+) -> tuple[str | None, float]:
+    _init_db()
+    base_delta = float(_ROUTING_SIGNAL_BASE_REWARD.get(signal, 0.0))
+    if base_delta == 0.0:
+        return None, 0.0
+
+    implicit_reward: float = 0.0
+    with _get_db_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT implicit_reward, implicit_signals_json
+            FROM routing_events
+            WHERE thread_id = ? AND request_id = ?
+            """,
+            (thread_id, request_id),
+        ).fetchone()
+        if row is None:
+            return None, 0.0
+
+        existing_reward = float(row["implicit_reward"] or 0.0)
+        signal_counts_raw = _json_load_dict(row["implicit_signals_json"])
+        signal_counts: dict[str, int] = {
+            str(key): int(value)
+            for key, value in signal_counts_raw.items()
+            if isinstance(value, (int, float))
+        }
+        previous_count = int(signal_counts.get(signal, 0))
+        signal_counts[signal] = previous_count + 1
+
+        # Diminishing return to prevent one action from dominating policy updates.
+        applied_delta = base_delta / float(previous_count + 1)
+        implicit_reward = _clamp_weight(existing_reward + applied_delta, -1.5, 1.5)
+        conn.execute(
+            """
+            UPDATE routing_events
+            SET implicit_reward = ?, implicit_signals_json = ?
+            WHERE thread_id = ? AND request_id = ?
+            """,
+            (implicit_reward, _json_dump(signal_counts), thread_id, request_id),
+        )
+
+    return _apply_policy_update_for_event(request_id, config), implicit_reward
+
+
 def _list_routing_events(thread_id: str | None, limit: int) -> RoutingEventsResponse:
     _init_db()
     with _get_db_connection() as conn:
@@ -2542,7 +2737,7 @@ def _list_routing_events(thread_id: str | None, limit: int) -> RoutingEventsResp
             rows = conn.execute(
                 """
                 SELECT id, thread_id, request_id, created_at, router_input_json, router_output_json,
-                       execution_result_json, user_rating, user_reason
+                       execution_result_json, user_rating, user_reason, implicit_reward, implicit_signals_json
                 FROM routing_events
                 WHERE thread_id = ?
                 ORDER BY id DESC
@@ -2556,7 +2751,7 @@ def _list_routing_events(thread_id: str | None, limit: int) -> RoutingEventsResp
             rows = conn.execute(
                 """
                 SELECT id, thread_id, request_id, created_at, router_input_json, router_output_json,
-                       execution_result_json, user_rating, user_reason
+                       execution_result_json, user_rating, user_reason, implicit_reward, implicit_signals_json
                 FROM routing_events
                 ORDER BY id DESC
                 LIMIT ?
@@ -2578,6 +2773,12 @@ def _list_routing_events(thread_id: str | None, limit: int) -> RoutingEventsResp
                 execution_result=_json_load_dict(row["execution_result_json"]),
                 user_rating=int(row["user_rating"] or 0),
                 user_reason=row["user_reason"],
+                implicit_reward=float(row["implicit_reward"] or 0.0),
+                implicit_signals={
+                    str(key): int(value)
+                    for key, value in _json_load_dict(row["implicit_signals_json"]).items()
+                    if isinstance(value, (int, float))
+                },
             )
             for row in rows
         ],
@@ -2654,9 +2855,9 @@ def _save_run_history(
             INSERT INTO runs (
                 run_id, thread_id, turn_index, profile, prompt, created_at,
                 consensus_provider, consensus_model, consensus_text, consensus_status,
-                consensus_latency_ms, consensus_error_message,
+                consensus_latency_ms, consensus_error_message, consensus_error_code,
                 validity_state, superseded_by, superseded_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run_id,
@@ -2671,6 +2872,7 @@ def _save_run_history(
                 consensus.status,
                 consensus.latency_ms,
                 consensus.error_message,
+                consensus.error_code,
                 validity_state,
                 superseded_hint,
                 None,
@@ -2679,8 +2881,9 @@ def _save_run_history(
         conn.executemany(
             """
             INSERT INTO agent_results (
-                run_id, agent, provider, model, text, status, latency_ms, error_message
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                run_id, agent, provider, model, text, status, latency_ms, error_message,
+                prompt_tokens, completion_tokens, total_tokens, cost_estimate_usd
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -2692,6 +2895,10 @@ def _save_run_history(
                     item.status,
                     item.latency_ms,
                     item.error_message,
+                    item.prompt_tokens,
+                    item.completion_tokens,
+                    item.total_tokens,
+                    item.cost_estimate_usd,
                 )
                 for item in results
             ],
@@ -2709,7 +2916,8 @@ def _update_run_consensus(run_id: str, consensus: ConsensusResult) -> bool:
                 consensus_text = ?,
                 consensus_status = ?,
                 consensus_latency_ms = ?,
-                consensus_error_message = ?
+                consensus_error_message = ?,
+                consensus_error_code = ?
             WHERE run_id = ?
             """,
             (
@@ -2719,6 +2927,7 @@ def _update_run_consensus(run_id: str, consensus: ConsensusResult) -> bool:
                 consensus.status,
                 consensus.latency_ms,
                 consensus.error_message,
+                consensus.error_code,
                 run_id,
             ),
         )
@@ -2741,7 +2950,8 @@ def _load_agent_results_map(run_ids: list[str]) -> dict[str, list[AgentResult]]:
         return {}
     placeholders = ",".join("?" for _ in run_ids)
     query = (
-        "SELECT run_id, agent, provider, model, text, status, latency_ms, error_message "
+        "SELECT run_id, agent, provider, model, text, status, latency_ms, error_message, "
+        "prompt_tokens, completion_tokens, total_tokens, cost_estimate_usd "
         f"FROM agent_results WHERE run_id IN ({placeholders}) ORDER BY id ASC"
     )
     by_run: dict[str, list[AgentResult]] = defaultdict(list)
@@ -2757,6 +2967,10 @@ def _load_agent_results_map(run_ids: list[str]) -> dict[str, list[AgentResult]]:
                 status=row["status"],
                 latency_ms=row["latency_ms"],
                 error_message=row["error_message"],
+                prompt_tokens=row["prompt_tokens"],
+                completion_tokens=row["completion_tokens"],
+                total_tokens=row["total_tokens"],
+                cost_estimate_usd=row["cost_estimate_usd"],
             )
         )
     return by_run
@@ -2773,6 +2987,7 @@ def _history_item_from_row(row: sqlite3.Row, results: list[AgentResult]) -> Hist
             status=consensus_status,
             latency_ms=int(row["consensus_latency_ms"] or 0),
             error_message=row["consensus_error_message"],
+            error_code=row["consensus_error_code"],
         )
 
     return HistoryItem(
@@ -2794,7 +3009,7 @@ def _list_history(limit: int, offset: int) -> HistoryListResponse:
             """
             SELECT run_id, thread_id, turn_index, profile, prompt, created_at,
                    consensus_provider, consensus_model, consensus_text, consensus_status,
-                   consensus_latency_ms, consensus_error_message
+                   consensus_latency_ms, consensus_error_message, consensus_error_code
             FROM runs
             ORDER BY created_at DESC
             LIMIT ? OFFSET ?
@@ -2814,7 +3029,7 @@ def _get_history_item(run_id: str) -> HistoryItem | None:
             """
             SELECT run_id, thread_id, turn_index, profile, prompt, created_at,
                    consensus_provider, consensus_model, consensus_text, consensus_status,
-                   consensus_latency_ms, consensus_error_message
+                   consensus_latency_ms, consensus_error_message, consensus_error_code
             FROM runs
             WHERE run_id = ?
             """,
@@ -2998,7 +3213,7 @@ async def _call_model_text(
     prompt: str,
     timeout_seconds: int,
     max_tokens: int | None = None,
-) -> tuple[str, int]:
+) -> tuple[str, int, dict[str, int | float | None]]:
     start = perf_counter()
     completion_args: dict[str, Any] = {
         "model": full_model,
@@ -3012,8 +3227,9 @@ async def _call_model_text(
         timeout=timeout_seconds,
     )
     text = _extract_text(response)
+    usage = _extract_usage_metrics(response)
     latency_ms = int((perf_counter() - start) * 1000)
-    return text, latency_ms
+    return text, latency_ms, usage
 
 
 async def _run_single_agent(agent_config: AgentConfig, prompt: str, timeout_seconds: int) -> AgentResult:
@@ -3025,7 +3241,7 @@ async def _run_single_agent(agent_config: AgentConfig, prompt: str, timeout_seco
 
     for attempt in range(1, max_attempts + 1):
         try:
-            text, latency_ms = await _call_model_text(full_model, prompt, timeout_seconds)
+            text, latency_ms, usage = await _call_model_text(full_model, prompt, timeout_seconds)
             print(f"[magi] agent={agent_config.agent} success latency_ms={latency_ms}")
             return AgentResult(
                 agent=agent_config.agent,
@@ -3034,6 +3250,12 @@ async def _run_single_agent(agent_config: AgentConfig, prompt: str, timeout_seco
                 text=text,
                 status="OK",
                 latency_ms=latency_ms,
+                prompt_tokens=usage["prompt_tokens"] if isinstance(usage.get("prompt_tokens"), int) else None,
+                completion_tokens=usage["completion_tokens"] if isinstance(usage.get("completion_tokens"), int) else None,
+                total_tokens=usage["total_tokens"] if isinstance(usage.get("total_tokens"), int) else None,
+                cost_estimate_usd=(
+                    float(usage["cost_estimate_usd"]) if isinstance(usage.get("cost_estimate_usd"), (int, float)) else None
+                ),
             )
         except asyncio.TimeoutError:
             if attempt < max_attempts:
@@ -3094,7 +3316,7 @@ async def _run_deliberation_turn(
             round_index,
             consensus_config,
         )
-        text, latency_ms = await _call_model_text(full_model, turn_prompt, timeout_seconds)
+        text, latency_ms, _ = await _call_model_text(full_model, turn_prompt, timeout_seconds)
         turn = _parse_deliberation_turn(text, agent_config, latency_ms, consensus_config)
         print(f"[magi] deliberation round={round_index} agent={agent_config.agent} success latency_ms={latency_ms}")
         return turn
@@ -3139,6 +3361,7 @@ async def _run_single_model_consensus(
             status="ERROR",
             latency_ms=0,
             error_message=f"consensus needs at least {consensus_config.min_ok_results} successful results",
+            error_code="INSUFFICIENT_OK_RESULTS",
         )
 
     if not consensus_config.provider or not consensus_config.model:
@@ -3149,13 +3372,14 @@ async def _run_single_model_consensus(
             status="ERROR",
             latency_ms=0,
             error_message="single_model consensus requires provider/model",
+            error_code="MISCONFIGURED_CONSENSUS",
         )
 
     full_model = f"{consensus_config.provider}/{consensus_config.model}"
     print(f"[magi] consensus(single_model) start model={full_model}")
 
     try:
-        text, latency_ms = await _call_model_text(
+        text, latency_ms, _ = await _call_model_text(
             full_model,
             _build_single_model_consensus_prompt(prompt, results),
             timeout_seconds,
@@ -3176,6 +3400,7 @@ async def _run_single_model_consensus(
             status="ERROR",
             latency_ms=int(timeout_seconds * 1000),
             error_message="timeout",
+            error_code="TIMEOUT",
         )
     except Exception as exc:  # noqa: BLE001
         return ConsensusResult(
@@ -3185,6 +3410,7 @@ async def _run_single_model_consensus(
             status="ERROR",
             latency_ms=0,
             error_message=_public_error_message(exc),
+            error_code="CONSENSUS_PROVIDER_ERROR",
         )
 
 
@@ -3205,6 +3431,7 @@ async def _run_peer_vote_consensus(
             status="ERROR",
             latency_ms=0,
             error_message=f"consensus needs at least {consensus_config.min_ok_results} successful results",
+            error_code="INSUFFICIENT_OK_RESULTS",
         )
 
     peer_answers = {item.agent: item.text for item in results if item.status == "OK" and item.text.strip()}
@@ -3230,6 +3457,10 @@ async def _run_peer_vote_consensus(
     ]
 
     if len(valid_votes) < consensus_config.min_ok_results:
+        has_strict_criticism_error = any(
+            (turn.error_message or "").lower().startswith("strict debate requires at least")
+            for turn in last_turns
+        )
         return ConsensusResult(
             provider="magi",
             model="peer_vote_v1",
@@ -3237,6 +3468,7 @@ async def _run_peer_vote_consensus(
             status="ERROR",
             latency_ms=int((perf_counter() - start) * 1000),
             error_message="insufficient valid deliberation votes",
+            error_code="STRICT_DEBATE_CRITICISMS_MISSING" if has_strict_criticism_error else "INSUFFICIENT_VALID_VOTES",
         )
 
     vote_count: dict[str, int] = defaultdict(int)
@@ -3391,7 +3623,7 @@ async def delete_thread_history(thread_id: str) -> dict[str, int | str]:
 
 @app.post("/api/magi/routing/feedback", response_model=RoutingFeedbackResponse)
 async def submit_routing_feedback(payload: RoutingFeedbackRequest) -> RoutingFeedbackResponse:
-    normalized_thread_id = _normalize_thread_id(payload.thread_id)
+    normalized_thread_id = _normalize_thread_id(payload.thread_id, require_uuid=True)
     if not normalized_thread_id:
         raise HTTPException(status_code=400, detail="thread_id is required")
     request_id = payload.request_id.strip()
@@ -3419,6 +3651,38 @@ async def submit_routing_feedback(payload: RoutingFeedbackRequest) -> RoutingFee
     )
 
 
+@app.post("/api/magi/routing/signal", response_model=RoutingSignalResponse)
+async def submit_routing_signal(payload: RoutingSignalRequest) -> RoutingSignalResponse:
+    normalized_thread_id = _normalize_thread_id(payload.thread_id, require_uuid=True)
+    if not normalized_thread_id:
+        raise HTTPException(status_code=400, detail="thread_id is required")
+    request_id = payload.request_id.strip()
+    if not request_id:
+        raise HTTPException(status_code=400, detail="request_id is required")
+    signal = payload.signal.strip()
+    if not signal:
+        raise HTTPException(status_code=400, detail="signal is required")
+    try:
+        config = load_config()
+        policy_key, implicit_reward = _update_routing_event_signal(
+            normalized_thread_id,
+            request_id,
+            signal,
+            config,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"failed to persist routing signal: {exc}") from exc
+    if policy_key is None:
+        raise HTTPException(status_code=404, detail="routing event not found")
+    return RoutingSignalResponse(
+        thread_id=normalized_thread_id,
+        request_id=request_id,
+        signal=signal,
+        policy_key=policy_key,
+        implicit_reward=implicit_reward,
+    )
+
+
 @app.get("/api/magi/routing/policy", response_model=RoutingPolicyResponse)
 async def get_routing_policy(key: str) -> RoutingPolicyResponse:
     normalized = key.strip()
@@ -3443,7 +3707,7 @@ async def get_routing_policy(key: str) -> RoutingPolicyResponse:
 async def get_routing_events(thread_id: str | None = None, limit: int = 20) -> RoutingEventsResponse:
     if limit < 1 or limit > 100:
         raise HTTPException(status_code=400, detail="limit must be between 1 and 100")
-    normalized_thread_id = _normalize_thread_id(thread_id) if thread_id is not None else None
+    normalized_thread_id = _normalize_thread_id(thread_id, allow_non_uuid=True) if thread_id is not None else None
     try:
         return _list_routing_events(normalized_thread_id, limit)
     except Exception as exc:  # noqa: BLE001

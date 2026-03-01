@@ -4005,6 +4005,7 @@ async def chat_magi(payload: ChatRequest) -> ChatResponse:
     thread_id = _normalize_thread_id(payload.thread_id) or str(uuid.uuid4())
     run_id = str(uuid.uuid4())
     turn_index = _next_turn_index(thread_id)
+    fast_intent = _local_intent_fast_path(prompt)
 
     try:
         config = load_config()
@@ -4032,10 +4033,19 @@ async def chat_magi(payload: ChatRequest) -> ChatResponse:
 
         if _thread_context_enabled():
             effective_prompt = _build_prompt_with_thread_context(effective_prompt, thread_id)
-        if _history_enabled() and not url_anchored_request:
+        should_apply_history = (
+            _history_enabled()
+            and not url_anchored_request
+            and turn_index > 1
+            and fast_intent != "smalltalk"
+        )
+        if should_apply_history:
             effective_prompt = await _build_prompt_with_history(prompt, effective_prompt, config)
         elif url_anchored_request:
             print("[magi] history_context skipped profile=chat reason=url_anchored")
+        else:
+            reason = "first_turn_or_smalltalk" if turn_index <= 1 or fast_intent == "smalltalk" else "disabled"
+            print(f"[magi] history_context skipped profile=chat reason={reason}")
 
         local_agent, local_timeout, used_local_only_profile = _resolve_chat_local_agent(config, fallback_profile)
         local_agent = _apply_ollama_system_prompt(local_agent, ollama_system_prompt)

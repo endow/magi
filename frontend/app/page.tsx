@@ -1,10 +1,8 @@
 "use client";
 
 import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
-import AgentResultsGrid from "./components/agent-results-grid";
 import ChamberVisualization from "./components/chamber-visualization";
 import ChatTranscript from "./components/chat-transcript";
-import ConsensusPanel from "./components/consensus-panel";
 import FeedbackPanel from "./components/feedback-panel";
 import PromptForm from "./components/prompt-form";
 import RoutingInfoPanel from "./components/routing-info-panel";
@@ -40,16 +38,6 @@ type RoutingInfo = {
   policy_key?: string | null;
 };
 
-type RunResponse = {
-  run_id: string;
-  thread_id: string;
-  turn_index: number;
-  profile: string;
-  results: AgentResult[];
-  consensus: ConsensusResult;
-  routing?: RoutingInfo | null;
-};
-
 type ChatResponse = {
   run_id: string;
   thread_id: string;
@@ -59,14 +47,6 @@ type ChatResponse = {
   results: AgentResult[];
   consensus: ConsensusResult;
   routing?: RoutingInfo | null;
-};
-
-type RetryResponse = {
-  run_id: string;
-  thread_id: string;
-  turn_index: number;
-  profile: string;
-  result: AgentResult;
 };
 
 type RunHistoryItem = {
@@ -90,14 +70,6 @@ type ConsensusResult = {
   error_code?: string | null;
 };
 
-type ConsensusResponse = {
-  run_id: string;
-  thread_id: string;
-  turn_index: number;
-  profile: string;
-  consensus: ConsensusResult;
-};
-
 type ProfilesResponse = {
   default_profile: string;
   profiles: string[];
@@ -115,8 +87,6 @@ type RoutingFeedbackResponse = {
   rating: number;
   policy_key?: string | null;
 };
-
-type RoutingSignal = "retry" | "copy_result" | "consensus_recalc" | "history_helpful" | "history_not_helpful";
 
 type ThreadGroup = {
   thread_id: string;
@@ -137,7 +107,7 @@ type ChatMessage = {
 
 const RAW_API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 const MAX_PROMPT_LENGTH = 4000;
-const PHASE_VERSION = "v1.2";
+const PHASE_VERSION = "v1.3";
 const DEFAULT_OLLAMA_SYSTEM_PROMPT = "あなたは「MAGI」という名前のAIエージェントです。";
 
 function resolveApiBaseUrl(): string {
@@ -182,17 +152,6 @@ function parseWinnerAgent(text: string | null | undefined): AgentId | null {
   const value = match[1].toUpperCase();
   if (value === "A" || value === "B" || value === "C") return value;
   return null;
-}
-
-function splitConsensusText(text: string | null | undefined): { main: string; voteDetails: string | null } {
-  if (!text) return { main: "", voteDetails: null };
-  const marker = "\n\nVote details:";
-  const markerIndex = text.indexOf(marker);
-  if (markerIndex < 0) return { main: text, voteDetails: null };
-  return {
-    main: text.slice(0, markerIndex),
-    voteDetails: text.slice(markerIndex + marker.length).trim()
-  };
 }
 
 function extractUnifiedReply(consensus: ConsensusResult | null | undefined, results: AgentResult[]): string {
@@ -255,8 +214,6 @@ function buildConfiguredLoadingCards(
 export default function HomePage() {
   const apiBaseUrl = useMemo(() => resolveApiBaseUrl(), []);
   const [prompt, setPrompt] = useState("");
-  const [interactionMode, setInteractionMode] = useState<"magi" | "chat">("chat");
-  const [lastRunPrompt, setLastRunPrompt] = useState("");
   const [selectedProfile, setSelectedProfile] = useState("");
   const [defaultProfile, setDefaultProfile] = useState("");
   const [resolvedProfile, setResolvedProfile] = useState("");
@@ -380,7 +337,6 @@ export default function HomePage() {
     () => parseWinnerAgent(consensus?.status === "OK" ? consensus.text : ""),
     [consensus]
   );
-  const parsedConsensus = useMemo(() => splitConsensusText(consensus?.text), [consensus?.text]);
   const totalTokens = useMemo(() => {
     if (!results.length) return null;
     const known = results
@@ -410,8 +366,12 @@ export default function HomePage() {
     [isLoading, loadingElapsedMs, showConclusion]
   );
   const showExecutingBadge = useMemo(
-    () => !showConclusion && isLoading && loadingElapsedMs >= 7000,
-    [isLoading, loadingElapsedMs, showConclusion]
+    () =>
+      !showConclusion &&
+      isLoading &&
+      loadingElapsedMs >= 7000 &&
+      Boolean(resolvedProfile),
+    [isLoading, loadingElapsedMs, resolvedProfile, showConclusion]
   );
   const threadGroups = useMemo(() => {
     const byThread = new Map<string, RunHistoryItem[]>();
@@ -649,102 +609,6 @@ export default function HomePage() {
     setSettingsOpen(false);
   }
 
-  async function requestRun(trimmedPrompt: string): Promise<RunResponse | null> {
-    try {
-      const response = await fetch(`${apiBaseUrl}/api/magi/run`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          prompt: trimmedPrompt,
-          profile: selectedProfile || undefined,
-          fresh_mode: freshMode,
-          thread_id: threadId || undefined,
-          ollama_system_prompt: ollamaSystemPrompt
-        })
-      });
-
-      const data = (await response.json()) as RunResponse | { detail?: string };
-
-      if (!response.ok) {
-        setError((data as { detail?: string }).detail ?? "backend request failed");
-        return null;
-      }
-
-      return data as RunResponse;
-    } catch {
-      setError("backend connection failed");
-    }
-    return null;
-  }
-
-  async function requestRetry(trimmedPrompt: string, agent: AgentId): Promise<RetryResponse | null> {
-    try {
-      const response = await fetch(`${apiBaseUrl}/api/magi/retry`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          prompt: trimmedPrompt,
-          agent,
-          profile: selectedProfile || undefined,
-          fresh_mode: freshMode,
-          thread_id: threadId || undefined,
-          ollama_system_prompt: ollamaSystemPrompt
-        })
-      });
-
-      const data = (await response.json()) as RetryResponse | { detail?: string };
-
-      if (!response.ok) {
-        setError((data as { detail?: string }).detail ?? "backend request failed");
-        return null;
-      }
-
-      return data as RetryResponse;
-    } catch {
-      setError("backend connection failed");
-    }
-    return null;
-  }
-
-  async function requestConsensus(
-    trimmedPrompt: string,
-    latestResults: AgentResult[],
-    options?: { runId?: string; threadId?: string; profile?: string; freshMode?: boolean }
-  ): Promise<ConsensusResponse | null> {
-    try {
-      const response = await fetch(`${apiBaseUrl}/api/magi/consensus`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          prompt: trimmedPrompt,
-          results: latestResults,
-          profile: options?.profile ?? (selectedProfile || undefined),
-          fresh_mode: options?.freshMode ?? freshMode,
-          thread_id: options?.threadId ?? (threadId || undefined),
-          run_id: options?.runId,
-          ollama_system_prompt: ollamaSystemPrompt
-        })
-      });
-
-      const data = (await response.json()) as ConsensusResponse | { detail?: string };
-      if (!response.ok) {
-        setError((data as { detail?: string }).detail ?? "backend request failed");
-        return null;
-      }
-
-      return data as ConsensusResponse;
-    } catch {
-      setError("backend connection failed");
-    }
-    return null;
-  }
-
   async function requestChat(trimmedPrompt: string): Promise<ChatResponse | null> {
     try {
       const response = await fetch(`${apiBaseUrl}/api/magi/chat`, {
@@ -813,106 +677,36 @@ export default function HomePage() {
         text: trimmed
       }
     ]);
-    setLastRunPrompt(trimmed);
     markConsensusClockStart();
 
     try {
-      if (interactionMode === "chat") {
-        const chat = await requestChat(trimmed);
-        if (!chat) {
-          setLocalNodeState("IDLE");
-          setNodeStates({ A: "IDLE", B: "IDLE", C: "IDLE" });
-          return;
-        }
-        setResolvedProfile(chat.profile);
-        setRunId(chat.run_id);
-        setThreadId(chat.thread_id || threadId || chat.run_id);
-        setTurnIndex(chat.turn_index || turnIndex);
-        setRoutingInfo(chat.routing ?? null);
-        setResults(chat.results);
-        setConsensus(chat.consensus);
-        runNodeTransition(chat.profile, chat.results, chat.consensus.status);
-        setChatMessages((prev) => [
-          ...prev,
-          {
-            id: `a-${chat.run_id}`,
-            role: "assistant",
-            text: chat.reply || extractUnifiedReply(chat.consensus, chat.results),
-            run_id: chat.run_id,
-            turn_index: chat.turn_index,
-            latency_ms: resolveAssistantLatency(chat.consensus, chat.results)
-          }
-        ]);
-        markConsensusClockEnd();
-        await fetchHistory();
-        return;
-      }
-
-      const success = await requestRun(trimmed);
-      if (!success) {
+      const chat = await requestChat(trimmed);
+      if (!chat) {
         setLocalNodeState("IDLE");
         setNodeStates({ A: "IDLE", B: "IDLE", C: "IDLE" });
         return;
       }
-      setResolvedProfile(success.profile);
-      setRunId(success.run_id);
-      setThreadId(success.thread_id || threadId || success.run_id);
-      setTurnIndex(success.turn_index || turnIndex);
-      setRoutingInfo(success.routing ?? null);
-      setResults(success.results);
-      setConsensus(success.consensus);
-      runNodeTransition(success.profile, success.results, success.consensus.status);
-      await fetchHistory();
-      setIsLoading(false);
-
-      if (success.consensus.status !== "LOADING") {
-        setChatMessages((prev) => [
-          ...prev,
-          {
-            id: `a-${success.run_id}`,
-            role: "assistant",
-            text: extractUnifiedReply(success.consensus, success.results),
-            run_id: success.run_id,
-            turn_index: success.turn_index,
-            latency_ms: resolveAssistantLatency(success.consensus, success.results)
-          }
-        ]);
-        markConsensusClockEnd();
-        return;
-      }
-
-      setIsConsensusLoading(true);
-      try {
-        const finalized = await requestConsensus(trimmed, success.results, {
-          runId: success.run_id,
-          threadId: success.thread_id,
-          profile: success.profile,
-          freshMode
-        });
-        if (!finalized || finalized.run_id !== success.run_id) {
-          return;
+      setResolvedProfile(chat.profile);
+      setRunId(chat.run_id);
+      setThreadId(chat.thread_id || threadId || chat.run_id);
+      setTurnIndex(chat.turn_index || turnIndex);
+      setRoutingInfo(chat.routing ?? null);
+      setResults(chat.results);
+      setConsensus(chat.consensus);
+      runNodeTransition(chat.profile, chat.results, chat.consensus.status);
+      setChatMessages((prev) => [
+        ...prev,
+        {
+          id: `a-${chat.run_id}`,
+          role: "assistant",
+          text: chat.reply || extractUnifiedReply(chat.consensus, chat.results),
+          run_id: chat.run_id,
+          turn_index: chat.turn_index,
+          latency_ms: resolveAssistantLatency(chat.consensus, chat.results)
         }
-        setThreadId(finalized.thread_id || success.thread_id);
-        if ((finalized.turn_index ?? 0) > 0) setTurnIndex(finalized.turn_index);
-        setResolvedProfile(finalized.profile);
-        setConsensus(finalized.consensus);
-        runNodeTransition(finalized.profile, success.results, finalized.consensus.status);
-        setChatMessages((prev) => [
-          ...prev,
-          {
-            id: `a-${finalized.run_id}`,
-            role: "assistant",
-            text: extractUnifiedReply(finalized.consensus, success.results),
-            run_id: finalized.run_id,
-            turn_index: finalized.turn_index,
-            latency_ms: resolveAssistantLatency(finalized.consensus, success.results)
-          }
-        ]);
-        markConsensusClockEnd();
-        await fetchHistory();
-      } finally {
-        setIsConsensusLoading(false);
-      }
+      ]);
+      markConsensusClockEnd();
+      await fetchHistory();
     } finally {
       setIsLoading(false);
     }
@@ -958,92 +752,6 @@ export default function HomePage() {
     }
   }
 
-  async function sendRoutingSignal(signal: RoutingSignal) {
-    if (!runId || !threadId) return;
-    try {
-      await fetch(`${apiBaseUrl}/api/magi/routing/signal`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          thread_id: threadId,
-          request_id: runId,
-          signal
-        })
-      });
-    } catch {
-      // implicit signal errors should not affect user flow
-    }
-  }
-
-  async function copyResultText(result: AgentResult) {
-    if (!result.text) return;
-    try {
-      await navigator.clipboard.writeText(result.text);
-      void sendRoutingSignal("copy_result");
-    } catch {
-      setError(`failed to copy Agent ${result.agent} text`);
-    }
-  }
-
-  async function retryAgent(agent: AgentId) {
-    if (!lastRunPrompt || isBusy) return;
-    setError("");
-    setIsLoading(true);
-    clearNodeTimers();
-    setShowConclusion(false);
-    setRoutingInfo(null);
-    setFeedbackRating(null);
-    setFeedbackReason("");
-    setFeedbackMessage("");
-    markConsensusClockStart();
-    setLocalNodeState("RELAY");
-    setNodeStates((prev) => ({ ...prev, [agent]: "BLINK" }));
-    void sendRoutingSignal("retry");
-
-    try {
-      const retried = await requestRetry(lastRunPrompt, agent);
-      if (!retried) {
-        setNodeStates(nodeStatesFromResults(results));
-        return;
-      }
-
-      setRunId(retried.run_id);
-      setResolvedProfile(retried.profile);
-      setThreadId(retried.thread_id || threadId || retried.run_id);
-      if ((retried.turn_index ?? 0) > 0) setTurnIndex(retried.turn_index);
-      setConsensus({
-        provider: consensus?.provider ?? "-",
-        model: consensus?.model ?? "-",
-        text: "Loading...",
-        status: "LOADING",
-        latency_ms: 0
-      });
-      const updatedResults = (() => {
-        const baseResults = results.length ? results : [];
-        const byAgent = new Map(baseResults.map((item) => [item.agent, item]));
-        byAgent.set(agent, retried.result);
-        const order: AgentId[] = ["A", "B", "C"];
-        return order.map((id) => byAgent.get(id)).filter((item): item is AgentResult => Boolean(item));
-      })();
-
-      setResults(updatedResults);
-      void sendRoutingSignal("consensus_recalc");
-      const recalculated = await requestConsensus(lastRunPrompt, updatedResults);
-      if (recalculated) {
-        setResolvedProfile(recalculated.profile);
-        setThreadId(recalculated.thread_id || threadId || recalculated.run_id);
-        if ((recalculated.turn_index ?? 0) > 0) setTurnIndex(recalculated.turn_index);
-        setConsensus(recalculated.consensus);
-        runNodeTransition(recalculated.profile, updatedResults, recalculated.consensus.status);
-        markConsensusClockEnd();
-      } else {
-        setNodeStates(nodeStatesFromResults(updatedResults));
-      }
-    } finally {
-      setIsLoading(false);
-    }
-  }
-
   function onTextareaKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
     event.preventDefault();
@@ -1054,7 +762,6 @@ export default function HomePage() {
     if (isBusy) return;
     setError("");
     setPrompt(item.prompt);
-    setLastRunPrompt(item.prompt);
     setRunId(item.run_id);
     setThreadId(item.thread_id || item.run_id);
     setTurnIndex(item.turn_index || 0);
@@ -1109,7 +816,6 @@ export default function HomePage() {
     setThreadId("");
     setTurnIndex(0);
     setPrompt("");
-    setLastRunPrompt("");
     setResolvedProfile("");
     setResults([]);
     setConsensus(null);
@@ -1287,7 +993,6 @@ export default function HomePage() {
           isBusy={isBusy}
           isLoading={isLoading}
           isConsensusLoading={isConsensusLoading}
-          interactionMode={interactionMode}
           selectedProfile={selectedProfile}
           availableProfiles={availableProfiles}
           freshMode={freshMode}
@@ -1296,7 +1001,6 @@ export default function HomePage() {
           onSubmit={onSubmit}
           onPromptChange={setPrompt}
           onPromptKeyDown={onTextareaKeyDown}
-          onInteractionModeChange={setInteractionMode}
           onProfileChange={setSelectedProfile}
           onFreshModeChange={setFreshMode}
         />
@@ -1378,25 +1082,7 @@ export default function HomePage() {
 
       </section>
 
-      {interactionMode === "chat" ? <ChatTranscript messages={chatMessages} /> : null}
-
-      {interactionMode === "magi" && consensus ? (
-        <ConsensusPanel
-          consensus={consensus}
-          parsedConsensus={parsedConsensus}
-          isStrictDebate={isStrictDebate}
-          isUltra={isUltra}
-        />
-      ) : null}
-
-      {interactionMode === "magi" ? (
-        <AgentResultsGrid
-          cards={cards}
-          isBusy={isBusy}
-          onRetry={(agent) => void retryAgent(agent)}
-          onCopy={copyResultText}
-        />
-      ) : null}
+      <ChatTranscript messages={chatMessages} />
         </div>
       </div>
 

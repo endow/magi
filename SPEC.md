@@ -1,4 +1,4 @@
-# MAGI v1.2 実装仕様（現行）
+# MAGI v1.3 実装仕様（現行）
 
 本書は、MVPから拡張された現行版「MAGI」の実装仕様を定義する。  
 実装・改修時は、本仕様を正とする。
@@ -22,11 +22,12 @@
 
 ---
 
-## 要件（v1.2）
+## 要件（v1.3）
 
 ### 1) バックエンド
 
 - `POST /api/magi/run` を実装する。
+- `POST /api/magi/chat` を実装する（v1.3 のUI主要導線）。
 
 #### リクエスト
 ```json
@@ -285,7 +286,7 @@ OLLAMA_API_BASE=http://ollama:11434
 - 備考:
   - `local_only` では再合議せず、受け取ったAgent結果を consensus として返す
 
-### ルーティング学習API（v1.2）
+### ルーティング学習API（v1.3）
 
 - `POST /api/magi/routing/feedback`
   - body: `{ thread_id, request_id, rating: -1|0|1, reason? }`
@@ -316,32 +317,30 @@ OLLAMA_API_BASE=http://ollama:11434
 
 - 1画面完結。
 - textarea + 送信ボタン。
-- **3カラム表示**。
+- chat transcript 表示（ユーザー/アシスタントのターン履歴）。
 
 ### 表示項目
 
-- provider/model
-- status
-- text
-- latency_ms
-- error_message
-- consensus（合議結果）
+- chat reply（統合回答）
+- run_id / thread_id / turn_index
+- profile / fresh_mode / tokens / cost
+- モデル別 status / latency_ms / error_message（実行詳細内）
 
 ### UI
 
-- 送信直後に3枠表示
-- `Loading...`
+- UIは **chat modeのみ**（interaction切替なし）
+- 送信中は Chamber ノードと状態バッジで進行状況を表示する
 - **run_id表示＋コピー可能**
-- **合議結果は3カラムより先（上部）に表示する**
+- 実行メタ情報 / ルーティング情報 / フィードバック / モデル実行状態はアコーディオン内に表示する
 - 初期値: profile は **未設定（auto）**、`fresh_mode` は `false`
-- profile未設定（auto）の場合、`POST /api/magi/run` は `profile` を送らずルーター判定に委譲する
+- profile未設定（auto）の場合、`POST /api/magi/chat` は `profile` を送らずルーター判定に委譲する
 - 上段に `Local LLM` ノードを表示し、下段3ノード（合議グループ）との関係を可視化する
 - `local_only` 完了時は下段3ノードを `skipped` 表示とし、誤解を避ける
 
 ### デザイン
 
 - 黒基調ターミナル風をベースに、MAGIライクな可視化（ノード、接続線、状態表示）を許容
-- 合議結果（Conclusion）を視覚的に優先表示
+- Conclusion状態を視覚的に優先表示
 - lucide-react可
 
 ---
@@ -415,6 +414,12 @@ OLLAMA_API_BASE=http://ollama:11434
   - `Routing / Prep`、`Executing`、`Discussion`、`Conclusion` の状態バッジを表示
   - `Executing` で3ノード点滅を維持
   - `ERROR` カードは `Retry` 優先表示（`Copy` 非表示）
+
+### v1.3（chat-only UI）
+
+- フロントUIを chat mode 一本化（interaction切替を廃止）
+- 主導線を `POST /api/magi/chat` に統一
+- 実行メタ情報・ルーティング・フィードバック・モデル実行状態をアコーディオンへ集約
 
 ---
 

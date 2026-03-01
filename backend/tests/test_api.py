@@ -312,6 +312,71 @@ def test_chat_endpoint_uses_local_only_result_when_consensus_is_immediate(monkey
     assert body["reply"] == "承知しました。こちらが回答です。"
 
 
+def test_chat_first_turn_skips_history_context(monkeypatch) -> None:
+    monkeypatch.setattr(main, "load_config", _profiled_config_with_router)
+    monkeypatch.setattr(main, "_save_run_history", lambda *args, **kwargs: None)
+
+    async def fail_history(*args, **kwargs):
+        raise AssertionError("history context should be skipped on first chat turn")
+
+    async def fake_runner(agent_config, prompt, timeout_seconds):
+        return main.AgentResult(
+            agent=agent_config.agent,
+            provider=agent_config.provider,
+            model=agent_config.model,
+            text="こんにちは。",
+            status="OK",
+            latency_ms=15,
+        )
+
+    async def force_sufficient(prompt, draft, judge_agent, timeout_seconds):
+        return True, "test_force_local_accept"
+
+    monkeypatch.setattr(main, "_build_prompt_with_history", fail_history)
+    monkeypatch.setattr(main, "_run_single_agent", fake_runner)
+    monkeypatch.setattr(main, "_is_local_draft_sufficient", force_sufficient)
+
+    response = client.post("/api/magi/chat", json={"prompt": "はじめまして"})
+    assert response.status_code == 200
+
+
+def test_chat_smalltalk_skips_history_context_even_with_existing_turns(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("MAGI_DB_PATH", str(tmp_path / "magi-chat-smalltalk.db"))
+    main._init_db()
+    monkeypatch.setattr(main, "load_config", _profiled_config_with_router)
+    monkeypatch.setattr(main, "_save_run_history", lambda *args, **kwargs: None)
+
+    ok_results = [
+        main.AgentResult(agent="A", provider="openai", model="m1", text="old", status="OK", latency_ms=10),
+    ]
+    consensus = main.ConsensusResult(provider="magi", model="peer_vote_r1", text="old", status="OK", latency_ms=10)
+    thread_id = str(uuid.uuid4())
+    main._save_run_history("run-old", "local_only", "old prompt", ok_results, consensus, thread_id=thread_id, turn_index=1)
+
+    async def fail_history(*args, **kwargs):
+        raise AssertionError("history context should be skipped for smalltalk")
+
+    async def fake_runner(agent_config, prompt, timeout_seconds):
+        return main.AgentResult(
+            agent=agent_config.agent,
+            provider=agent_config.provider,
+            model=agent_config.model,
+            text="やあ。",
+            status="OK",
+            latency_ms=15,
+        )
+
+    async def force_sufficient(prompt, draft, judge_agent, timeout_seconds):
+        return True, "test_force_local_accept"
+
+    monkeypatch.setattr(main, "_build_prompt_with_history", fail_history)
+    monkeypatch.setattr(main, "_run_single_agent", fake_runner)
+    monkeypatch.setattr(main, "_is_local_draft_sufficient", force_sufficient)
+
+    response = client.post("/api/magi/chat", json={"prompt": "やあ", "thread_id": thread_id})
+    assert response.status_code == 200
+
+
 def test_consensus_endpoint_updates_saved_run(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("MAGI_DB_PATH", str(tmp_path / "magi-consensus-update.db"))
     main._init_db()

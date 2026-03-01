@@ -1,32 +1,22 @@
-# MAGI v1.2（ローカル利用）
+# MAGI v1.3（ローカル利用）
 
 ![MAGI Command Chamber](docs/images/magi-command-chamber.png)
 
 MAGI は、単一プロンプトを入口ルーターで自動振り分けし、軽量タスクは `local_only`（ローカル1モデル）、それ以外は複数LLMの並列実行と合議で処理するローカル実行向けアプリです。  
-回答表示だけでなく、モデル別リトライ、合議の再計算、Fresh mode（Web最新情報の補強）、SQLiteへの履歴永続化、`thread_id` ベースの会話継続までを1画面で扱えます。  
-v1.2 では、暗黙シグナルを使ったルーティング学習強化、`thread_id` UUID運用の明確化、consensus失敗コードの可視化、tokens/cost表示を追加しています。
+v1.3 では UI を `chat` 専用に整理し、対話フローを一本化しました。Fresh mode（Web最新情報の補強）、SQLiteへの履歴永続化、`thread_id` ベースの会話継続は継続して利用できます。
 
-## v1.2 ハイライト
+## v1.3 ハイライト
 
-- Routing learning（MVP）:
-  - `routing_events` / `routing_policy` をSQLiteへ追加
-  - `POST /api/magi/routing/feedback` による重み更新
-  - `POST /api/magi/routing/signal` による暗黙シグナル（`retry/copy_result/consensus_recalc` など）更新
-  - Router最終スコアを `base_score + policy_weight` に拡張
-- Thread運用:
-  - `thread_id` は UUID を正規形式として扱い、`run/retry/consensus` で非UUID入力は新規UUIDへフォールバック
-- Observability:
-  - agentごとの `prompt/completion/total_tokens` と `cost_estimate_usd` をレスポンス/履歴/UIに表示
-  - consensus失敗時に `error_code` を返却
-- Routerルール改善:
-  - `local_only` へのマッピングに `execution_tier=local` 条件を追加
-- レイテンシ耐性改善:
-  - Geminiは timeout 時に1回リトライ
-  - `balance.timeout_seconds` を 45 秒へ調整
-- Chamber UI改善:
-  - 前処理と実行の表示を分離（`Routing / Prep` → `Executing`）
-  - `Executing` 中は3ノードを点滅表示
-  - エラーカードのヘッダー操作を `Retry` 優先（`ERROR` 時は `Copy` 非表示）
+- Chat mode only:
+  - `interaction` 切替を撤廃し、`/api/magi/chat` ベースの対話フローに統一
+  - 1ターンごとの合成回答をチャットとして継続表示
+- UI整理:
+  - 実行メタ情報・ルーティング・フィードバック・モデル実行状態をアコーディオンへ集約
+  - Chamberの状態表示（Routing / Executing / Discussion / Conclusion）を維持
+- v1.2機能の継続:
+  - routing learning（`routing_events` / `routing_policy`）
+  - `thread_id` UUID運用
+  - tokens / cost / error_code の可視化
 
 ## 構成
 
@@ -275,20 +265,19 @@ URL:
 
 ## APIメモ
 
-- エンドポイント: `POST /api/magi/run`
+- チャット実行エンドポイント: `POST /api/magi/chat`
 - リクエストボディ: `{ "prompt": "...", "profile": "optional: cost|balance|performance|ultra|local_only", "fresh_mode": false, "thread_id": "optional-string", "source_urls": ["optional-https://..."] }`
-- `thread_id` は UUID を推奨。`run/retry/consensus` では非UUID入力は無視され、新規UUIDで処理されます
+- `thread_id` は UUID を推奨。`chat/run/retry/consensus` では非UUID入力は無視され、新規UUIDで処理されます
 - `source_urls` 未指定でも、`prompt` に含まれる `http/https` URL は backend が自動抽出して取得し、`[Direct URL Evidence]` として注入されます
 - URLアンカー付きリクエスト（`source_urls` 指定 or `prompt` 内URL含有）では、古い履歴混入を避けるため `history_context` をスキップします
 - `profile` 未指定の場合、backend router が実行されます（UIの `auto (unset)`）
-- Runレスポンスには `consensus`（3者合議で合成された最終回答）が含まれます
-- Runレスポンスの各Agent結果には `prompt_tokens/completion_tokens/total_tokens/cost_estimate_usd` が含まれます（取得できた場合）
-- Runレスポンスには `thread_id` と `turn_index` が含まれます
-- RunレスポンスはローカルSQLite履歴へ保存されます
-- Retryエンドポイント: `POST /api/magi/retry`
-- Retryボディ: `{ "prompt": "...", "agent": "A|B|C", "profile": "...", "fresh_mode": false, "thread_id": "optional-string", "source_urls": ["optional-https://..."] }`
-- Consensusエンドポイント: `POST /api/magi/consensus`
-- Consensusボディ: `{ "prompt": "...", "results": AgentResult[], "profile": "...", "fresh_mode": false, "thread_id": "optional-string", "source_urls": ["optional-https://..."] }`
+- Chatレスポンスには `reply`, `results`, `consensus`, `thread_id`, `turn_index` が含まれます
+- `results` の各Agent結果には `prompt_tokens/completion_tokens/total_tokens/cost_estimate_usd` が含まれます（取得できた場合）
+- 実行結果はローカルSQLite履歴へ保存されます
+- 互換エンドポイント:
+  - `POST /api/magi/run`
+  - `POST /api/magi/retry`
+  - `POST /api/magi/consensus`
 - Profilesエンドポイント: `GET /api/magi/profiles`
 - 履歴一覧エンドポイント: `GET /api/magi/history?limit=20&offset=0`
 - 履歴詳細エンドポイント: `GET /api/magi/history/{run_id}`
@@ -346,32 +335,23 @@ python -m pytest backend/tests -q
 
 - Enterで送信（`Shift+Enter` で改行）
 - プロンプト文字数カウンター（`0/4000`）
-- 3カラムの結果カード表示:
-  - status
-  - model id
-  - latency
-  - tokens / cost_estimate_usd
-  - response text
-- カードごとの操作:
-  - `Copy`（回答テキストのコピー）
-  - `Retry`（失敗カードの再実行）
-- Consensusパネル:
-  - 3つの結果カードより先に表示
-  - 3者合議の最終結論を表示
-  - `OK/ERROR` と latency 表示に対応
-  - 失敗時は `error_code` 表示に対応
-  - Chamber上部に状態バッジ表示（`Routing / Prep`、`Executing`、`Discussion`、`Conclusion`）
-  - `Conclusion` 時は経過時間（分/秒）を表示
+- chat mode固定（`interaction` 切替なし）
+- チャットトランスクリプト表示（ユーザー/アシスタントのターン履歴）
+- Chamber上部に状態バッジ表示（`Routing / Prep`、`Executing`、`Discussion`、`Conclusion`）
+- `Conclusion` 時は経過時間（分/秒）を表示
 - Profileセレクター:
   - `auto (unset)`, `local_only`, `cost`, `balance`, `performance`, `ultra` を選択可能
   - デフォルトは `auto (unset)`。初回実行は `profile` を省略し backend routing を使用
-  - 選択した profile は run/retry/consensus に送信
+  - 選択した profile は chat実行に送信
   - `performance` と `ultra` は strict debate consensus（具体的な相互批判が必要）を有効化
   - `performance` / `ultra` 選択時は `strict debate` バッジを表示
   - `ultra` 選択時は `high cost` バッジを表示
-- Chamberカード操作:
-  - `ERROR` カードは `Retry` のみ表示（`Copy` は非表示）
-  - `Executing` 状態では3ノードを点滅表示
+- 実行詳細アコーディオン:
+  - `run_id` / `thread_id` / `turn` / `tokens` / `cost` の表示
+  - ルーティング判定表示
+  - フィードバック入力
+  - モデル実行状態（Agent A/B/C の status・latency・error）
+- `Executing` 状態では3ノードを点滅表示
 - Fresh modeトグル:
   - デフォルトは ON
   - ON時は backend が Tavily で最新Web証拠を取得（`TAVILY_API_KEY` 設定時）

@@ -150,11 +150,11 @@ export default function ChamberVisualization({
             </div>
           );
         })}
-        {showConclusion || showDiscussionBadge || showRoutingBadge || showExecutingBadge ? (
+        {showConclusion || showDiscussionBadge || showRoutingBadge || showExecutingBadge || (localOnlyHandled && conclusionElapsedMs !== null) ? (
           <>
             <div
               className={
-                showConclusion
+                showConclusion || localOnlyHandled
                   ? "magi-conclusion-badge"
                   : showExecutingBadge
                     ? "magi-executing-badge"
@@ -163,9 +163,9 @@ export default function ChamberVisualization({
                       : "magi-discussion-badge"
               }
             >
-              {showConclusion ? "Conclusion" : showRoutingBadge ? "Routing / Prep" : showExecutingBadge ? "Executing" : "Discussion"}
+              {showConclusion || localOnlyHandled ? "Conclusion" : showRoutingBadge ? "Routing / Prep" : showExecutingBadge ? "Executing" : "Discussion"}
             </div>
-            {showConclusion && conclusionElapsedMs !== null ? (
+            {(showConclusion || localOnlyHandled) && conclusionElapsedMs !== null ? (
               <div className="magi-conclusion-time">elapsed {formatElapsedMsToMinSec(conclusionElapsedMs)}</div>
             ) : null}
           </>

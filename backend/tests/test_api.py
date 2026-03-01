@@ -231,6 +231,87 @@ def test_consensus_endpoint_recalculates(monkeypatch) -> None:
     assert body["consensus"]["text"] == "recalc-consensus"
 
 
+def test_chat_endpoint_returns_unified_reply(monkeypatch) -> None:
+    monkeypatch.setattr(main, "load_config", _profiled_config)
+    monkeypatch.setattr(main, "_save_run_history", lambda *args, **kwargs: None)
+
+    async def fake_runner(agent_config, prompt, timeout_seconds):
+        return main.AgentResult(
+            agent=agent_config.agent,
+            provider=agent_config.provider,
+            model=agent_config.model,
+            text=f"answer-{agent_config.agent}",
+            status="OK",
+            latency_ms=50,
+        )
+
+    async def fake_consensus(config_obj, prompt, results):
+        return main.ConsensusResult(
+            provider="magi",
+            model="peer_vote_r1",
+            text=(
+                "Consensus winner: Agent B (2/3 votes).\n\n"
+                "Final answer:\nこれは統合した最終回答です。\n\n"
+                "Vote details:\n- Agent A voted B"
+            ),
+            status="OK",
+            latency_ms=120,
+        )
+
+    async def force_insufficient(prompt, draft, judge_agent, timeout_seconds):
+        return False, "test_force_escalate"
+
+    monkeypatch.setattr(main, "_run_single_agent", fake_runner)
+    monkeypatch.setattr(main, "_run_consensus", fake_consensus)
+    monkeypatch.setattr(main, "_is_local_draft_sufficient", force_insufficient)
+
+    response = client.post(
+        "/api/magi/chat",
+        json={"prompt": "自然な会話で答えて", "profile": "performance"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["profile"] == "performance"
+    assert body["consensus"]["status"] == "OK"
+    assert body["reply"] == "これは統合した最終回答です。"
+    assert len(body["results"]) == 3
+
+
+def test_chat_endpoint_uses_local_only_result_when_consensus_is_immediate(monkeypatch) -> None:
+    monkeypatch.setattr(main, "load_config", _profiled_config_with_router)
+    monkeypatch.setattr(main, "_save_run_history", lambda *args, **kwargs: None)
+
+    async def fake_runner(agent_config, prompt, timeout_seconds):
+        return main.AgentResult(
+            agent=agent_config.agent,
+            provider=agent_config.provider,
+            model=agent_config.model,
+            text="承知しました。こちらが回答です。",
+            status="OK",
+            latency_ms=20,
+        )
+
+    async def force_sufficient(prompt, draft, judge_agent, timeout_seconds):
+        return True, "test_force_local_accept"
+
+    async def fail_consensus(*args, **kwargs):
+        raise AssertionError("consensus should not run when local draft is sufficient")
+
+    monkeypatch.setattr(main, "_run_single_agent", fake_runner)
+    monkeypatch.setattr(main, "_is_local_draft_sufficient", force_sufficient)
+    monkeypatch.setattr(main, "_run_consensus", fail_consensus)
+
+    response = client.post(
+        "/api/magi/chat",
+        json={"prompt": "この文章を丁寧にして", "profile": "local_only"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["profile"] == "local_only"
+    assert body["consensus"]["status"] == "OK"
+    assert body["reply"] == "承知しました。こちらが回答です。"
+
+
 def test_consensus_endpoint_updates_saved_run(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("MAGI_DB_PATH", str(tmp_path / "magi-consensus-update.db"))
     main._init_db()
@@ -696,6 +777,17 @@ def test_route_profile_fast_path_skips_router_call_for_simple_rewrite(monkeypatc
 
     monkeypatch.setattr(main, "_call_model_text", fail_call)
     selected = asyncio.run(main._route_profile(config, "日本語の敬語で、丁寧に言い換えて"))
+    assert selected == "local_only"
+
+
+def test_route_profile_fast_path_uses_local_only_for_smalltalk(monkeypatch) -> None:
+    config = _profiled_config_with_router(enabled=True, min_confidence=75)
+
+    async def fail_call(*args, **kwargs):
+        raise AssertionError("router llm call should be skipped by fast_path")
+
+    monkeypatch.setattr(main, "_call_model_text", fail_call)
+    selected = asyncio.run(main._route_profile(config, "やあ"))
     assert selected == "local_only"
 
 
@@ -1377,6 +1469,19 @@ def test_run_single_agent_does_not_retry_non_openai_timeout(monkeypatch) -> None
     assert calls["count"] == 1
     assert result.status == "ERROR"
     assert result.error_message == "timeout"
+
+
+def test_public_error_message_maps_503_high_demand() -> None:
+    exc = RuntimeError('ServiceUnavailableError: {"error":{"code":503,"message":"high demand. try again later"}}')
+    message = main._public_error_message(exc)
+    assert "503 high demand" in message
+
+
+def test_public_error_message_includes_original_exception_text() -> None:
+    exc = RuntimeError("connection reset by peer on upstream")
+    message = main._public_error_message(exc)
+    assert "RuntimeError:" in message
+    assert "connection reset by peer" in message
 
 
 def test_routing_policy_key_is_stable() -> None:

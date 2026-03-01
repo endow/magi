@@ -3,6 +3,7 @@
 import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import AgentResultsGrid from "./components/agent-results-grid";
 import ChamberVisualization from "./components/chamber-visualization";
+import ChatTranscript from "./components/chat-transcript";
 import ConsensusPanel from "./components/consensus-panel";
 import FeedbackPanel from "./components/feedback-panel";
 import PromptForm from "./components/prompt-form";
@@ -44,6 +45,17 @@ type RunResponse = {
   thread_id: string;
   turn_index: number;
   profile: string;
+  results: AgentResult[];
+  consensus: ConsensusResult;
+  routing?: RoutingInfo | null;
+};
+
+type ChatResponse = {
+  run_id: string;
+  thread_id: string;
+  turn_index: number;
+  profile: string;
+  reply: string;
   results: AgentResult[];
   consensus: ConsensusResult;
   routing?: RoutingInfo | null;
@@ -114,10 +126,19 @@ type ThreadGroup = {
 
 type ThreadNameMap = Record<string, string>;
 type ThreadCollapsedMap = Record<string, boolean>;
+type ChatMessage = {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+  run_id?: string;
+  turn_index?: number;
+  latency_ms?: number;
+};
 
 const RAW_API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 const MAX_PROMPT_LENGTH = 4000;
 const PHASE_VERSION = "v1.2";
+const DEFAULT_OLLAMA_SYSTEM_PROMPT = "あなたは「MAGI」という名前のAIエージェントです。";
 
 function resolveApiBaseUrl(): string {
   if (typeof window === "undefined") return RAW_API_BASE_URL;
@@ -174,6 +195,31 @@ function splitConsensusText(text: string | null | undefined): { main: string; vo
   };
 }
 
+function extractUnifiedReply(consensus: ConsensusResult | null | undefined, results: AgentResult[]): string {
+  if (consensus?.text) {
+    const marker = /\bFinal answer:\s*/i;
+    const match = marker.exec(consensus.text);
+    if (match) {
+      const tail = consensus.text.slice(match.index + match[0].length);
+      const voteMatch = /\n\s*Vote details:\s*/i.exec(tail);
+      const body = voteMatch ? tail.slice(0, voteMatch.index) : tail;
+      const cleaned = body.trim();
+      if (cleaned) return cleaned;
+    }
+    const fallback = consensus.text.trim();
+    if (fallback) return fallback;
+  }
+  const firstOk = results.find((item) => item.status === "OK" && item.text.trim());
+  return firstOk?.text.trim() ?? "";
+}
+
+function resolveAssistantLatency(consensus: ConsensusResult | null | undefined, results: AgentResult[]): number {
+  if (consensus && typeof consensus.latency_ms === "number" && consensus.latency_ms > 0) {
+    return consensus.latency_ms;
+  }
+  return Math.max(0, ...results.map((item) => item.latency_ms || 0));
+}
+
 function formatElapsedMsToMinSec(elapsedMs: number): string {
   const totalSeconds = Math.max(0, Math.round(elapsedMs / 1000));
   const minutes = Math.floor(totalSeconds / 60);
@@ -209,6 +255,7 @@ function buildConfiguredLoadingCards(
 export default function HomePage() {
   const apiBaseUrl = useMemo(() => resolveApiBaseUrl(), []);
   const [prompt, setPrompt] = useState("");
+  const [interactionMode, setInteractionMode] = useState<"magi" | "chat">("chat");
   const [lastRunPrompt, setLastRunPrompt] = useState("");
   const [selectedProfile, setSelectedProfile] = useState("");
   const [defaultProfile, setDefaultProfile] = useState("");
@@ -218,6 +265,7 @@ export default function HomePage() {
   const [results, setResults] = useState<AgentResult[]>([]);
   const [consensus, setConsensus] = useState<ConsensusResult | null>(null);
   const [history, setHistory] = useState<RunHistoryItem[]>([]);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [runId, setRunId] = useState("");
   const [threadId, setThreadId] = useState("");
   const [turnIndex, setTurnIndex] = useState(0);
@@ -244,6 +292,9 @@ export default function HomePage() {
   const [conclusionElapsedMs, setConclusionElapsedMs] = useState<number | null>(null);
   const [loadingElapsedMs, setLoadingElapsedMs] = useState<number>(0);
   const [freshMode, setFreshMode] = useState(false);
+  const [ollamaSystemPrompt, setOllamaSystemPrompt] = useState(DEFAULT_OLLAMA_SYSTEM_PROMPT);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsDraft, setSettingsDraft] = useState(DEFAULT_OLLAMA_SYSTEM_PROMPT);
   const isBusy = isLoading || isConsensusLoading;
   const isStrictDebate = selectedProfile === "performance" || selectedProfile === "ultra";
   const isUltra = selectedProfile === "ultra";
@@ -479,8 +530,13 @@ export default function HomePage() {
     try {
       const rawNames = window.localStorage.getItem("magi_thread_names");
       const rawCollapsed = window.localStorage.getItem("magi_thread_collapsed");
+      const rawSystemPrompt = window.localStorage.getItem("magi_ollama_system_prompt");
       if (rawNames) setThreadNames(JSON.parse(rawNames) as ThreadNameMap);
       if (rawCollapsed) setCollapsedThreads(JSON.parse(rawCollapsed) as ThreadCollapsedMap);
+      if (rawSystemPrompt && rawSystemPrompt.trim()) {
+        setOllamaSystemPrompt(rawSystemPrompt);
+        setSettingsDraft(rawSystemPrompt);
+      }
     } catch {
       // ignore storage parse error
     }
@@ -495,6 +551,11 @@ export default function HomePage() {
     if (typeof window === "undefined") return;
     window.localStorage.setItem("magi_thread_collapsed", JSON.stringify(collapsedThreads));
   }, [collapsedThreads]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem("magi_ollama_system_prompt", ollamaSystemPrompt);
+  }, [ollamaSystemPrompt]);
 
   useEffect(() => {
     return () => {
@@ -573,6 +634,21 @@ export default function HomePage() {
     return null;
   }
 
+  function openSettingsDialog() {
+    setSettingsDraft(ollamaSystemPrompt);
+    setSettingsOpen(true);
+  }
+
+  function closeSettingsDialog() {
+    setSettingsOpen(false);
+  }
+
+  function saveSettingsDialog() {
+    const next = settingsDraft.trim();
+    setOllamaSystemPrompt(next || DEFAULT_OLLAMA_SYSTEM_PROMPT);
+    setSettingsOpen(false);
+  }
+
   async function requestRun(trimmedPrompt: string): Promise<RunResponse | null> {
     try {
       const response = await fetch(`${apiBaseUrl}/api/magi/run`, {
@@ -584,7 +660,8 @@ export default function HomePage() {
           prompt: trimmedPrompt,
           profile: selectedProfile || undefined,
           fresh_mode: freshMode,
-          thread_id: threadId || undefined
+          thread_id: threadId || undefined,
+          ollama_system_prompt: ollamaSystemPrompt
         })
       });
 
@@ -614,7 +691,8 @@ export default function HomePage() {
           agent,
           profile: selectedProfile || undefined,
           fresh_mode: freshMode,
-          thread_id: threadId || undefined
+          thread_id: threadId || undefined,
+          ollama_system_prompt: ollamaSystemPrompt
         })
       });
 
@@ -649,7 +727,8 @@ export default function HomePage() {
           profile: options?.profile ?? (selectedProfile || undefined),
           fresh_mode: options?.freshMode ?? freshMode,
           thread_id: options?.threadId ?? (threadId || undefined),
-          run_id: options?.runId
+          run_id: options?.runId,
+          ollama_system_prompt: ollamaSystemPrompt
         })
       });
 
@@ -660,6 +739,34 @@ export default function HomePage() {
       }
 
       return data as ConsensusResponse;
+    } catch {
+      setError("backend connection failed");
+    }
+    return null;
+  }
+
+  async function requestChat(trimmedPrompt: string): Promise<ChatResponse | null> {
+    try {
+      const response = await fetch(`${apiBaseUrl}/api/magi/chat`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          prompt: trimmedPrompt,
+          profile: selectedProfile || undefined,
+          fresh_mode: freshMode,
+          thread_id: threadId || undefined,
+          ollama_system_prompt: ollamaSystemPrompt
+        })
+      });
+
+      const data = (await response.json()) as ChatResponse | { detail?: string };
+      if (!response.ok) {
+        setError((data as { detail?: string }).detail ?? "backend request failed");
+        return null;
+      }
+      return data as ChatResponse;
     } catch {
       setError("backend connection failed");
     }
@@ -698,10 +805,49 @@ export default function HomePage() {
       status: "LOADING",
       latency_ms: 0
     });
+    setChatMessages((prev) => [
+      ...prev,
+      {
+        id: `u-${Date.now()}`,
+        role: "user",
+        text: trimmed
+      }
+    ]);
     setLastRunPrompt(trimmed);
     markConsensusClockStart();
 
     try {
+      if (interactionMode === "chat") {
+        const chat = await requestChat(trimmed);
+        if (!chat) {
+          setLocalNodeState("IDLE");
+          setNodeStates({ A: "IDLE", B: "IDLE", C: "IDLE" });
+          return;
+        }
+        setResolvedProfile(chat.profile);
+        setRunId(chat.run_id);
+        setThreadId(chat.thread_id || threadId || chat.run_id);
+        setTurnIndex(chat.turn_index || turnIndex);
+        setRoutingInfo(chat.routing ?? null);
+        setResults(chat.results);
+        setConsensus(chat.consensus);
+        runNodeTransition(chat.profile, chat.results, chat.consensus.status);
+        setChatMessages((prev) => [
+          ...prev,
+          {
+            id: `a-${chat.run_id}`,
+            role: "assistant",
+            text: chat.reply || extractUnifiedReply(chat.consensus, chat.results),
+            run_id: chat.run_id,
+            turn_index: chat.turn_index,
+            latency_ms: resolveAssistantLatency(chat.consensus, chat.results)
+          }
+        ]);
+        markConsensusClockEnd();
+        await fetchHistory();
+        return;
+      }
+
       const success = await requestRun(trimmed);
       if (!success) {
         setLocalNodeState("IDLE");
@@ -720,6 +866,17 @@ export default function HomePage() {
       setIsLoading(false);
 
       if (success.consensus.status !== "LOADING") {
+        setChatMessages((prev) => [
+          ...prev,
+          {
+            id: `a-${success.run_id}`,
+            role: "assistant",
+            text: extractUnifiedReply(success.consensus, success.results),
+            run_id: success.run_id,
+            turn_index: success.turn_index,
+            latency_ms: resolveAssistantLatency(success.consensus, success.results)
+          }
+        ]);
         markConsensusClockEnd();
         return;
       }
@@ -740,6 +897,17 @@ export default function HomePage() {
         setResolvedProfile(finalized.profile);
         setConsensus(finalized.consensus);
         runNodeTransition(finalized.profile, success.results, finalized.consensus.status);
+        setChatMessages((prev) => [
+          ...prev,
+          {
+            id: `a-${finalized.run_id}`,
+            role: "assistant",
+            text: extractUnifiedReply(finalized.consensus, success.results),
+            run_id: finalized.run_id,
+            turn_index: finalized.turn_index,
+            latency_ms: resolveAssistantLatency(finalized.consensus, success.results)
+          }
+        ]);
         markConsensusClockEnd();
         await fetchHistory();
       } finally {
@@ -909,6 +1077,28 @@ export default function HomePage() {
     setFeedbackReason("");
     setFeedbackMessage("");
     consensusClockRef.current = null;
+    const turns = history
+      .filter((row) => (row.thread_id || row.run_id) === (item.thread_id || item.run_id))
+      .sort((a, b) => a.turn_index - b.turn_index);
+    const nextMessages: ChatMessage[] = [];
+    for (const turn of turns) {
+      nextMessages.push({
+        id: `u-${turn.run_id}`,
+        role: "user",
+        text: turn.prompt,
+        run_id: turn.run_id,
+        turn_index: turn.turn_index
+      });
+      nextMessages.push({
+        id: `a-${turn.run_id}`,
+        role: "assistant",
+        text: extractUnifiedReply(turn.consensus, turn.results),
+        run_id: turn.run_id,
+        turn_index: turn.turn_index,
+        latency_ms: resolveAssistantLatency(turn.consensus, turn.results)
+      });
+    }
+    setChatMessages(nextMessages);
   }
 
   function startNewChat() {
@@ -923,6 +1113,7 @@ export default function HomePage() {
     setResolvedProfile("");
     setResults([]);
     setConsensus(null);
+    setChatMessages([]);
     setLocalNodeState("IDLE");
     setNodeStates({ A: "IDLE", B: "IDLE", C: "IDLE" });
     setShowConclusion(false);
@@ -1029,11 +1220,30 @@ export default function HomePage() {
 
         <div>
       <section className="panel p-4 md:p-6">
-        <div className="flex items-center gap-2">
-          <h1 className="text-xl font-semibold tracking-[0.2em] text-terminal-accent md:text-2xl">MAGI</h1>
-          <span className="rounded border border-terminal-border px-2 py-0.5 text-[11px] text-terminal-dim">
-            phase {PHASE_VERSION}
-          </span>
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <h1 className="text-xl font-semibold tracking-[0.2em] text-terminal-accent md:text-2xl">MAGI</h1>
+            <span className="rounded border border-terminal-border px-2 py-0.5 text-[11px] text-terminal-dim">
+              phase {PHASE_VERSION}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={openSettingsDialog}
+            className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-terminal-border bg-[#02060b] text-terminal-dim hover:text-terminal-accent"
+            aria-label="Open settings"
+            title="Settings"
+          >
+            <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.9">
+              <circle cx="12" cy="12" r="3.2" />
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M12 3.5v2.2m0 12.6v2.2m8.5-8.5h-2.2M5.7 12H3.5m14.36-6.36-1.55 1.55M7.69 16.31l-1.55 1.55m0-12.22 1.55 1.55m8.67 8.67 1.55 1.55"
+              />
+              <circle cx="12" cy="12" r="7.1" />
+            </svg>
+          </button>
         </div>
         <p className="mt-2 text-sm text-terminal-dim">Command chamber: local pre-router, then three models, then one consensus core.</p>
 
@@ -1077,6 +1287,7 @@ export default function HomePage() {
           isBusy={isBusy}
           isLoading={isLoading}
           isConsensusLoading={isConsensusLoading}
+          interactionMode={interactionMode}
           selectedProfile={selectedProfile}
           availableProfiles={availableProfiles}
           freshMode={freshMode}
@@ -1085,40 +1296,91 @@ export default function HomePage() {
           onSubmit={onSubmit}
           onPromptChange={setPrompt}
           onPromptKeyDown={onTextareaKeyDown}
+          onInteractionModeChange={setInteractionMode}
           onProfileChange={setSelectedProfile}
           onFreshModeChange={setFreshMode}
         />
 
         {error ? <p className="mt-3 text-sm status-error">{error}</p> : null}
 
-        <RunMetaBar
-          runId={runId}
-          threadId={threadId}
-          turnIndex={turnIndex}
-          selectedProfile={selectedProfile}
-          freshMode={freshMode}
-          totalTokens={totalTokens}
-          totalCostUsd={totalCostUsd}
-          onCopyRunId={copyRunId}
-        />
-        <RoutingInfoPanel routingInfo={routingInfo} />
-        <FeedbackPanel
-          runId={runId}
-          threadId={threadId}
-          isBusy={isBusy}
-          feedbackSubmitting={feedbackSubmitting}
-          feedbackRating={feedbackRating}
-          feedbackReason={feedbackReason}
-          feedbackMessage={feedbackMessage}
-          onSelectGood={() => setFeedbackRating(1)}
-          onSelectBad={() => setFeedbackRating(-1)}
-          onReasonChange={setFeedbackReason}
-          onSubmit={() => void submitRoutingFeedback()}
-        />
+        <details className="mt-4 rounded-md border border-terminal-border bg-[#02060b] px-3 py-2">
+          <summary className="cursor-pointer select-none text-sm text-terminal-dim">
+            run details / routing / feedback
+          </summary>
+          <div className="mt-3 space-y-3">
+            <RunMetaBar
+              runId={runId}
+              threadId={threadId}
+              turnIndex={turnIndex}
+              selectedProfile={selectedProfile}
+              freshMode={freshMode}
+              totalTokens={totalTokens}
+              totalCostUsd={totalCostUsd}
+              onCopyRunId={copyRunId}
+            />
+            <RoutingInfoPanel routingInfo={routingInfo} />
+            <FeedbackPanel
+              runId={runId}
+              threadId={threadId}
+              isBusy={isBusy}
+              feedbackSubmitting={feedbackSubmitting}
+              feedbackRating={feedbackRating}
+              feedbackReason={feedbackReason}
+              feedbackMessage={feedbackMessage}
+              onSelectGood={() => setFeedbackRating(1)}
+              onSelectBad={() => setFeedbackRating(-1)}
+              onReasonChange={setFeedbackReason}
+              onSubmit={() => void submitRoutingFeedback()}
+            />
+            <div className="rounded border border-terminal-border bg-[#050a10] px-3 py-3 text-xs text-terminal-dim">
+              <p className="font-semibold text-terminal-text">Model execution status</p>
+              {cards.length ? (
+                <div className="mt-2 space-y-2">
+                  {cards.map((item) => (
+                    <div
+                      key={`status-${item.agent}`}
+                      className="rounded border border-terminal-border bg-[#02060b] px-2 py-2"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-semibold text-terminal-text">
+                          Agent {item.agent}: {item.provider}/{item.model}
+                        </span>
+                        <span
+                          className={
+                            item.status === "OK"
+                              ? "status-ok"
+                              : item.status === "ERROR"
+                                ? "status-error"
+                                : "status-loading"
+                          }
+                        >
+                          {item.status}
+                        </span>
+                      </div>
+                      <p className="mt-1">latency_ms: {item.latency_ms}</p>
+                      {item.error_message ? <p className="mt-1 status-error">error: {item.error_message}</p> : null}
+                    </div>
+                  ))}
+                  {consensus?.status === "ERROR" ? (
+                    <div className="rounded border border-terminal-border bg-[#02060b] px-2 py-2">
+                      <p className="font-semibold text-terminal-text">Consensus</p>
+                      {consensus.error_code ? <p className="mt-1">error_code: {consensus.error_code}</p> : null}
+                      {consensus.error_message ? <p className="mt-1 status-error">error: {consensus.error_message}</p> : null}
+                    </div>
+                  ) : null}
+                </div>
+              ) : (
+                <p className="mt-2 text-[11px]">No run yet.</p>
+              )}
+            </div>
+          </div>
+        </details>
 
       </section>
 
-      {consensus ? (
+      {interactionMode === "chat" ? <ChatTranscript messages={chatMessages} /> : null}
+
+      {interactionMode === "magi" && consensus ? (
         <ConsensusPanel
           consensus={consensus}
           parsedConsensus={parsedConsensus}
@@ -1127,14 +1389,61 @@ export default function HomePage() {
         />
       ) : null}
 
-      <AgentResultsGrid
-        cards={cards}
-        isBusy={isBusy}
-        onRetry={(agent) => void retryAgent(agent)}
-        onCopy={copyResultText}
-      />
+      {interactionMode === "magi" ? (
+        <AgentResultsGrid
+          cards={cards}
+          isBusy={isBusy}
+          onRetry={(agent) => void retryAgent(agent)}
+          onCopy={copyResultText}
+        />
+      ) : null}
         </div>
       </div>
+
+      {settingsOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+          <div className="w-full max-w-2xl rounded-md border border-terminal-border bg-[#02060b] p-4">
+            <div className="flex items-center justify-between">
+              <h2 className="text-base font-semibold text-terminal-accent">Settings</h2>
+              <button
+                type="button"
+                onClick={closeSettingsDialog}
+                className="rounded border border-terminal-border px-2 py-1 text-xs text-terminal-dim hover:text-terminal-accent"
+              >
+                Close
+              </button>
+            </div>
+            <label className="mt-4 block text-sm text-terminal-dim">
+              Ollama system prompt
+              <textarea
+                className="mt-2 h-36 w-full resize-y rounded-md border border-terminal-border bg-[#01040a] p-3 text-sm text-terminal-text outline-none ring-terminal-accent focus:ring"
+                value={settingsDraft}
+                onChange={(event) => setSettingsDraft(event.target.value)}
+                placeholder={DEFAULT_OLLAMA_SYSTEM_PROMPT}
+              />
+            </label>
+            <p className="mt-2 text-xs text-terminal-dim">
+              This prompt is sent to Ollama agents for local draft/local_only execution.
+            </p>
+            <div className="mt-4 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={saveSettingsDialog}
+                className="rounded border border-terminal-accent bg-[#0d1d2a] px-3 py-1.5 text-sm text-terminal-accent"
+              >
+                Save
+              </button>
+              <button
+                type="button"
+                onClick={() => setSettingsDraft(DEFAULT_OLLAMA_SYSTEM_PROMPT)}
+                className="rounded border border-terminal-border px-3 py-1.5 text-sm text-terminal-dim"
+              >
+                Reset Default
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </main>
   );
 }

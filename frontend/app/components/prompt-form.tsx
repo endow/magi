@@ -6,6 +6,7 @@ type PromptFormProps = {
   isBusy: boolean;
   isLoading: boolean;
   isConsensusLoading: boolean;
+  interactionMode: "magi" | "chat";
   selectedProfile: string;
   availableProfiles: string[];
   freshMode: boolean;
@@ -14,6 +15,7 @@ type PromptFormProps = {
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onPromptChange: (value: string) => void;
   onPromptKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
+  onInteractionModeChange: (value: "magi" | "chat") => void;
   onProfileChange: (value: string) => void;
   onFreshModeChange: (value: boolean) => void;
 };
@@ -24,6 +26,7 @@ export default function PromptForm({
   isBusy,
   isLoading,
   isConsensusLoading,
+  interactionMode,
   selectedProfile,
   availableProfiles,
   freshMode,
@@ -32,6 +35,7 @@ export default function PromptForm({
   onSubmit,
   onPromptChange,
   onPromptKeyDown,
+  onInteractionModeChange,
   onProfileChange,
   onFreshModeChange
 }: PromptFormProps) {
@@ -56,6 +60,18 @@ export default function PromptForm({
         <span className="text-xs text-terminal-dim">
           {prompt.length}/{maxPromptLength} chars
         </span>
+        <label className="text-xs text-terminal-dim">
+          interaction:
+          <select
+            className="ml-2 rounded border border-terminal-border bg-[#02060b] px-2 py-1 text-xs"
+            value={interactionMode}
+            onChange={(event) => onInteractionModeChange(event.target.value as "magi" | "chat")}
+            disabled={isBusy}
+          >
+            <option value="magi">magi (compare)</option>
+            <option value="chat">chat (orchestrated)</option>
+          </select>
+        </label>
         <label className="text-xs text-terminal-dim">
           mode:
           <select

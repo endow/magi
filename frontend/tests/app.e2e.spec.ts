@@ -158,22 +158,33 @@ test("submit with Enter and restore from history", async ({ page }) => {
   });
 
   await page.goto("/");
+  await page.locator('label:has-text("interaction:") select').selectOption("magi");
 
   const promptInput = page.getByRole("textbox", { name: "Type your prompt..." });
+  const runDetails = page.locator("details").filter({ hasText: "run details / routing / feedback" }).first();
   await page.getByRole("checkbox", { name: "fresh mode" }).check();
   await promptInput.fill("first prompt");
   await promptInput.press("Enter");
+  await runDetails.evaluate((el) => {
+    (el as HTMLDetailsElement).open = true;
+  });
 
   await expect(page.locator("span", { hasText: "run_id: run-1" })).toBeVisible();
   await expect(page.getByText("prompt: first prompt")).toBeVisible();
 
   await promptInput.fill("second prompt");
   await promptInput.press("Enter");
+  await runDetails.evaluate((el) => {
+    (el as HTMLDetailsElement).open = true;
+  });
 
   await expect(page.locator("span", { hasText: "run_id: run-2" })).toBeVisible();
   await expect(page.getByText("prompt: second prompt")).toBeVisible();
 
   await page.getByRole("button", { name: /prompt: first prompt/ }).click();
+  await runDetails.evaluate((el) => {
+    (el as HTMLDetailsElement).open = true;
+  });
 
   await expect(promptInput).toHaveValue("first prompt");
   await expect(page.locator("span", { hasText: "run_id: run-1" })).toBeVisible();

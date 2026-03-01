@@ -147,6 +147,16 @@ class RunRequest(BaseModel):
     fresh_mode: bool = False
     thread_id: str | None = None
     source_urls: list[str] = Field(default_factory=list)
+    ollama_system_prompt: str | None = None
+
+
+class ChatRequest(BaseModel):
+    prompt: str
+    profile: str | None = None
+    fresh_mode: bool = False
+    thread_id: str | None = None
+    source_urls: list[str] = Field(default_factory=list)
+    ollama_system_prompt: str | None = None
 
 
 class RetryRequest(BaseModel):
@@ -156,6 +166,7 @@ class RetryRequest(BaseModel):
     fresh_mode: bool = False
     thread_id: str | None = None
     source_urls: list[str] = Field(default_factory=list)
+    ollama_system_prompt: str | None = None
 
 
 class AgentResult(BaseModel):
@@ -180,6 +191,7 @@ class ConsensusRequest(BaseModel):
     thread_id: str | None = None
     run_id: str | None = None
     source_urls: list[str] = Field(default_factory=list)
+    ollama_system_prompt: str | None = None
 
 
 class FreshSource(BaseModel):
@@ -246,6 +258,17 @@ class ConsensusResponse(BaseModel):
     turn_index: int
     profile: str
     consensus: ConsensusResult
+
+
+class ChatResponse(BaseModel):
+    run_id: str
+    thread_id: str
+    turn_index: int
+    profile: str
+    reply: str
+    results: list[AgentResult]
+    consensus: ConsensusResult
+    routing: "RoutingDecisionInfo | None" = None
 
 
 class ProfilesResponse(BaseModel):
@@ -341,6 +364,7 @@ class RoutingDecisionInfo(BaseModel):
 
 
 RunResponse.model_rebuild()
+ChatResponse.model_rebuild()
 
 
 @asynccontextmanager
@@ -644,6 +668,14 @@ def _local_intent_fast_path(prompt: str) -> str | None:
         return "rewrite"
     if any(token in compact for token in ("翻訳", "translate", "敬語", "丁寧に")):
         return "translation"
+    if re.match(r"^\s*(やあ|こんにちは|こんばんは|おはよう|もしもし)\s*[!！。\.?？~〜]*\s*$", compact):
+        return "smalltalk"
+    if re.match(r"^\s*(hello|hi|hey|yo)\b[\s!?.~-]*$", compact):
+        return "smalltalk"
+    if re.match(r"^\s*(やあ|こんにちは|こんばんは|おはよう|もしもし)\b", compact) and len(compact) <= 64:
+        return "smalltalk"
+    if re.match(r"^\s*(hello|hi|hey|yo)\b", compact) and len(compact) <= 64:
+        return "smalltalk"
     return None
 
 
@@ -876,7 +908,7 @@ async def _route_profile_with_trace(
 
     fast_intent = _local_intent_fast_path(prompt)
     if (
-        fast_intent in {"translation", "rewrite", "summarize_short"}
+        fast_intent in {"translation", "rewrite", "summarize_short", "smalltalk"}
         and _is_low_safety_prompt(prompt)
         and "local_only" in available_profiles
     ):
@@ -1174,7 +1206,8 @@ def _extract_usage_metrics(response: Any) -> dict[str, int | float | None]:
 
 
 def _public_error_message(exc: Exception) -> str:
-    message = str(exc).lower()
+    raw_message = str(exc).strip()
+    message = raw_message.lower()
     if "credit balance is too low" in message:
         return "provider account has insufficient credits"
     if "quota exceeded" in message or "resource_exhausted" in message or "429" in message:
@@ -1185,6 +1218,20 @@ def _public_error_message(exc: Exception) -> str:
         return "model not found (check config.json model name)"
     if "rate limit" in message or "too many requests" in message:
         return "provider rate limit reached"
+    if (
+        "serviceunavailable" in message
+        or '"code": 503' in message
+        or "status\": \"unavailable" in message
+        or "high demand" in message
+        or "try again later" in message
+    ):
+        return "provider temporarily unavailable (503 high demand; try again later)"
+
+    if raw_message:
+        compact = " ".join(raw_message.split())
+        if len(compact) > 220:
+            compact = compact[:217] + "..."
+        return f"{type(exc).__name__}: {compact}"
     return "provider request failed"
 
 
@@ -3564,6 +3611,129 @@ def _build_pending_consensus(profile: ProfileConfig) -> ConsensusResult:
     )
 
 
+def _extract_chat_reply_from_consensus(consensus: ConsensusResult, results: list[AgentResult]) -> str:
+    text = (consensus.text or "").strip()
+    if text:
+        final_match = re.search(r"Final answer:\s*", text, flags=re.IGNORECASE)
+        if final_match:
+            body = text[final_match.end() :]
+            vote_match = re.search(r"\n\s*Vote details:\s*", body, flags=re.IGNORECASE)
+            if vote_match:
+                body = body[: vote_match.start()]
+            cleaned = body.strip()
+            if cleaned:
+                return cleaned
+        return text
+
+    for item in results:
+        if item.status == "OK" and item.text.strip():
+            return item.text.strip()
+    return consensus.error_message or ""
+
+
+def _normalize_ollama_system_prompt(raw_prompt: str | None) -> str | None:
+    if raw_prompt is None:
+        return None
+    cleaned = raw_prompt.strip()
+    if not cleaned:
+        return None
+    return cleaned[:4000]
+
+
+def _apply_ollama_system_prompt(agent: AgentConfig, override_prompt: str | None) -> AgentConfig:
+    if not override_prompt:
+        return agent
+    if agent.provider.strip().lower() != "ollama":
+        return agent
+    return agent.model_copy(update={"system_prompt": override_prompt})
+
+
+def _resolve_chat_local_agent(config: AppConfig, fallback_profile: ProfileConfig) -> tuple[AgentConfig, int, bool]:
+    if config.profiles:
+        local_profile = config.profiles.get("local_only")
+        if local_profile and local_profile.agents:
+            return local_profile.agents[0], max(2, min(12, int(local_profile.timeout_seconds))), True
+    return fallback_profile.agents[0], max(2, min(12, int(fallback_profile.timeout_seconds))), False
+
+
+def _parse_sufficiency_payload(raw_text: str) -> tuple[bool | None, str | None]:
+    candidate = raw_text.strip()
+    if not candidate:
+        return None, None
+    match = re.search(r"\{.*\}", candidate, flags=re.DOTALL)
+    if match:
+        candidate = match.group(0)
+    try:
+        payload = json.loads(candidate)
+    except json.JSONDecodeError:
+        return None, None
+    if not isinstance(payload, dict):
+        return None, None
+    raw_sufficient = payload.get("sufficient")
+    reason = _safe_str(payload.get("reason")) or None
+    if isinstance(raw_sufficient, bool):
+        return raw_sufficient, reason
+    if isinstance(raw_sufficient, str):
+        lowered = raw_sufficient.strip().lower()
+        if lowered in {"true", "yes", "1"}:
+            return True, reason
+        if lowered in {"false", "no", "0"}:
+            return False, reason
+    return None, reason
+
+
+def _fallback_sufficiency(prompt: str, answer: str) -> bool:
+    cleaned = answer.strip()
+    if not cleaned:
+        return False
+    if _local_intent_fast_path(prompt) == "smalltalk":
+        return True
+    if len(cleaned) < 6 and len(prompt.strip()) > 8:
+        return False
+    refusal_markers = ("わかりません", "不明", "cannot", "can't", "わからない", "情報がありません")
+    if any(marker in cleaned.lower() for marker in refusal_markers):
+        return False
+    return True
+
+
+async def _is_local_draft_sufficient(
+    prompt: str,
+    draft: AgentResult,
+    judge_agent: AgentConfig,
+    timeout_seconds: int,
+) -> tuple[bool, str]:
+    if draft.status != "OK" or not draft.text.strip():
+        return False, "draft_error_or_empty"
+    if _local_intent_fast_path(prompt) == "smalltalk":
+        return True, "smalltalk_fast_accept"
+
+    judge_prompt = (
+        "Decide if the draft answer is sufficient for the user question.\n"
+        "Return strict JSON only: {\"sufficient\": true|false, \"reason\": \"short\"}\n"
+        "Criteria:\n"
+        "- sufficient=true when draft directly answers the user question with adequate detail.\n"
+        "- sufficient=false when draft is vague, incomplete, or likely incorrect.\n"
+        "- Be strict for factual/technical questions.\n\n"
+        f"User question:\n{prompt}\n\n"
+        f"Draft answer:\n{draft.text}"
+    )
+    full_model = f"{judge_agent.provider}/{judge_agent.model}"
+    try:
+        verdict_text, _, _ = await _call_model_text(
+            full_model,
+            judge_prompt,
+            timeout_seconds=max(2, min(8, timeout_seconds)),
+            max_tokens=80,
+        )
+        sufficient, reason = _parse_sufficiency_payload(verdict_text)
+        if sufficient is not None:
+            return sufficient, reason or "judge_model"
+    except Exception as exc:  # noqa: BLE001
+        print(f"[magi] local_sufficiency judge failed: {type(exc).__name__}: {exc}")
+
+    return _fallback_sufficiency(prompt, draft.text), "heuristic_fallback"
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -3737,6 +3907,7 @@ async def run_magi(payload: RunRequest) -> RunResponse:
     router_input: dict[str, Any] = {}
     router_output: dict[str, Any] = {}
     routing_event_saved = False
+    ollama_system_prompt = _normalize_ollama_system_prompt(payload.ollama_system_prompt)
 
     try:
         config = load_config()
@@ -3762,7 +3933,8 @@ async def run_magi(payload: RunRequest) -> RunResponse:
             print(f"[magi] history_context skipped profile={profile_name} reason=url_anchored")
         else:
             print(f"[magi] history_context skipped profile={profile_name}")
-        tasks = [_run_single_agent(agent, effective_prompt, profile.timeout_seconds) for agent in profile.agents]
+        agents = [_apply_ollama_system_prompt(agent, ollama_system_prompt) for agent in profile.agents]
+        tasks = [_run_single_agent(agent, effective_prompt, profile.timeout_seconds) for agent in agents]
         results = await asyncio.gather(*tasks)
         if profile_name == "local_only":
             results = [_postprocess_local_only_result(prompt, item) for item in results]
@@ -3826,11 +3998,171 @@ async def run_magi(payload: RunRequest) -> RunResponse:
     )
 
 
+@app.post("/api/magi/chat", response_model=ChatResponse)
+async def chat_magi(payload: ChatRequest) -> ChatResponse:
+    prompt = _validate_prompt(payload.prompt)
+    fresh_mode = _resolve_fresh_mode(prompt, payload.fresh_mode)
+    thread_id = _normalize_thread_id(payload.thread_id) or str(uuid.uuid4())
+    run_id = str(uuid.uuid4())
+    turn_index = _next_turn_index(thread_id)
+
+    try:
+        config = load_config()
+        fallback_profile_name, fallback_profile = _resolve_profile(config, payload.profile)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"invalid config: {exc}") from exc
+
+    router_input = _build_router_input_snapshot(prompt, None, fallback_profile_name)
+    router_output: dict[str, Any] = {
+        "chosen_profile": "local_only",
+        "candidates": {"local_only": {"base_score": 1.0, "policy_weight": 0.0, "final_score": 1.0}},
+        "policy_key": _routing_policy_key_from_input(router_input),
+        "reason": "local_draft",
+    }
+    routing_event_saved = False
+    ollama_system_prompt = _normalize_ollama_system_prompt(payload.ollama_system_prompt)
+    selected_profile_name = "local_only"
+
+    try:
+        resolved_source_urls = _resolve_source_urls_for_prompt(prompt, payload.source_urls)
+        url_anchored_request = bool(resolved_source_urls)
+        effective_prompt = await _build_effective_prompt(prompt, fresh_mode, payload.source_urls)
+
+        if _thread_context_enabled():
+            effective_prompt = _build_prompt_with_thread_context(effective_prompt, thread_id)
+        if _history_enabled() and not url_anchored_request:
+            effective_prompt = await _build_prompt_with_history(prompt, effective_prompt, config)
+        elif url_anchored_request:
+            print("[magi] history_context skipped profile=chat reason=url_anchored")
+
+        local_agent, local_timeout, used_local_only_profile = _resolve_chat_local_agent(config, fallback_profile)
+        local_agent = _apply_ollama_system_prompt(local_agent, ollama_system_prompt)
+        local_result = await _run_single_agent(local_agent, effective_prompt, local_timeout)
+        if used_local_only_profile:
+            local_result = _postprocess_local_only_result(prompt, local_result)
+
+        is_sufficient, sufficiency_reason = await _is_local_draft_sufficient(
+            prompt,
+            local_result,
+            local_agent,
+            local_timeout,
+        )
+        print(f"[magi] chat local_draft sufficient={is_sufficient} reason={sufficiency_reason}")
+
+        if is_sufficient:
+            results = [local_result]
+            consensus = _build_local_only_consensus(results)
+            selected_profile_name = "local_only" if used_local_only_profile else fallback_profile_name
+            router_input = _build_router_input_snapshot(
+                prompt,
+                RouteDecision(
+                    profile=selected_profile_name,
+                    confidence=95,
+                    reason=sufficiency_reason,
+                    intent=_local_intent_fast_path(prompt),
+                    complexity="low" if _local_intent_fast_path(prompt) == "smalltalk" else None,
+                    safety="low",
+                    execution_tier="local",
+                ),
+                fallback_profile_name,
+            )
+            selected_profile_name, candidates, policy_key = _select_profile_with_policy(
+                set(config.profiles.keys()) if config.profiles else {selected_profile_name},
+                selected_profile_name,
+                router_input,
+            )
+            router_output = {
+                "chosen_profile": selected_profile_name,
+                "candidates": candidates,
+                "policy_key": policy_key,
+                "reason": f"local_draft_sufficient:{sufficiency_reason}",
+            }
+            _save_routing_event(thread_id, run_id, router_input, router_output)
+            routing_event_saved = True
+        else:
+            selected_profile_name, profile, router_input, router_output = await _resolve_profile_with_router_trace(
+                config,
+                payload.profile,
+                prompt,
+            )
+            _save_routing_event(thread_id, run_id, router_input, router_output)
+            routing_event_saved = True
+            agents = [_apply_ollama_system_prompt(agent, ollama_system_prompt) for agent in profile.agents]
+            tasks = [_run_single_agent(agent, effective_prompt, profile.timeout_seconds) for agent in agents]
+            results = await asyncio.gather(*tasks)
+            consensus = (
+                _build_local_only_consensus(results)
+                if selected_profile_name == "local_only"
+                else await _run_consensus(profile, effective_prompt, results)
+            )
+
+        _save_run_history(
+            run_id,
+            selected_profile_name,
+            prompt,
+            results,
+            consensus,
+            config,
+            thread_id=thread_id,
+            turn_index=turn_index,
+        )
+
+        if routing_event_saved:
+            execution_result = _build_execution_result_snapshot(selected_profile_name, results, consensus=consensus)
+            _update_routing_event_execution(run_id, execution_result, config)
+    except HTTPException:
+        if routing_event_saved:
+            failure_result = _build_execution_result_snapshot(
+                selected_profile_name or "unknown",
+                [],
+                failure_message="request failed",
+            )
+            _update_routing_event_execution(run_id, failure_result, config)
+        raise
+    except Exception as exc:  # noqa: BLE001
+        if routing_event_saved:
+            failure_result = _build_execution_result_snapshot(
+                selected_profile_name or "unknown",
+                [],
+                failure_message=f"{type(exc).__name__}: {exc}",
+            )
+            _update_routing_event_execution(run_id, failure_result, config)
+        raise
+
+    routing_info = RoutingDecisionInfo(
+        profile=selected_profile_name,
+        reason=_build_routing_reason_display(
+            selected_profile_name,
+            router_input,
+            _safe_str(router_output.get("reason")) or None,
+        ),
+        intent=_safe_str(router_input.get("intent")) or None,
+        complexity=_safe_str(router_input.get("complexity")) or None,
+        safety=_safe_str(router_input.get("safety")) or None,
+        execution_tier=_safe_str(router_input.get("execution_tier")) or None,
+        policy_key=_safe_str(router_output.get("policy_key")) or None,
+    )
+
+    return ChatResponse(
+        run_id=run_id,
+        thread_id=thread_id,
+        turn_index=turn_index,
+        profile=selected_profile_name,
+        reply=_extract_chat_reply_from_consensus(consensus, results),
+        results=results,
+        consensus=consensus,
+        routing=routing_info,
+    )
+
+
 @app.post("/api/magi/retry", response_model=RetryResponse)
 async def retry_agent(payload: RetryRequest) -> RetryResponse:
     prompt = _validate_prompt(payload.prompt)
     fresh_mode = _resolve_fresh_mode(prompt, payload.fresh_mode)
     thread_id = _normalize_thread_id(payload.thread_id) or str(uuid.uuid4())
+    ollama_system_prompt = _normalize_ollama_system_prompt(payload.ollama_system_prompt)
 
     try:
         config = load_config()
@@ -3843,6 +4175,7 @@ async def retry_agent(payload: RetryRequest) -> RetryResponse:
     target_agent = next((agent for agent in profile.agents if agent.agent == payload.agent), None)
     if target_agent is None:
         raise HTTPException(status_code=400, detail=f"agent {payload.agent} is not configured")
+    target_agent = _apply_ollama_system_prompt(target_agent, ollama_system_prompt)
 
     effective_prompt = await _build_effective_prompt(prompt, fresh_mode, payload.source_urls)
     if _should_apply_thread_context(profile_name):
@@ -3870,6 +4203,7 @@ async def recalc_consensus(payload: ConsensusRequest) -> ConsensusResponse:
         or str(uuid.uuid4())
     )
     turn_index = stored_thread_turn[1] if stored_thread_turn else 0
+    ollama_system_prompt = _normalize_ollama_system_prompt(payload.ollama_system_prompt)
 
     try:
         config = load_config()
@@ -3887,6 +4221,10 @@ async def recalc_consensus(payload: ConsensusRequest) -> ConsensusResponse:
     if profile_name == "local_only":
         consensus = _build_local_only_consensus(payload.results)
     else:
+        if ollama_system_prompt:
+            profile = profile.model_copy(
+                update={"agents": [_apply_ollama_system_prompt(agent, ollama_system_prompt) for agent in profile.agents]}
+            )
         consensus = await _run_consensus(profile, effective_prompt, payload.results)
     response_run_id = requested_run_id or str(uuid.uuid4())
     if requested_run_id and not _update_run_consensus(requested_run_id, consensus):

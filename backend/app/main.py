@@ -3106,6 +3106,21 @@ def _delete_thread_history(thread_id: str) -> int:
         return int(result.rowcount or 0)
 
 
+def _delete_all_history() -> tuple[int, int]:
+    with _get_db_connection() as conn:
+        counts = conn.execute(
+            """
+            SELECT COUNT(*) AS run_count, COUNT(DISTINCT thread_id) AS thread_count
+            FROM runs
+            """
+        ).fetchone()
+        run_count = int((counts["run_count"] if counts is not None else 0) or 0)
+        thread_count = int((counts["thread_count"] if counts is not None else 0) or 0)
+        conn.execute("DELETE FROM agent_results")
+        conn.execute("DELETE FROM runs")
+    return run_count, thread_count
+
+
 def _serialize_result_for_consensus(result: AgentResult) -> str:
     if result.status == "OK":
         body = result.text.strip()
@@ -3800,6 +3815,15 @@ async def delete_thread_history(thread_id: str) -> dict[str, int | str]:
     if deleted == 0:
         raise HTTPException(status_code=404, detail="thread not found")
     return {"thread_id": thread_id, "deleted_runs": deleted}
+
+
+@app.delete("/api/magi/history")
+async def delete_all_history() -> dict[str, int]:
+    try:
+        deleted_runs, deleted_threads = _delete_all_history()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"failed to delete all history: {exc}") from exc
+    return {"deleted_runs": deleted_runs, "deleted_threads": deleted_threads}
 
 
 @app.post("/api/magi/routing/feedback", response_model=RoutingFeedbackResponse)

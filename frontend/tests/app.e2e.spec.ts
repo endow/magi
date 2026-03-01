@@ -243,3 +243,93 @@ test("local_only chat run shows conclusion elapsed time", async ({ page }) => {
   await expect(page.getByText(/^elapsed \d+m \d+s$/)).toBeVisible();
   await expect(runDetails.getByText("run_id: run-local-1")).toBeVisible();
 });
+
+test("settings dialog can delete all threads", async ({ page }) => {
+  await page.route("**/api/magi/profiles", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        default_profile: "cost",
+        profiles: ["cost", "balance", "performance", "local_only"]
+      })
+    });
+  });
+  await page.route("**/api/magi/history?limit=20&offset=0", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        total: 2,
+        items: [
+          {
+            run_id: "run-2",
+            thread_id: "thread-2",
+            turn_index: 1,
+            profile: "cost",
+            prompt: "thread2 prompt",
+            created_at: "2026-02-10T00:00:00+00:00",
+            results: [
+              { agent: "A", provider: "openai", model: "gpt-4.1-mini", text: "A2", status: "OK", latency_ms: 80 },
+              { agent: "B", provider: "anthropic", model: "claude-sonnet-4-20250514", text: "B2", status: "OK", latency_ms: 90 },
+              { agent: "C", provider: "gemini", model: "gemini-2.5-flash", text: "C2", status: "OK", latency_ms: 100 }
+            ],
+            consensus: {
+              provider: "openai",
+              model: "gpt-4.1-mini",
+              text: "consensus-2",
+              status: "OK",
+              latency_ms: 70
+            }
+          },
+          {
+            run_id: "run-1",
+            thread_id: "thread-1",
+            turn_index: 1,
+            profile: "cost",
+            prompt: "thread1 prompt",
+            created_at: "2026-02-09T00:00:00+00:00",
+            results: [
+              { agent: "A", provider: "openai", model: "gpt-4.1-mini", text: "A1", status: "OK", latency_ms: 80 },
+              { agent: "B", provider: "anthropic", model: "claude-sonnet-4-20250514", text: "B1", status: "OK", latency_ms: 90 },
+              { agent: "C", provider: "gemini", model: "gemini-2.5-flash", text: "C1", status: "OK", latency_ms: 100 }
+            ],
+            consensus: {
+              provider: "openai",
+              model: "gpt-4.1-mini",
+              text: "consensus-1",
+              status: "OK",
+              latency_ms: 70
+            }
+          }
+        ]
+      })
+    });
+  });
+
+  let deleteCalled = false;
+  await page.route("**/api/magi/history", async (route) => {
+    if (route.request().method() !== "DELETE") {
+      await route.continue();
+      return;
+    }
+    deleteCalled = true;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ deleted_runs: 2, deleted_threads: 2 })
+    });
+  });
+
+  await page.goto("/");
+  await expect(page.getByText("thread1 prompt")).toBeVisible();
+
+  await page.getByRole("button", { name: "Open settings" }).click();
+  page.once("dialog", async (dialog) => {
+    await dialog.accept();
+  });
+  await page.getByRole("button", { name: "Delete All Threads" }).click();
+
+  expect(deleteCalled).toBe(true);
+  await expect(page.getByText("No history yet.")).toBeVisible();
+});

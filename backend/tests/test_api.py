@@ -677,6 +677,33 @@ def test_delete_thread_history_removes_only_target_thread(monkeypatch, tmp_path)
     assert "thread-b" in thread_ids
 
 
+def test_delete_all_history_removes_every_thread(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("MAGI_DB_PATH", str(tmp_path / "magi-delete-all.db"))
+    main._init_db()
+
+    ok_results = [
+        main.AgentResult(agent="A", provider="openai", model="m1", text="a", status="OK", latency_ms=10),
+        main.AgentResult(agent="B", provider="anthropic", model="m2", text="b", status="OK", latency_ms=10),
+        main.AgentResult(agent="C", provider="gemini", model="m3", text="c", status="OK", latency_ms=10),
+    ]
+    consensus = main.ConsensusResult(provider="magi", model="peer_vote_v1", text="answer", status="OK", latency_ms=5)
+    main._save_run_history("run-a1", "cost", "p1", ok_results, consensus, thread_id="thread-a", turn_index=1)
+    main._save_run_history("run-a2", "cost", "p2", ok_results, consensus, thread_id="thread-a", turn_index=2)
+    main._save_run_history("run-b1", "cost", "p3", ok_results, consensus, thread_id="thread-b", turn_index=1)
+
+    delete_response = client.delete("/api/magi/history")
+    assert delete_response.status_code == 200
+    delete_body = delete_response.json()
+    assert delete_body["deleted_runs"] == 3
+    assert delete_body["deleted_threads"] == 2
+
+    list_response = client.get("/api/magi/history?limit=20&offset=0")
+    assert list_response.status_code == 200
+    list_body = list_response.json()
+    assert list_body["total"] == 0
+    assert list_body["items"] == []
+
+
 def test_history_list_rejects_invalid_query_params() -> None:
     response = client.get("/api/magi/history?limit=0&offset=-1")
     assert response.status_code == 400

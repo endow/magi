@@ -252,6 +252,7 @@ export default function HomePage() {
   const [ollamaSystemPrompt, setOllamaSystemPrompt] = useState(DEFAULT_OLLAMA_SYSTEM_PROMPT);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsDraft, setSettingsDraft] = useState(DEFAULT_OLLAMA_SYSTEM_PROMPT);
+  const [isDeletingAllThreads, setIsDeletingAllThreads] = useState(false);
   const isBusy = isLoading || isConsensusLoading;
   const isStrictDebate = selectedProfile === "performance" || selectedProfile === "ultra";
   const isUltra = selectedProfile === "ultra";
@@ -607,6 +608,38 @@ export default function HomePage() {
     const next = settingsDraft.trim();
     setOllamaSystemPrompt(next || DEFAULT_OLLAMA_SYSTEM_PROMPT);
     setSettingsOpen(false);
+  }
+
+  async function deleteAllThreadsFromSettings() {
+    if (isBusy || isDeletingAllThreads) return;
+    const confirmed =
+      typeof window !== "undefined"
+        ? window.confirm("Delete all thread history permanently? This action cannot be undone.")
+        : false;
+    if (!confirmed) return;
+
+    setIsDeletingAllThreads(true);
+    try {
+      const response = await fetch(`${apiBaseUrl}/api/magi/history`, { method: "DELETE" });
+      if (!response.ok) {
+        const data = (await response.json()) as { detail?: string };
+        setError(data.detail ?? "failed to delete all thread history");
+        return;
+      }
+      setHistory([]);
+      setThreadNames({});
+      setCollapsedThreads({});
+      setEditingThreadId(null);
+      setThreadNameDraft("");
+      setConfirmDeleteThreadId(null);
+      startNewChat();
+      setSettingsOpen(false);
+      setError("");
+    } catch {
+      setError("backend connection failed");
+    } finally {
+      setIsDeletingAllThreads(false);
+    }
   }
 
   async function requestChat(trimmedPrompt: string): Promise<ChatResponse | null> {
@@ -1125,6 +1158,17 @@ export default function HomePage() {
                 className="rounded border border-terminal-border px-3 py-1.5 text-sm text-terminal-dim"
               >
                 Reset Default
+              </button>
+            </div>
+            <div className="mt-5 border-t border-terminal-border pt-4">
+              <p className="text-xs text-terminal-dim">Danger Zone</p>
+              <button
+                type="button"
+                onClick={() => void deleteAllThreadsFromSettings()}
+                disabled={isBusy || isDeletingAllThreads}
+                className="mt-2 rounded border border-terminal-err bg-[#160a0a] px-3 py-1.5 text-sm text-terminal-err disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {isDeletingAllThreads ? "Deleting..." : "Delete All Threads"}
               </button>
             </div>
           </div>

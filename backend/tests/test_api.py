@@ -377,6 +377,97 @@ def test_chat_smalltalk_skips_history_context_even_with_existing_turns(monkeypat
     assert response.status_code == 200
 
 
+def test_chat_skips_history_context_when_prompt_contains_url(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("MAGI_DB_PATH", str(tmp_path / "magi-chat-url-anchor.db"))
+    main._init_db()
+    monkeypatch.setattr(main, "load_config", _profiled_config_with_router)
+    monkeypatch.setattr(main, "_save_run_history", lambda *args, **kwargs: None)
+
+    ok_results = [
+        main.AgentResult(agent="A", provider="openai", model="m1", text="old", status="OK", latency_ms=10),
+    ]
+    consensus = main.ConsensusResult(provider="magi", model="peer_vote_r1", text="old", status="OK", latency_ms=10)
+    thread_id = str(uuid.uuid4())
+    main._save_run_history("run-old", "cost", "old prompt", ok_results, consensus, thread_id=thread_id, turn_index=1)
+
+    async def fail_history(*args, **kwargs):
+        raise AssertionError("history context should be skipped for URL-anchored chat request")
+
+    async def fake_runner(agent_config, prompt, timeout_seconds):
+        return main.AgentResult(
+            agent=agent_config.agent,
+            provider=agent_config.provider,
+            model=agent_config.model,
+            text="URLを確認しました。",
+            status="OK",
+            latency_ms=15,
+        )
+
+    async def force_sufficient(prompt, draft, judge_agent, timeout_seconds):
+        return True, "test_force_local_accept"
+
+    monkeypatch.setattr(main, "_build_prompt_with_history", fail_history)
+    monkeypatch.setattr(main, "_run_single_agent", fake_runner)
+    monkeypatch.setattr(main, "_is_local_draft_sufficient", force_sufficient)
+
+    response = client.post(
+        "/api/magi/chat",
+        json={"prompt": "このURL見て https://example.com", "thread_id": thread_id},
+    )
+    assert response.status_code == 200
+
+
+def test_chat_returns_partial_failure_without_failing_request(monkeypatch) -> None:
+    monkeypatch.setattr(main, "load_config", _profiled_config)
+    monkeypatch.setattr(main, "_save_run_history", lambda *args, **kwargs: None)
+
+    async def fake_runner(agent_config, prompt, timeout_seconds):
+        if agent_config.agent == "B":
+            return main.AgentResult(
+                agent="B",
+                provider=agent_config.provider,
+                model=agent_config.model,
+                text="",
+                status="ERROR",
+                latency_ms=120,
+                error_message="provider request failed",
+            )
+        return main.AgentResult(
+            agent=agent_config.agent,
+            provider=agent_config.provider,
+            model=agent_config.model,
+            text=f"ok-{agent_config.agent}",
+            status="OK",
+            latency_ms=80,
+        )
+
+    async def fake_consensus(config_obj, prompt, results):
+        return main.ConsensusResult(
+            provider="magi",
+            model="peer_vote_r1",
+            text="Final answer: fallback",
+            status="OK",
+            latency_ms=50,
+        )
+
+    async def force_insufficient(prompt, draft, judge_agent, timeout_seconds):
+        return False, "test_force_escalate"
+
+    monkeypatch.setattr(main, "_run_single_agent", fake_runner)
+    monkeypatch.setattr(main, "_run_consensus", fake_consensus)
+    monkeypatch.setattr(main, "_is_local_draft_sufficient", force_insufficient)
+
+    response = client.post("/api/magi/chat", json={"prompt": "説明して", "profile": "performance"})
+    assert response.status_code == 200
+    body = response.json()
+    by_agent = {item["agent"]: item for item in body["results"]}
+    assert by_agent["A"]["status"] == "OK"
+    assert by_agent["B"]["status"] == "ERROR"
+    assert by_agent["B"]["error_message"] == "provider request failed"
+    assert by_agent["C"]["status"] == "OK"
+    assert body["consensus"]["status"] == "OK"
+
+
 def test_consensus_endpoint_updates_saved_run(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("MAGI_DB_PATH", str(tmp_path / "magi-consensus-update.db"))
     main._init_db()

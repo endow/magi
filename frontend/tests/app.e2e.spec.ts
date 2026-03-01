@@ -157,3 +157,89 @@ test("submit with Enter and restore from history", async ({ page }) => {
   expect(seenThreadIds).toEqual([undefined, "thread-1"]);
   expect(seenProfiles[0]).toBeUndefined();
 });
+
+test("chat-only UI does not render interaction selector", async ({ page }) => {
+  await page.route("**/api/magi/profiles", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        default_profile: "cost",
+        profiles: ["cost", "balance", "performance", "local_only"]
+      })
+    });
+  });
+  await page.route("**/api/magi/history?limit=20&offset=0", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ total: 0, items: [] })
+    });
+  });
+
+  await page.goto("/");
+  await expect(page.locator('label:has-text("interaction:")')).toHaveCount(0);
+});
+
+test("local_only chat run shows conclusion elapsed time", async ({ page }) => {
+  await page.route("**/api/magi/profiles", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        default_profile: "cost",
+        profiles: ["cost", "balance", "performance", "local_only"]
+      })
+    });
+  });
+  await page.route("**/api/magi/history?limit=20&offset=0", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ total: 0, items: [] })
+    });
+  });
+  await page.route("**/api/magi/chat", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        run_id: "run-local-1",
+        thread_id: "thread-local-1",
+        turn_index: 1,
+        profile: "local_only",
+        reply: "やあ。",
+        results: [
+          {
+            agent: "A",
+            provider: "ollama",
+            model: "qwen2.5:7b-instruct-q4_K_M",
+            text: "やあ。",
+            status: "OK",
+            latency_ms: 45
+          }
+        ],
+        consensus: {
+          provider: "ollama",
+          model: "qwen2.5:7b-instruct-q4_K_M",
+          text: "やあ。",
+          status: "OK",
+          latency_ms: 45
+        }
+      })
+    });
+  });
+
+  await page.goto("/");
+  await page.locator('label:has-text("mode:") select').selectOption("local_only");
+  const promptInput = page.getByRole("textbox", { name: "Type your prompt..." });
+  const runDetails = page.locator("details").filter({ hasText: "run details / routing / feedback" }).first();
+  await promptInput.fill("やあ");
+  await promptInput.press("Enter");
+  await runDetails.evaluate((el) => {
+    (el as HTMLDetailsElement).open = true;
+  });
+
+  await expect(page.getByText(/^elapsed \d+m \d+s$/)).toBeVisible();
+  await expect(runDetails.getByText("run_id: run-local-1")).toBeVisible();
+});

@@ -248,7 +248,7 @@ export default function HomePage() {
   const [showConclusion, setShowConclusion] = useState(false);
   const [conclusionElapsedMs, setConclusionElapsedMs] = useState<number | null>(null);
   const [loadingElapsedMs, setLoadingElapsedMs] = useState<number>(0);
-  const [freshMode, setFreshMode] = useState(false);
+  const [freshMode, setFreshMode] = useState<"auto" | "on" | "off">("auto");
   const [ollamaSystemPrompt, setOllamaSystemPrompt] = useState(DEFAULT_OLLAMA_SYSTEM_PROMPT);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsDraft, setSettingsDraft] = useState(DEFAULT_OLLAMA_SYSTEM_PROMPT);
@@ -652,7 +652,7 @@ export default function HomePage() {
         body: JSON.stringify({
           prompt: trimmedPrompt,
           profile: selectedProfile || undefined,
-          fresh_mode: freshMode,
+          fresh_mode: freshMode === "auto" ? undefined : freshMode === "on",
           thread_id: threadId || undefined,
           ollama_system_prompt: ollamaSystemPrompt
         })

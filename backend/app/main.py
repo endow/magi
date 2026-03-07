@@ -163,7 +163,7 @@ HistoryContextConfig.model_rebuild()
 class RunRequest(BaseModel):
     prompt: str
     profile: str | None = None
-    fresh_mode: bool = False
+    fresh_mode: bool | None = None
     thread_id: str | None = None
     source_urls: list[str] = Field(default_factory=list)
     ollama_system_prompt: str | None = None
@@ -172,7 +172,7 @@ class RunRequest(BaseModel):
 class ChatRequest(BaseModel):
     prompt: str
     profile: str | None = None
-    fresh_mode: bool = False
+    fresh_mode: bool | None = None
     thread_id: str | None = None
     source_urls: list[str] = Field(default_factory=list)
     ollama_system_prompt: str | None = None
@@ -182,7 +182,7 @@ class RetryRequest(BaseModel):
     prompt: str
     agent: Literal["A", "B", "C"]
     profile: str | None = None
-    fresh_mode: bool = False
+    fresh_mode: bool | None = None
     thread_id: str | None = None
     source_urls: list[str] = Field(default_factory=list)
     ollama_system_prompt: str | None = None
@@ -206,7 +206,7 @@ class ConsensusRequest(BaseModel):
     prompt: str
     results: list[AgentResult]
     profile: str | None = None
-    fresh_mode: bool = False
+    fresh_mode: bool | None = None
     thread_id: str | None = None
     run_id: str | None = None
     source_urls: list[str] = Field(default_factory=list)
@@ -1693,9 +1693,11 @@ def _is_fresh_sensitive_prompt(prompt: str) -> bool:
     return False
 
 
-def _resolve_fresh_mode(prompt: str, requested_fresh_mode: bool) -> bool:
-    if requested_fresh_mode:
+def _resolve_fresh_mode(prompt: str, requested_fresh_mode: bool | None) -> bool:
+    if requested_fresh_mode is True:
         return True
+    if requested_fresh_mode is False:
+        return False
     if not _fresh_auto_enabled():
         return False
     auto_enabled = _is_fresh_sensitive_prompt(prompt)

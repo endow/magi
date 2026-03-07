@@ -1310,16 +1310,18 @@ def test_run_auto_enables_fresh_mode_for_time_sensitive_prompt(monkeypatch) -> N
     monkeypatch.setattr(main, "_build_effective_prompt", fake_effective)
     monkeypatch.setattr(main, "_run_single_agent", fake_runner)
 
-    response = client.post("/api/magi/run", json={"prompt": "latest gdp numbers", "profile": "cost", "fresh_mode": False})
+    response = client.post("/api/magi/run", json={"prompt": "latest gdp numbers", "profile": "cost"})
     assert response.status_code == 200
 
 
 def test_resolve_fresh_mode_respects_auto_toggle(monkeypatch) -> None:
     monkeypatch.setenv("FRESH_AUTO_MODE", "0")
-    assert main._resolve_fresh_mode("latest ai news", False) is False
+    assert main._resolve_fresh_mode("latest ai news", None) is False
     monkeypatch.setenv("FRESH_AUTO_MODE", "1")
-    assert main._resolve_fresh_mode("latest ai news", False) is True
-    assert main._resolve_fresh_mode("YouTube攻略動画も参考にして", False) is True
+    assert main._resolve_fresh_mode("latest ai news", None) is True
+    assert main._resolve_fresh_mode("YouTube攻略動画も参考にして", None) is True
+    assert main._resolve_fresh_mode("latest ai news", False) is False
+    assert main._resolve_fresh_mode("hello world", True) is True
 
 
 def test_build_effective_prompt_falls_back_without_tavily_key(monkeypatch) -> None:

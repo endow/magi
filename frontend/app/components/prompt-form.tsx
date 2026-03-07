@@ -8,14 +8,14 @@ type PromptFormProps = {
   isConsensusLoading: boolean;
   selectedProfile: string;
   availableProfiles: string[];
-  freshMode: boolean;
+  freshMode: "auto" | "on" | "off";
   isStrictDebate: boolean;
   isUltra: boolean;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onPromptChange: (value: string) => void;
   onPromptKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
   onProfileChange: (value: string) => void;
-  onFreshModeChange: (value: boolean) => void;
+  onFreshModeChange: (value: "auto" | "on" | "off") => void;
 };
 
 export default function PromptForm({
@@ -72,15 +72,18 @@ export default function PromptForm({
             ))}
           </select>
         </label>
-        <label className="flex items-center gap-2 text-xs text-terminal-dim">
-          <input
-            type="checkbox"
-            checked={freshMode}
-            onChange={(event) => onFreshModeChange(event.target.checked)}
+        <label className="text-xs text-terminal-dim">
+          fresh:
+          <select
+            className="ml-2 rounded border border-terminal-border bg-[#02060b] px-2 py-1 text-xs"
+            value={freshMode}
+            onChange={(event) => onFreshModeChange(event.target.value as "auto" | "on" | "off")}
             disabled={isBusy}
-            className="h-3.5 w-3.5 accent-terminal-accent"
-          />
-          fresh mode
+          >
+            <option value="auto">auto</option>
+            <option value="on">force on</option>
+            <option value="off">force off</option>
+          </select>
         </label>
         {isStrictDebate ? (
           <span className="rounded border border-terminal-accent px-2 py-1 text-[11px] text-terminal-accent">
@@ -96,6 +99,7 @@ export default function PromptForm({
       {!selectedProfile ? (
         <p className="text-xs text-terminal-dim">auto: backend router selects profile (local_only/balance/...).</p>
       ) : null}
+      <p className="text-xs text-terminal-dim">fresh=auto: recency/web-needed prompts can fetch web sources automatically.</p>
       <p className="text-xs text-terminal-dim">Enter: submit / Shift+Enter: newline</p>
     </form>
   );

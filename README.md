@@ -278,7 +278,7 @@ URL:
 ## APIメモ
 
 - チャット実行エンドポイント: `POST /api/magi/chat`
-- リクエストボディ: `{ "prompt": "...", "profile": "optional: cost|balance|performance|ultra|performance_preview|ultra_preview|local_only", "fresh_mode": false, "thread_id": "optional-string", "source_urls": ["optional-https://..."] }`
+- リクエストボディ: `{ "prompt": "...", "profile": "optional: cost|balance|performance|ultra|performance_preview|ultra_preview|local_only", "fresh_mode": "optional: true|false|null(=auto)", "thread_id": "optional-string", "source_urls": ["optional-https://..."] }`
 - `thread_id` は UUID を推奨。`chat/run/retry/consensus` では非UUID入力は無視され、新規UUIDで処理されます
 - `source_urls` 未指定でも、`prompt` に含まれる `http/https` URL は backend が自動抽出して取得し、`[Direct URL Evidence]` として注入されます
 - URLアンカー付きリクエスト（`source_urls` 指定 or `prompt` 内URL含有）では、古い履歴混入を避けるため `history_context` をスキップします
@@ -371,8 +371,9 @@ python -m pytest backend/tests -q
   - モデル実行状態（Agent A/B/C の status・latency・error）
 - `Executing` 状態では3ノードを点滅表示
 - Fresh modeトグル:
-  - デフォルトは ON
+  - デフォルトは `auto`（未指定）
   - ON時は backend が Tavily で最新Web証拠を取得（`TAVILY_API_KEY` 設定時）
+  - OFF時は自動判定を無効化（明示的にWeb取得しない）
   - `fresh_mode` 未指定でも、`latest/最新` などの時系列語に加え `YouTube/動画/攻略動画` を含む依頼では自動で有効化される場合があります
   - `general/news` のフォールバックとクエリ拡張により、非ニュース系（ゲーム攻略など）も取得しやすくする
   - Tavily が利用不可、またはキー未設定の場合は通常プロンプトへ自動フォールバック

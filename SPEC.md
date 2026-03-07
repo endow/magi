@@ -31,7 +31,7 @@
 
 #### リクエスト
 ```json
-{ "prompt": "string", "profile": "optional: cost|balance|performance|ultra|performance_preview|ultra_preview|local_only", "fresh_mode": false, "thread_id": "optional-string", "source_urls": ["optional-https://..."] }
+{ "prompt": "string", "profile": "optional: cost|balance|performance|ultra|performance_preview|ultra_preview|local_only", "fresh_mode": "optional: true|false|null(=auto)", "thread_id": "optional-string", "source_urls": ["optional-https://..."] }
 ```
 
 #### レスポンス（成功時）
@@ -356,7 +356,7 @@ OLLAMA_API_BASE=http://ollama:11434
 - 送信中は Chamber ノードと状態バッジで進行状況を表示する
 - **run_id表示＋コピー可能**
 - 実行メタ情報 / ルーティング情報 / フィードバック / モデル実行状態はアコーディオン内に表示する
-- 初期値: profile は **未設定（auto）**、`fresh_mode` は `false`
+- 初期値: profile は **未設定（auto）**、`fresh_mode` は `auto`（未指定）
 - profile未設定（auto）の場合、`POST /api/magi/chat` は `profile` を送らずルーター判定に委譲する
 - 上段に `Local LLM` ノードを表示し、下段3ノード（合議グループ）との関係を可視化する
 - `local_only` 完了時は下段3ノードを `skipped` 表示とし、誤解を避ける

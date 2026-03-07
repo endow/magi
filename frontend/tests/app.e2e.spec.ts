@@ -127,7 +127,7 @@ test("submit with Enter and restore from history", async ({ page }) => {
 
   const promptInput = page.getByRole("textbox", { name: "Type your prompt..." });
   const runDetails = page.locator("details").filter({ hasText: "run details / routing / feedback" }).first();
-  await page.getByRole("checkbox", { name: "fresh mode" }).check();
+  await page.locator('label:has-text("fresh:") select').selectOption("on");
   await promptInput.fill("first prompt");
   await promptInput.press("Enter");
   await runDetails.evaluate((el) => {

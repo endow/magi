@@ -267,7 +267,7 @@ URL:
 ## APIメモ
 
 - チャット実行エンドポイント: `POST /api/magi/chat`
-- リクエストボディ: `{ "prompt": "...", "profile": "optional: cost|balance|performance|ultra|local_only", "fresh_mode": false, "thread_id": "optional-string", "source_urls": ["optional-https://..."] }`
+- リクエストボディ: `{ "prompt": "...", "profile": "optional: cost|balance|performance|ultra|performance_preview|ultra_preview|local_only", "fresh_mode": false, "thread_id": "optional-string", "source_urls": ["optional-https://..."] }`
 - `thread_id` は UUID を推奨。`chat/run/retry/consensus` では非UUID入力は無視され、新規UUIDで処理されます
 - `source_urls` 未指定でも、`prompt` に含まれる `http/https` URL は backend が自動抽出して取得し、`[Direct URL Evidence]` として注入されます
 - URLアンカー付きリクエスト（`source_urls` 指定 or `prompt` 内URL含有）では、古い履歴混入を避けるため `history_context` をスキップします
@@ -280,6 +280,7 @@ URL:
   - `POST /api/magi/retry`
   - `POST /api/magi/consensus`
 - Profilesエンドポイント: `GET /api/magi/profiles`
+- モデル設定ヘルス: `GET /api/magi/health/models`（`preview` 混在や model ID形式を `OK/WARN/ERROR` で確認）
 - 履歴一覧エンドポイント: `GET /api/magi/history?limit=20&offset=0`
 - 履歴詳細エンドポイント: `GET /api/magi/history/{run_id}`
 - スレッド削除エンドポイント: `DELETE /api/magi/history/thread/{thread_id}`
@@ -346,7 +347,7 @@ python -m pytest backend/tests -q
 - Chamber上部に状態バッジ表示（`Routing / Prep`、`Executing`、`Discussion`、`Conclusion`）
 - `Conclusion` 時は経過時間（分/秒）を表示
 - Profileセレクター:
-  - `auto (unset)`, `local_only`, `cost`, `balance`, `performance`, `ultra` を選択可能
+  - `auto (unset)`, `local_only`, `cost`, `balance`, `performance`, `ultra`, `performance_preview`, `ultra_preview` を選択可能
   - デフォルトは `auto (unset)`。初回実行は `profile` を省略し backend routing を使用
   - 選択した profile は chat実行に送信
   - `performance` と `ultra` は strict debate consensus（具体的な相互批判が必要）を有効化

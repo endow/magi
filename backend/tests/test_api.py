@@ -82,6 +82,39 @@ def test_profiles_endpoint_returns_profile_list(monkeypatch) -> None:
     assert body["profiles"] == ["cost", "performance"]
 
 
+def test_models_health_endpoint_reports_ok_for_stable_profiles(monkeypatch) -> None:
+    monkeypatch.setattr(main, "load_config", _profiled_config)
+    response = client.get("/api/magi/health/models")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["errors"] == 0
+    assert body["warnings"] == 0
+
+
+def test_models_health_endpoint_warns_when_preview_model_in_stable_profile(monkeypatch) -> None:
+    cfg = _profiled_config()
+    cfg.profiles["performance"].agents[2] = main.AgentConfig(
+        agent="C",
+        provider="gemini",
+        model="gemini-3-pro-preview",
+    )
+    monkeypatch.setattr(main, "load_config", lambda: cfg)
+
+    response = client.get("/api/magi/health/models")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "warn"
+    assert body["errors"] == 0
+    assert body["warnings"] >= 1
+    assert any(
+        item["source"] == "profiles.performance.agent.C"
+        and item["status"] == "WARN"
+        and item["is_preview"] is True
+        for item in body["items"]
+    )
+
+
 def test_run_rejects_empty_prompt() -> None:
     response = client.post("/api/magi/run", json={"prompt": "   "})
     assert response.status_code == 400

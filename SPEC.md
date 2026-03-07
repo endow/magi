@@ -31,7 +31,7 @@
 
 #### リクエスト
 ```json
-{ "prompt": "string", "profile": "optional: cost|balance|performance|ultra|local_only", "fresh_mode": false, "thread_id": "optional-string", "source_urls": ["optional-https://..."] }
+{ "prompt": "string", "profile": "optional: cost|balance|performance|ultra|performance_preview|ultra_preview|local_only", "fresh_mode": false, "thread_id": "optional-string", "source_urls": ["optional-https://..."] }
 ```
 
 #### レスポンス（成功時）
@@ -45,7 +45,7 @@
     {
       "agent": "A",
       "provider": "openai",
-      "model": "gpt-4.1-mini",
+      "model": "gpt-5.4",
       "text": "...",
       "status": "OK",
       "latency_ms": 1234,
@@ -66,7 +66,7 @@
     {
       "agent": "C",
       "provider": "gemini",
-      "model": "gemini-2.5-flash",
+      "model": "gemini-3-flash-preview",
       "text": "...",
       "status": "OK",
       "latency_ms": 980
@@ -121,9 +121,9 @@ messages = [{"role": "user", "content": prompt}]
 
 - LiteLLM に渡す model は `"provider/model"` 形式：
 
-- `openai/gpt-4.1-mini`
+- `openai/gpt-5.4`
 - `anthropic/claude-sonnet-4-20250514`
-- `gemini/gemini-2.5-flash`
+- `gemini/gemini-3-flash-preview`
 
 ---
 
@@ -196,6 +196,7 @@ messages = [{"role": "user", "content": prompt}]
 ```
 
 - `GET /api/magi/profiles` で利用可能profile一覧を返す。
+- `GET /api/magi/health/models` で設定モデルの健全性（`OK/WARN/ERROR`）を返す。
 - `POST /api/magi/run` で `profile` 未指定時、`request_router.enabled=true` なら入口LLMが分類してprofileを自動選択する。
 - ルーター出力は `intent/complexity/safety/execution_tier/profile/confidence/reason/needs_web/needs_tools/estimated_steps/ambiguity/escalation_hint` のJSONを想定し、`confidence < min_confidence` は `router_rules.default_profile` にフォールバックする。
 - `profiles` は **最低1エージェント** を許容する（`local_only` は1エージェント想定）。

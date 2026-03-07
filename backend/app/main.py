@@ -282,6 +282,24 @@ class ProfilesResponse(BaseModel):
     profile_agents: dict[str, list[AgentConfig]]
 
 
+class ModelHealthItem(BaseModel):
+    source: str
+    provider: str
+    model: str
+    full_model: str
+    is_preview: bool
+    status: Literal["OK", "WARN", "ERROR"]
+    message: str | None = None
+
+
+class ModelHealthResponse(BaseModel):
+    status: Literal["ok", "warn", "error"]
+    checked: int
+    errors: int
+    warnings: int
+    items: list[ModelHealthItem]
+
+
 class HistoryItem(BaseModel):
     run_id: str
     thread_id: str
@@ -495,6 +513,99 @@ def load_config() -> AppConfig:
 def _validate_profile(profile: ProfileConfig) -> None:
     if len(profile.agents) < 1:
         raise ValueError("each profile must define at least 1 agent")
+
+
+def _is_preview_model_name(model: str) -> bool:
+    lowered = model.strip().lower()
+    return any(marker in lowered for marker in ("preview", "beta", "experimental"))
+
+
+def _collect_config_model_refs(config: AppConfig) -> list[tuple[str, str, str]]:
+    refs: list[tuple[str, str, str]] = []
+
+    if config.request_router:
+        refs.append(("request_router", config.request_router.provider, config.request_router.model))
+
+    if config.history_context and config.history_context.provider and config.history_context.model:
+        refs.append(("history_context", config.history_context.provider, config.history_context.model))
+
+    if config.profiles:
+        for profile_name, profile in config.profiles.items():
+            for agent in profile.agents:
+                refs.append((f"profiles.{profile_name}.agent.{agent.agent}", agent.provider, agent.model))
+            if profile.consensus.strategy == "single_model":
+                refs.append(
+                    (
+                        f"profiles.{profile_name}.consensus",
+                        _safe_str(profile.consensus.provider),
+                        _safe_str(profile.consensus.model),
+                    )
+                )
+        return refs
+
+    if config.agents:
+        for agent in config.agents:
+            refs.append((f"agents.{agent.agent}", agent.provider, agent.model))
+    if config.consensus and config.consensus.strategy == "single_model":
+        refs.append(("consensus", _safe_str(config.consensus.provider), _safe_str(config.consensus.model)))
+    return refs
+
+
+def _check_config_models(config: AppConfig) -> ModelHealthResponse:
+    items: list[ModelHealthItem] = []
+
+    for source, provider_raw, model_raw in _collect_config_model_refs(config):
+        provider = _safe_str(provider_raw)
+        model = _safe_str(model_raw)
+        full_model = f"{provider}/{model}" if provider and model else ""
+        is_preview = _is_preview_model_name(model)
+        status = "OK"
+        notes: list[str] = []
+
+        if not provider or not model:
+            status = "ERROR"
+            notes.append("provider/model is required")
+
+        if status != "ERROR" and re.search(r"\s", model):
+            status = "ERROR"
+            notes.append("model must not include whitespace")
+
+        if status != "ERROR" and model.startswith(f"{provider}/"):
+            if status == "OK":
+                status = "WARN"
+            notes.append("model should omit provider prefix in config (keep only model id)")
+
+        profile_match = re.match(r"^profiles\.([^.]+)\.", source)
+        if profile_match:
+            profile_name = profile_match.group(1)
+            is_preview_profile = profile_name.endswith("_preview")
+            if is_preview and not is_preview_profile:
+                if status == "OK":
+                    status = "WARN"
+                notes.append("preview model is configured in non-preview profile")
+
+        items.append(
+            ModelHealthItem(
+                source=source,
+                provider=provider,
+                model=model,
+                full_model=full_model,
+                is_preview=is_preview,
+                status=status,
+                message="; ".join(notes) if notes else None,
+            )
+        )
+
+    errors = sum(1 for item in items if item.status == "ERROR")
+    warnings = sum(1 for item in items if item.status == "WARN")
+    overall = "error" if errors else ("warn" if warnings else "ok")
+    return ModelHealthResponse(
+        status=overall,
+        checked=len(items),
+        errors=errors,
+        warnings=warnings,
+        items=items,
+    )
 
 
 def _resolve_profile(config: AppConfig, requested_profile: str | None) -> tuple[str, ProfileConfig]:
@@ -4033,6 +4144,15 @@ async def _is_local_draft_sufficient(
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/api/magi/health/models", response_model=ModelHealthResponse)
+async def models_health() -> ModelHealthResponse:
+    try:
+        config = load_config()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"invalid config: {exc}") from exc
+    return _check_config_models(config)
 
 
 @app.get("/api/magi/profiles", response_model=ProfilesResponse)

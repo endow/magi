@@ -312,6 +312,54 @@ def test_chat_endpoint_uses_local_only_result_when_consensus_is_immediate(monkey
     assert body["reply"] == "承知しました。こちらが回答です。"
 
 
+def test_chat_escalates_local_draft_to_balance_when_web_required(monkeypatch) -> None:
+    config = _profiled_config_with_router()
+    config.profiles["balance"] = main.ProfileConfig(
+        agents=[
+            main.AgentConfig(agent="A", provider="openai", model="gpt-4.1"),
+            main.AgentConfig(agent="B", provider="anthropic", model="claude-sonnet-4-20250514"),
+            main.AgentConfig(agent="C", provider="gemini", model="gemini-2.5-flash"),
+        ],
+        consensus=main.ConsensusConfig(strategy="peer_vote", min_ok_results=2, rounds=1),
+        timeout_seconds=20,
+    )
+    monkeypatch.setattr(main, "load_config", lambda: config)
+    monkeypatch.setattr(main, "_save_run_history", lambda *args, **kwargs: None)
+
+    async def fake_runner(agent_config, prompt, timeout_seconds):
+        return main.AgentResult(
+            agent=agent_config.agent,
+            provider=agent_config.provider,
+            model=agent_config.model,
+            text=f"answer-{agent_config.agent}",
+            status="OK",
+            latency_ms=30,
+        )
+
+    async def fake_consensus(config_obj, prompt, results):
+        return main.ConsensusResult(
+            provider="magi",
+            model="peer_vote_r1",
+            text="Final answer:\n最新情報です。",
+            status="OK",
+            latency_ms=40,
+        )
+
+    async def force_sufficient(prompt, draft, judge_agent, timeout_seconds):
+        return True, "test_force_local_accept"
+
+    monkeypatch.setattr(main, "_run_single_agent", fake_runner)
+    monkeypatch.setattr(main, "_run_consensus", fake_consensus)
+    monkeypatch.setattr(main, "_is_local_draft_sufficient", force_sufficient)
+
+    response = client.post("/api/magi/chat", json={"prompt": "latest AI news を要約して"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["profile"] == "balance"
+    assert len(body["results"]) == 3
+    assert "Escalation: WEB_REQUIRED -> balance" in (body.get("routing", {}).get("reason") or "")
+
+
 def test_chat_first_turn_skips_history_context(monkeypatch) -> None:
     monkeypatch.setattr(main, "load_config", _profiled_config_with_router)
     monkeypatch.setattr(main, "_save_run_history", lambda *args, **kwargs: None)
@@ -1801,6 +1849,43 @@ def test_policy_stats_ema_is_used_when_configured() -> None:
     assert abs(float(updated["avg_reward"]) - 0.2) < 1e-9
 
 
+def test_extract_route_decision_parses_escalation_fields() -> None:
+    payload = (
+        '{"intent":"qa","complexity":"medium","safety":"low","execution_tier":"local",'
+        '"profile":"local_only","confidence":78,"reason":"ok","needs_web":false,"needs_tools":true,'
+        '"estimated_steps":4,"ambiguity":0.22,"escalation_hint":"retries>=2"}'
+    )
+    decision = main._extract_route_decision(payload, "balance")
+    assert decision.profile == "local_only"
+    assert decision.confidence == 78
+    assert decision.needs_web is False
+    assert decision.needs_tools is True
+    assert decision.estimated_steps == 4
+    assert abs(float(decision.ambiguity or 0.0) - 0.22) < 1e-9
+    assert decision.escalation_hint == "retries>=2"
+
+
+def test_evaluate_escalation_web_required() -> None:
+    decision = main._evaluate_escalation(
+        state={
+            "needs_web": True,
+            "local_confidence": 0.9,
+            "retry_count": 0,
+            "tool_call_count": 0,
+            "elapsed_ms": 100,
+            "estimated_remaining_steps": 0,
+            "has_conflict": False,
+        },
+        policy=main._default_escalation_policy(),
+        available_profiles={"local_only", "balance"},
+        current_profile="local_only",
+    )
+    assert decision["action"] == "escalate"
+    assert decision["profile"] == "balance"
+    assert decision["enable_fresh_mode"] is True
+    assert decision["reason_code"] == "WEB_REQUIRED"
+
+
 def test_routing_feedback_affects_next_auto_route(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("MAGI_DB_PATH", str(tmp_path / "magi-routing-integration.db"))
     main._init_db()
@@ -1901,6 +1986,67 @@ def test_routing_signal_updates_implicit_reward(monkeypatch, tmp_path) -> None:
     items = events.json()["items"]
     assert items
     assert items[0]["implicit_signals"].get("copy_result") == 1
+
+
+def test_run_escalates_local_only_to_balance_on_low_confidence(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("MAGI_DB_PATH", str(tmp_path / "magi-routing-escalation.db"))
+    main._init_db()
+
+    config = _profiled_config_with_router(enabled=True)
+    config.profiles["balance"] = main.ProfileConfig(
+        agents=[
+            main.AgentConfig(agent="A", provider="openai", model="gpt-4.1"),
+            main.AgentConfig(agent="B", provider="anthropic", model="claude-sonnet-4-20250514"),
+            main.AgentConfig(agent="C", provider="gemini", model="gemini-2.5-flash"),
+        ],
+        consensus=main.ConsensusConfig(strategy="peer_vote", min_ok_results=2, rounds=1),
+        timeout_seconds=20,
+    )
+    monkeypatch.setattr(main, "load_config", lambda: config)
+
+    async def fake_route_profile(config_obj, prompt):
+        return (
+            "local_only",
+            {
+                "intent": "qa",
+                "complexity": "medium",
+                "safety": "low",
+                "execution_tier": "local",
+                "language": "en",
+                "prompt_length": len(prompt),
+                "needs_web": False,
+                "needs_tools": True,
+                "estimated_steps": 2,
+                "ambiguity": 0.2,
+            },
+            {
+                "chosen_profile": "local_only",
+                "candidates": {"local_only": {"base_score": 1.0, "policy_weight": 0.0, "final_score": 1.0}},
+                "policy_key": "intent=qa|complexity=medium|lang=en",
+                "router_confidence": 40,
+                "reason": "router",
+            },
+        )
+
+    async def fake_runner(agent_config, prompt, timeout_seconds):
+        return main.AgentResult(
+            agent=agent_config.agent,
+            provider=agent_config.provider,
+            model=agent_config.model,
+            text=f"ok-{agent_config.agent}",
+            status="OK",
+            latency_ms=100,
+        )
+
+    monkeypatch.setattr(main, "_route_profile_with_trace", fake_route_profile)
+    monkeypatch.setattr(main, "_run_single_agent", fake_runner)
+
+    response = client.post("/api/magi/run", json={"prompt": "design a migration plan"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["profile"] == "balance"
+    assert len(body["results"]) == 3
+    assert "Escalation: LOW_CONFIDENCE -> balance" in (body.get("routing", {}).get("reason") or "")
 
 
 def test_single_model_consensus_sets_error_code_for_insufficient_results() -> None:

@@ -1,4 +1,4 @@
-# MAGI v1.3 実装仕様（現行）
+# MAGI v1.4 実装仕様（現行）
 
 本書は、MVPから拡張された現行版「MAGI」の実装仕様を定義する。  
 実装・改修時は、本仕様を正とする。
@@ -22,12 +22,12 @@
 
 ---
 
-## 要件（v1.3）
+## 要件（v1.4）
 
 ### 1) バックエンド
 
 - `POST /api/magi/run` を実装する。
-- `POST /api/magi/chat` を実装する（v1.3 のUI主要導線）。
+- `POST /api/magi/chat` を実装する（v1.4 のUI主要導線）。
 
 #### リクエスト
 ```json
@@ -197,11 +197,11 @@ messages = [{"role": "user", "content": prompt}]
 
 - `GET /api/magi/profiles` で利用可能profile一覧を返す。
 - `POST /api/magi/run` で `profile` 未指定時、`request_router.enabled=true` なら入口LLMが分類してprofileを自動選択する。
-- ルーター出力は `intent/complexity/safety/execution_tier/profile/confidence/reason` のJSONを想定し、`confidence < min_confidence` は `router_rules.default_profile` にフォールバックする。
+- ルーター出力は `intent/complexity/safety/execution_tier/profile/confidence/reason/needs_web/needs_tools/estimated_steps/ambiguity/escalation_hint` のJSONを想定し、`confidence < min_confidence` は `router_rules.default_profile` にフォールバックする。
 - `profiles` は **最低1エージェント** を許容する（`local_only` は1エージェント想定）。
 - Router学習（MVP）:
   - `routing_events` に router入出力・実行結果・user feedback を保存する
-  - `routing_policy` に key別の profile weight/stats を保存する
+  - `routing_policy` に key別の profile weight/stats と昇格しきい値を保存する
   - 最終profileは `base_score + policy_weight` で選択する
   - feedback / 実行結果を契機に `weight += alpha * reward` で更新し、`[weight_min, weight_max]` でclampする
 - `history_context.strategy=embedding` の場合、履歴類似検索は外部埋め込みモデルを使う（失敗時は lexical にフォールバック）。
@@ -286,7 +286,7 @@ OLLAMA_API_BASE=http://ollama:11434
 - 備考:
   - `local_only` では再合議せず、受け取ったAgent結果を consensus として返す
 
-### ルーティング学習API（v1.3）
+### ルーティング学習API（v1.4）
 
 - `POST /api/magi/routing/feedback`
   - body: `{ thread_id, request_id, rating: -1|0|1, reason? }`
@@ -297,7 +297,7 @@ OLLAMA_API_BASE=http://ollama:11434
   - ルーティングイベントのデバッグ参照
 - `POST /api/magi/routing/signal`
   - body: `{ thread_id, request_id, signal }`
-  - `signal`: `retry | copy_result | consensus_recalc | history_helpful | history_not_helpful`
+  - `signal`: `retry | copy_result | consensus_recalc | history_helpful | history_not_helpful | escalated_after_low_confidence | escalated_after_tool_failure | escalated_after_timeout | escalated_after_conflict | escalated_after_user_rephrase | local_completed_without_escalation | local_failed_then_balance_succeeded | balance_failed_then_performance_succeeded`
   - 暗黙シグナルを `implicit_reward` として学習報酬に加算する
 
 ---
@@ -420,6 +420,21 @@ OLLAMA_API_BASE=http://ollama:11434
 - フロントUIを chat mode 一本化（interaction切替を廃止）
 - 主導線を `POST /api/magi/chat` に統一
 - 実行メタ情報・ルーティング・フィードバック・モデル実行状態をアコーディオンへ集約
+
+### v1.4（staged escalation gate）
+
+- 入口ルーターの返却項目を拡張:
+  - `needs_web` / `needs_tools` / `estimated_steps` / `ambiguity` / `escalation_hint`
+- `routing_policy` を拡張:
+  - profile重みに加えて昇格しきい値を保持
+  - 例: `max_local_steps`, `min_local_confidence`, `max_retry_before_escalation`, `escalate_to_profile`
+- executor側に `evaluate_escalation(...)` を導入:
+  - `local_only` 実行後に `stay/escalate` を判定
+  - `WEB_REQUIRED` などで必要時のみ `balance` へ昇格
+- `routing/signal` を拡張:
+  - 昇格成功/失敗の暗黙シグナルを記録して学習報酬へ反映
+- UI/レスポンス:
+  - `routing.reason` に `Escalation: <REASON> -> <profile>` を含めて可観測化
 
 ---
 

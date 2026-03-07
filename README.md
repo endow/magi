@@ -1,21 +1,21 @@
-# MAGI v1.3（ローカル利用）
+# MAGI v1.4（ローカル利用）
 
 ![MAGI Command Chamber](docs/images/magi-command-chamber.png)
 
 MAGI は、単一プロンプトを入口ルーターで自動振り分けし、軽量タスクは `local_only`（ローカル1モデル）、それ以外は複数LLMの並列実行と合議で処理するローカル実行向けアプリです。  
-v1.3 では UI を `chat` 専用に整理し、対話フローを一本化しました。Fresh mode（Web最新情報の補強）、SQLiteへの履歴永続化、`thread_id` ベースの会話継続は継続して利用できます。
+v1.4 では「初期ルーティング + 段階的昇格ゲート」を導入し、`local_only` から必要時のみ `balance` へ昇格できるようにしました。Fresh mode（Web最新情報の補強）、SQLiteへの履歴永続化、`thread_id` ベースの会話継続は継続して利用できます。
 
-## v1.3 ハイライト
+## v1.4 ハイライト
 
-- Chat mode only:
-  - `interaction` 切替を撤廃し、`/api/magi/chat` ベースの対話フローに統一
-  - 1ターンごとの合成回答をチャットとして継続表示
-- UI整理:
-  - 実行メタ情報・ルーティング・フィードバック・モデル実行状態をアコーディオンへ集約
-  - Chamberの状態表示（Routing / Executing / Discussion / Conclusion）を維持
-- v1.2機能の継続:
-  - routing learning（`routing_events` / `routing_policy`）
-  - `thread_id` UUID運用
+- 段階的昇格ゲート:
+  - `run/chat` で `local_only` 実行後に `evaluate_escalation(...)` を評価
+  - 条件一致時のみ `balance` へ昇格（例: `WEB_REQUIRED`, `LOW_CONFIDENCE`）
+- ルーター出力の拡張:
+  - `needs_web`, `needs_tools`, `estimated_steps`, `ambiguity`, `escalation_hint`
+- routing policy 拡張:
+  - profile重みだけでなく、昇格しきい値（`max_local_steps` など）を保持
+- 既存機能の継続:
+  - chat 導線 / routing learning / `thread_id` UUID運用
   - tokens / cost / error_code の可視化
 
 ## 構成
@@ -245,13 +245,14 @@ URL:
 
 `request_router`（任意）:
 - `enabled=true` のとき、`POST /api/magi/run` で `profile` 未指定の場合のみ入口LLMで自動ルーティング
-- 入口LLMは JSON (`intent`, `complexity`, `safety`, `execution_tier`, `profile`, `confidence`, `reason`) を返し、`min_confidence` 未満は `router_rules.default_profile` にフォールバック
+- 入口LLMは JSON (`intent`, `complexity`, `safety`, `execution_tier`, `profile`, `confidence`, `reason`, `needs_web`, `needs_tools`, `estimated_steps`, `ambiguity`, `escalation_hint`) を返し、`min_confidence` 未満は `router_rules.default_profile` にフォールバック
 - 例: ローカル Ollama で `provider=ollama`, `model=qwen2.5:7b-instruct-q4_K_M`
 - 現行ルール: `translation|rewrite|summarize_short` + `complexity=low` + `safety=low` + `execution_tier=local` は `local_only` へ、それ以外は `balance`
 
 `routing_learning`（任意）:
 - ルーティングイベントをSQLiteに保存し、`feedback` と実行結果から profile 重みを更新
 - 最終スコアは `base_score + policy_weight`
+- `routing_policy` には profile重みに加えて昇格しきい値（`max_local_steps`, `min_local_confidence`, `max_retry_before_escalation`, `max_tool_calls_before_escalation`, `max_elapsed_ms_before_escalation`, `escalate_on_web_need`, `escalate_on_conflict`, `escalate_to_profile`）を保持
 - 主要設定: `alpha`, `weight_min`, `weight_max`, `latency_threshold_ms`, `cost_threshold`
 
 履歴の扱い:
@@ -298,10 +299,15 @@ URL:
   - router input/output、実行結果、user rating、implicit signals を保存
 - `routing_policy` テーブル:
   - keyごとの profile weight と統計（`n`, `avg_reward`）を保存
+  - 昇格しきい値（`max_local_steps` など）を保存
 - reward:
   - `rating(+1/-1)` + `implicit_reward`、`error`、`latency_threshold_ms`、`cost_threshold` で計算
 - 更新式:
   - `weight += alpha * reward`（`weight_min/weight_max` でclamp）
+- signal:
+  - `retry | copy_result | consensus_recalc | history_helpful | history_not_helpful`
+  - `escalated_after_low_confidence | escalated_after_tool_failure | escalated_after_timeout | escalated_after_conflict`
+  - `escalated_after_user_rephrase | local_completed_without_escalation | local_failed_then_balance_succeeded | balance_failed_then_performance_succeeded`
 
 ### 新API curl例
 

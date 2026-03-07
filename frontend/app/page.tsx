@@ -107,7 +107,7 @@ type ChatMessage = {
 
 const RAW_API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 const MAX_PROMPT_LENGTH = 4000;
-const PHASE_VERSION = "v1.3";
+const PHASE_VERSION = "v1.4";
 const DEFAULT_OLLAMA_SYSTEM_PROMPT = "あなたは「MAGI」という名前のAIエージェントです。";
 
 function resolveApiBaseUrl(): string {

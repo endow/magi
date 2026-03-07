@@ -124,6 +124,11 @@ class RouteDecision(BaseModel):
     complexity: str | None = None
     safety: str | None = None
     execution_tier: str | None = None
+    needs_web: bool | None = None
+    needs_tools: bool | None = None
+    estimated_steps: int | None = None
+    ambiguity: float | None = None
+    escalation_hint: str | None = None
 
 
 class AppConfig(BaseModel):
@@ -316,6 +321,14 @@ class RoutingSignalRequest(BaseModel):
         "consensus_recalc",
         "history_helpful",
         "history_not_helpful",
+        "escalated_after_low_confidence",
+        "escalated_after_tool_failure",
+        "escalated_after_timeout",
+        "escalated_after_conflict",
+        "escalated_after_user_rephrase",
+        "local_completed_without_escalation",
+        "local_failed_then_balance_succeeded",
+        "balance_failed_then_performance_succeeded",
     ]
 
 
@@ -331,6 +344,7 @@ class RoutingPolicyResponse(BaseModel):
     key: str
     weights: dict[str, float]
     stats: dict[str, float | int]
+    escalation_policy: dict[str, Any] = Field(default_factory=dict)
     updated_at: str | None = None
 
 
@@ -373,7 +387,7 @@ async def app_lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="MAGI v1.2 Backend", lifespan=app_lifespan)
+app = FastAPI(title="MAGI v1.4 Backend", lifespan=app_lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -532,6 +546,33 @@ def _safe_str_list(value: Any) -> list[str]:
     return []
 
 
+def _coerce_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    text = _safe_str(value).lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _coerce_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _coerce_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
 def _build_routing_reason_display(
     selected_profile: str,
     router_input: dict[str, Any],
@@ -576,7 +617,7 @@ def _build_router_input_snapshot(
     complexity = _safe_str(decision.complexity if decision else None).lower() or "medium"
     safety = _safe_str(decision.safety if decision else None).lower() or ("low" if _is_low_safety_prompt(prompt) else "medium")
     execution_tier = _safe_str(decision.execution_tier if decision else None).lower() or "cloud"
-    return {
+    snapshot: dict[str, Any] = {
         "intent": intent,
         "complexity": complexity,
         "safety": safety,
@@ -585,6 +626,14 @@ def _build_router_input_snapshot(
         "prompt_length": len(prompt.strip()),
         "fallback_profile": fallback_profile or "",
     }
+    if decision:
+        snapshot["needs_web"] = bool(decision.needs_web)
+        snapshot["needs_tools"] = bool(decision.needs_tools)
+        snapshot["estimated_steps"] = max(1, int(decision.estimated_steps or 1))
+        snapshot["ambiguity"] = max(0.0, min(1.0, float(decision.ambiguity or 0.0)))
+        if decision.escalation_hint:
+            snapshot["escalation_hint"] = decision.escalation_hint
+    return snapshot
 
 
 def _routing_policy_key_from_input(router_input: dict[str, Any]) -> str:
@@ -846,6 +895,11 @@ def _extract_route_decision(text: str, fallback_profile: str) -> RouteDecision:
     complexity = _safe_str(payload.get("complexity")) or None
     safety = _safe_str(payload.get("safety")) or None
     execution_tier = _safe_str(payload.get("execution_tier")) or None
+    needs_web = _coerce_bool(payload.get("needs_web"), default=False)
+    needs_tools = _coerce_bool(payload.get("needs_tools"), default=False)
+    estimated_steps = max(1, _coerce_int(payload.get("estimated_steps"), 1))
+    ambiguity = max(0.0, min(1.0, _coerce_float(payload.get("ambiguity"), 0.0)))
+    escalation_hint = _safe_str(payload.get("escalation_hint")) or None
     return RouteDecision(
         profile=profile,
         confidence=confidence,
@@ -854,6 +908,11 @@ def _extract_route_decision(text: str, fallback_profile: str) -> RouteDecision:
         complexity=complexity,
         safety=safety,
         execution_tier=execution_tier,
+        needs_web=needs_web,
+        needs_tools=needs_tools,
+        estimated_steps=estimated_steps,
+        ambiguity=ambiguity,
+        escalation_hint=escalation_hint,
     )
 
 
@@ -939,6 +998,7 @@ async def _route_profile_with_trace(
                 "candidates": candidates,
                 "policy_key": policy_key,
                 "reason": "fast_path",
+                "router_confidence": decision.confidence,
             },
         )
 
@@ -952,10 +1012,15 @@ async def _route_profile_with_trace(
         '- execution_tier: one of ["local","cloud"]\n'
         f'- profile: one of {sorted(available_profiles)}\n'
         "- confidence: integer 0-100 (not decimal)\n"
+        "- needs_web: boolean\n"
+        "- needs_tools: boolean\n"
+        "- estimated_steps: integer >= 1\n"
+        "- ambiguity: float 0.0-1.0\n"
+        "- escalation_hint: short string (optional)\n"
         "Return exactly this shape:\n"
-        '{"intent":"qa","complexity":"low","safety":"low","execution_tier":"local","profile":"cost","confidence":85,"reason":"..."}\n'
+        '{"intent":"qa","complexity":"low","safety":"low","execution_tier":"local","profile":"cost","confidence":85,"reason":"...","needs_web":false,"needs_tools":false,"estimated_steps":1,"ambiguity":0.1,"escalation_hint":"optional"}\n'
         "If classification is clear, confidence should be >= 80.\n"
-        "No markdown, no extra keys.\n\n"
+        "No markdown.\n\n"
         f"User request:\n{prompt}"
     )
 
@@ -1001,6 +1066,7 @@ async def _route_profile_with_trace(
                         "candidates": candidates,
                         "policy_key": policy_key,
                         "reason": reason,
+                        "router_confidence": decision.confidence,
                     },
                 )
 
@@ -1019,6 +1085,7 @@ async def _route_profile_with_trace(
                     "candidates": candidates,
                     "policy_key": policy_key,
                     "reason": reason,
+                    "router_confidence": decision.confidence,
                 },
             )
         except asyncio.TimeoutError:
@@ -2297,7 +2364,15 @@ def _init_db() -> None:
                 key TEXT NOT NULL UNIQUE,
                 weights_json TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
-                stats_json TEXT NOT NULL
+                stats_json TEXT NOT NULL,
+                max_local_steps INTEGER NOT NULL DEFAULT 3,
+                min_local_confidence REAL NOT NULL DEFAULT 0.72,
+                max_retry_before_escalation INTEGER NOT NULL DEFAULT 1,
+                max_tool_calls_before_escalation INTEGER NOT NULL DEFAULT 2,
+                max_elapsed_ms_before_escalation INTEGER NOT NULL DEFAULT 20000,
+                escalate_on_web_need INTEGER NOT NULL DEFAULT 1,
+                escalate_on_conflict INTEGER NOT NULL DEFAULT 1,
+                escalate_to_profile TEXT NOT NULL DEFAULT 'balance'
             );
             CREATE INDEX IF NOT EXISTS idx_routing_events_thread_id ON routing_events(thread_id);
             CREATE INDEX IF NOT EXISTS idx_routing_events_request_id ON routing_events(request_id);
@@ -2357,6 +2432,23 @@ def _ensure_routing_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE routing_events ADD COLUMN implicit_reward REAL NOT NULL DEFAULT 0.0")
     if "implicit_signals_json" not in event_columns:
         conn.execute("ALTER TABLE routing_events ADD COLUMN implicit_signals_json TEXT NOT NULL DEFAULT '{}'")
+    policy_columns = {row["name"] for row in conn.execute("PRAGMA table_info(routing_policy)").fetchall()}
+    if "max_local_steps" not in policy_columns:
+        conn.execute("ALTER TABLE routing_policy ADD COLUMN max_local_steps INTEGER NOT NULL DEFAULT 3")
+    if "min_local_confidence" not in policy_columns:
+        conn.execute("ALTER TABLE routing_policy ADD COLUMN min_local_confidence REAL NOT NULL DEFAULT 0.72")
+    if "max_retry_before_escalation" not in policy_columns:
+        conn.execute("ALTER TABLE routing_policy ADD COLUMN max_retry_before_escalation INTEGER NOT NULL DEFAULT 1")
+    if "max_tool_calls_before_escalation" not in policy_columns:
+        conn.execute("ALTER TABLE routing_policy ADD COLUMN max_tool_calls_before_escalation INTEGER NOT NULL DEFAULT 2")
+    if "max_elapsed_ms_before_escalation" not in policy_columns:
+        conn.execute("ALTER TABLE routing_policy ADD COLUMN max_elapsed_ms_before_escalation INTEGER NOT NULL DEFAULT 20000")
+    if "escalate_on_web_need" not in policy_columns:
+        conn.execute("ALTER TABLE routing_policy ADD COLUMN escalate_on_web_need INTEGER NOT NULL DEFAULT 1")
+    if "escalate_on_conflict" not in policy_columns:
+        conn.execute("ALTER TABLE routing_policy ADD COLUMN escalate_on_conflict INTEGER NOT NULL DEFAULT 1")
+    if "escalate_to_profile" not in policy_columns:
+        conn.execute("ALTER TABLE routing_policy ADD COLUMN escalate_to_profile TEXT NOT NULL DEFAULT 'balance'")
 
 
 def _ensure_agent_result_columns(conn: sqlite3.Connection) -> None:
@@ -2437,6 +2529,95 @@ def _routing_clamp_range(config: AppConfig | None = None) -> tuple[float, float]
 
 def _clamp_weight(value: float, lower: float, upper: float) -> float:
     return max(lower, min(upper, value))
+
+
+def _default_escalation_policy() -> dict[str, Any]:
+    return {
+        "max_local_steps": 3,
+        "min_local_confidence": 0.72,
+        "max_retry_before_escalation": 1,
+        "max_tool_calls_before_escalation": 2,
+        "max_elapsed_ms_before_escalation": 20000,
+        "escalate_on_web_need": True,
+        "escalate_on_conflict": True,
+        "escalate_to_profile": "balance",
+    }
+
+
+def _normalize_escalation_policy(policy: dict[str, Any] | None) -> dict[str, Any]:
+    base = _default_escalation_policy()
+    raw = policy or {}
+    normalized = {
+        "max_local_steps": max(1, _coerce_int(raw.get("max_local_steps"), base["max_local_steps"])),
+        "min_local_confidence": max(0.0, min(1.0, _coerce_float(raw.get("min_local_confidence"), base["min_local_confidence"]))),
+        "max_retry_before_escalation": max(0, _coerce_int(raw.get("max_retry_before_escalation"), base["max_retry_before_escalation"])),
+        "max_tool_calls_before_escalation": max(0, _coerce_int(raw.get("max_tool_calls_before_escalation"), base["max_tool_calls_before_escalation"])),
+        "max_elapsed_ms_before_escalation": max(1, _coerce_int(raw.get("max_elapsed_ms_before_escalation"), base["max_elapsed_ms_before_escalation"])),
+        "escalate_on_web_need": _coerce_bool(raw.get("escalate_on_web_need"), default=bool(base["escalate_on_web_need"])),
+        "escalate_on_conflict": _coerce_bool(raw.get("escalate_on_conflict"), default=bool(base["escalate_on_conflict"])),
+        "escalate_to_profile": _safe_str(raw.get("escalate_to_profile")) or str(base["escalate_to_profile"]),
+    }
+    return normalized
+
+
+def _extract_escalation_policy_from_row(row: sqlite3.Row | None) -> dict[str, Any]:
+    if row is None:
+        return _default_escalation_policy()
+    policy = {
+        "max_local_steps": row["max_local_steps"],
+        "min_local_confidence": row["min_local_confidence"],
+        "max_retry_before_escalation": row["max_retry_before_escalation"],
+        "max_tool_calls_before_escalation": row["max_tool_calls_before_escalation"],
+        "max_elapsed_ms_before_escalation": row["max_elapsed_ms_before_escalation"],
+        "escalate_on_web_need": row["escalate_on_web_need"],
+        "escalate_on_conflict": row["escalate_on_conflict"],
+        "escalate_to_profile": row["escalate_to_profile"],
+    }
+    return _normalize_escalation_policy(policy)
+
+
+def _evaluate_escalation(
+    state: dict[str, Any],
+    policy: dict[str, Any],
+    available_profiles: set[str],
+    current_profile: str,
+) -> dict[str, Any]:
+    normalized_policy = _normalize_escalation_policy(policy)
+    target = _safe_str(normalized_policy.get("escalate_to_profile")).lower()
+    if target not in available_profiles or target == current_profile:
+        target = "balance" if "balance" in available_profiles and current_profile != "balance" else ""
+    if not target:
+        return {"action": "stay"}
+
+    needs_web = _coerce_bool(state.get("needs_web"), default=False)
+    if needs_web and bool(normalized_policy["escalate_on_web_need"]):
+        return {"action": "escalate", "profile": target, "enable_fresh_mode": True, "reason_code": "WEB_REQUIRED"}
+
+    local_confidence = max(0.0, min(1.0, _coerce_float(state.get("local_confidence"), 1.0)))
+    if local_confidence < float(normalized_policy["min_local_confidence"]):
+        return {"action": "escalate", "profile": target, "enable_fresh_mode": False, "reason_code": "LOW_CONFIDENCE"}
+
+    retry_count = max(0, _coerce_int(state.get("retry_count"), 0))
+    if retry_count > int(normalized_policy["max_retry_before_escalation"]):
+        return {"action": "escalate", "profile": target, "enable_fresh_mode": False, "reason_code": "TOOL_FAILURE"}
+
+    tool_call_count = max(0, _coerce_int(state.get("tool_call_count"), 0))
+    if tool_call_count > int(normalized_policy["max_tool_calls_before_escalation"]):
+        return {"action": "escalate", "profile": target, "enable_fresh_mode": False, "reason_code": "MULTI_STEP_OVERFLOW"}
+
+    elapsed_ms = max(0, _coerce_int(state.get("elapsed_ms"), 0))
+    if elapsed_ms > int(normalized_policy["max_elapsed_ms_before_escalation"]):
+        return {"action": "escalate", "profile": target, "enable_fresh_mode": False, "reason_code": "LATENCY_BREACH"}
+
+    estimated_remaining_steps = max(0, _coerce_int(state.get("estimated_remaining_steps"), 0))
+    if estimated_remaining_steps > int(normalized_policy["max_local_steps"]):
+        return {"action": "escalate", "profile": target, "enable_fresh_mode": False, "reason_code": "MULTI_STEP_OVERFLOW"}
+
+    has_conflict = _coerce_bool(state.get("has_conflict"), default=False)
+    if has_conflict and bool(normalized_policy["escalate_on_conflict"]):
+        return {"action": "escalate", "profile": target, "enable_fresh_mode": False, "reason_code": "ANSWER_CONFLICT"}
+
+    return {"action": "stay"}
 
 
 def _build_execution_result_snapshot(
@@ -2558,33 +2739,91 @@ def _get_routing_policy(key: str) -> dict[str, Any]:
     _init_db()
     with _get_db_connection() as conn:
         row = conn.execute(
-            "SELECT key, weights_json, stats_json, updated_at FROM routing_policy WHERE key = ?",
+            """
+            SELECT key, weights_json, stats_json, updated_at,
+                   max_local_steps, min_local_confidence, max_retry_before_escalation,
+                   max_tool_calls_before_escalation, max_elapsed_ms_before_escalation,
+                   escalate_on_web_need, escalate_on_conflict, escalate_to_profile
+            FROM routing_policy
+            WHERE key = ?
+            """,
             (key,),
         ).fetchone()
     if row is None:
-        return {"key": key, "weights": {}, "stats": _default_policy_stats(), "updated_at": None}
+        return {
+            "key": key,
+            "weights": {},
+            "stats": _default_policy_stats(),
+            "escalation_policy": _default_escalation_policy(),
+            "updated_at": None,
+        }
     return {
         "key": str(row["key"]),
         "weights": _normalize_policy_weights(_json_load_dict(row["weights_json"])),
         "stats": _json_load_dict(row["stats_json"]) or _default_policy_stats(),
+        "escalation_policy": _extract_escalation_policy_from_row(row),
         "updated_at": row["updated_at"],
     }
 
 
-def _upsert_routing_policy(key: str, weights: dict[str, float], stats: dict[str, float | int]) -> None:
+def _upsert_routing_policy(
+    key: str,
+    weights: dict[str, float],
+    stats: dict[str, float | int],
+    escalation_policy: dict[str, Any] | None = None,
+) -> None:
     _init_db()
     now = datetime.now(timezone.utc).isoformat()
+    normalized_escalation = _normalize_escalation_policy(escalation_policy)
     with _get_db_connection() as conn:
+        if escalation_policy is None:
+            existing = conn.execute(
+                """
+                SELECT max_local_steps, min_local_confidence, max_retry_before_escalation,
+                       max_tool_calls_before_escalation, max_elapsed_ms_before_escalation,
+                       escalate_on_web_need, escalate_on_conflict, escalate_to_profile
+                FROM routing_policy
+                WHERE key = ?
+                """,
+                (key,),
+            ).fetchone()
+            normalized_escalation = _extract_escalation_policy_from_row(existing)
         conn.execute(
             """
-            INSERT INTO routing_policy (key, weights_json, updated_at, stats_json)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO routing_policy (
+                key, weights_json, updated_at, stats_json,
+                max_local_steps, min_local_confidence, max_retry_before_escalation,
+                max_tool_calls_before_escalation, max_elapsed_ms_before_escalation,
+                escalate_on_web_need, escalate_on_conflict, escalate_to_profile
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(key) DO UPDATE SET
                 weights_json = excluded.weights_json,
                 updated_at = excluded.updated_at,
-                stats_json = excluded.stats_json
+                stats_json = excluded.stats_json,
+                max_local_steps = excluded.max_local_steps,
+                min_local_confidence = excluded.min_local_confidence,
+                max_retry_before_escalation = excluded.max_retry_before_escalation,
+                max_tool_calls_before_escalation = excluded.max_tool_calls_before_escalation,
+                max_elapsed_ms_before_escalation = excluded.max_elapsed_ms_before_escalation,
+                escalate_on_web_need = excluded.escalate_on_web_need,
+                escalate_on_conflict = excluded.escalate_on_conflict,
+                escalate_to_profile = excluded.escalate_to_profile
             """,
-            (key, _json_dump(weights), now, _json_dump(stats)),
+            (
+                key,
+                _json_dump(weights),
+                now,
+                _json_dump(stats),
+                int(normalized_escalation["max_local_steps"]),
+                float(normalized_escalation["min_local_confidence"]),
+                int(normalized_escalation["max_retry_before_escalation"]),
+                int(normalized_escalation["max_tool_calls_before_escalation"]),
+                int(normalized_escalation["max_elapsed_ms_before_escalation"]),
+                int(bool(normalized_escalation["escalate_on_web_need"])),
+                int(bool(normalized_escalation["escalate_on_conflict"])),
+                str(normalized_escalation["escalate_to_profile"]),
+            ),
         )
 
 
@@ -2647,17 +2886,25 @@ def _apply_policy_update_for_event(request_id: str, config: AppConfig | None = N
             return None
 
         policy_row = conn.execute(
-            "SELECT weights_json, stats_json, updated_at FROM routing_policy WHERE key = ?",
+            """
+            SELECT weights_json, stats_json, updated_at,
+                   max_local_steps, min_local_confidence, max_retry_before_escalation,
+                   max_tool_calls_before_escalation, max_elapsed_ms_before_escalation,
+                   escalate_on_web_need, escalate_on_conflict, escalate_to_profile
+            FROM routing_policy WHERE key = ?
+            """,
             (policy_key,),
         ).fetchone()
         if policy_row is None:
             weights: dict[str, float] = {}
             stats: dict[str, Any] = _default_policy_stats()
             previous_updated_at: str | None = None
+            escalation_policy = _default_escalation_policy()
         else:
             weights = _normalize_policy_weights(_json_load_dict(policy_row["weights_json"]))
             stats = _json_load_dict(policy_row["stats_json"]) or _default_policy_stats()
             previous_updated_at = policy_row["updated_at"]
+            escalation_policy = _extract_escalation_policy_from_row(policy_row)
 
         weights = _apply_weight_decay(weights, previous_updated_at, config)
 
@@ -2670,14 +2917,40 @@ def _apply_policy_update_for_event(request_id: str, config: AppConfig | None = N
         now = datetime.now(timezone.utc).isoformat()
         conn.execute(
             """
-            INSERT INTO routing_policy (key, weights_json, updated_at, stats_json)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO routing_policy (
+                key, weights_json, updated_at, stats_json,
+                max_local_steps, min_local_confidence, max_retry_before_escalation,
+                max_tool_calls_before_escalation, max_elapsed_ms_before_escalation,
+                escalate_on_web_need, escalate_on_conflict, escalate_to_profile
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(key) DO UPDATE SET
                 weights_json = excluded.weights_json,
                 updated_at = excluded.updated_at,
-                stats_json = excluded.stats_json
+                stats_json = excluded.stats_json,
+                max_local_steps = excluded.max_local_steps,
+                min_local_confidence = excluded.min_local_confidence,
+                max_retry_before_escalation = excluded.max_retry_before_escalation,
+                max_tool_calls_before_escalation = excluded.max_tool_calls_before_escalation,
+                max_elapsed_ms_before_escalation = excluded.max_elapsed_ms_before_escalation,
+                escalate_on_web_need = excluded.escalate_on_web_need,
+                escalate_on_conflict = excluded.escalate_on_conflict,
+                escalate_to_profile = excluded.escalate_to_profile
             """,
-            (policy_key, _json_dump(weights), now, _json_dump(next_stats)),
+            (
+                policy_key,
+                _json_dump(weights),
+                now,
+                _json_dump(next_stats),
+                int(escalation_policy["max_local_steps"]),
+                float(escalation_policy["min_local_confidence"]),
+                int(escalation_policy["max_retry_before_escalation"]),
+                int(escalation_policy["max_tool_calls_before_escalation"]),
+                int(escalation_policy["max_elapsed_ms_before_escalation"]),
+                int(bool(escalation_policy["escalate_on_web_need"])),
+                int(bool(escalation_policy["escalate_on_conflict"])),
+                str(escalation_policy["escalate_to_profile"]),
+            ),
         )
         return policy_key
 
@@ -2722,6 +2995,14 @@ _ROUTING_SIGNAL_BASE_REWARD: dict[str, float] = {
     "consensus_recalc": -0.15,
     "history_helpful": 0.15,
     "history_not_helpful": -0.25,
+    "escalated_after_low_confidence": 0.10,
+    "escalated_after_tool_failure": 0.08,
+    "escalated_after_timeout": 0.08,
+    "escalated_after_conflict": 0.08,
+    "escalated_after_user_rephrase": 0.10,
+    "local_completed_without_escalation": 0.08,
+    "local_failed_then_balance_succeeded": 0.14,
+    "balance_failed_then_performance_succeeded": 0.12,
 }
 
 
@@ -3904,6 +4185,7 @@ async def get_routing_policy(key: str) -> RoutingPolicyResponse:
             "n": int(policy["stats"].get("n", 0)),
             "avg_reward": float(policy["stats"].get("avg_reward", 0.0)),
         },
+        escalation_policy=_normalize_escalation_policy(policy.get("escalation_policy")),
         updated_at=policy.get("updated_at"),
     )
 
@@ -3931,6 +4213,7 @@ async def run_magi(payload: RunRequest) -> RunResponse:
     router_input: dict[str, Any] = {}
     router_output: dict[str, Any] = {}
     routing_event_saved = False
+    auto_routing_signals: list[str] = []
     ollama_system_prompt = _normalize_ollama_system_prompt(payload.ollama_system_prompt)
 
     try:
@@ -3960,9 +4243,72 @@ async def run_magi(payload: RunRequest) -> RunResponse:
         agents = [_apply_ollama_system_prompt(agent, ollama_system_prompt) for agent in profile.agents]
         tasks = [_run_single_agent(agent, effective_prompt, profile.timeout_seconds) for agent in agents]
         results = await asyncio.gather(*tasks)
+        initial_profile_name = profile_name
+        local_failed = False
         if profile_name == "local_only":
             results = [_postprocess_local_only_result(prompt, item) for item in results]
+            local_failed = any(item.status == "ERROR" for item in results)
         consensus = _build_local_only_consensus(results) if profile_name == "local_only" else _build_pending_consensus(profile)
+
+        if profile_name == "local_only" and config.profiles:
+            policy_key = _safe_str(router_output.get("policy_key"))
+            policy = _get_routing_policy(policy_key) if policy_key else {"escalation_policy": _default_escalation_policy()}
+            escalation_policy = _normalize_escalation_policy(policy.get("escalation_policy"))
+            estimated_steps = max(1, _coerce_int(router_input.get("estimated_steps"), 1))
+            ambiguity = max(0.0, min(1.0, _coerce_float(router_input.get("ambiguity"), 0.0)))
+            escalation_state = {
+                "needs_web": _coerce_bool(router_input.get("needs_web"), default=_is_fresh_sensitive_prompt(prompt)),
+                "local_confidence": max(0.0, min(1.0, _coerce_float(router_output.get("router_confidence"), 100.0) / 100.0)),
+                "retry_count": sum(1 for item in results if item.status == "ERROR"),
+                "tool_call_count": max(0, estimated_steps if _coerce_bool(router_input.get("needs_tools"), default=False) else 0),
+                "elapsed_ms": max((item.latency_ms for item in results), default=0),
+                "estimated_remaining_steps": max(0, estimated_steps - 1),
+                "has_conflict": ambiguity >= 0.65,
+            }
+            escalation = _evaluate_escalation(escalation_state, escalation_policy, set(config.profiles.keys()), profile_name)
+            if escalation.get("action") == "escalate":
+                escalated_profile_name = _safe_str(escalation.get("profile"))
+                escalated_profile = config.profiles.get(escalated_profile_name)
+                if escalated_profile:
+                    if _coerce_bool(escalation.get("enable_fresh_mode"), default=False) and not fresh_mode:
+                        fresh_mode = True
+                    effective_prompt = await _build_effective_prompt(prompt, fresh_mode, payload.source_urls)
+                    if _should_apply_thread_context(escalated_profile_name):
+                        effective_prompt = _build_prompt_with_thread_context(effective_prompt, thread_id)
+                    if _should_apply_history_context(escalated_profile_name) and not url_anchored_request:
+                        effective_prompt = await _build_prompt_with_history(prompt, effective_prompt, config)
+                    escalated_agents = [_apply_ollama_system_prompt(agent, ollama_system_prompt) for agent in escalated_profile.agents]
+                    escalated_tasks = [_run_single_agent(agent, effective_prompt, escalated_profile.timeout_seconds) for agent in escalated_agents]
+                    results = await asyncio.gather(*escalated_tasks)
+                    profile_name = escalated_profile_name
+                    profile = escalated_profile
+                    consensus = _build_pending_consensus(profile)
+                    reason_code = _safe_str(escalation.get("reason_code")) or "UNKNOWN"
+                    router_output["escalation"] = {
+                        "from": initial_profile_name,
+                        "to": profile_name,
+                        "reason_code": reason_code,
+                        "enable_fresh_mode": bool(escalation.get("enable_fresh_mode")),
+                    }
+                    base_reason = _safe_str(router_output.get("reason"))
+                    router_output["reason"] = (
+                        f"{base_reason} | Escalation: {reason_code} -> {profile_name}"
+                        if base_reason
+                        else f"Escalation: {reason_code} -> {profile_name}"
+                    )
+                    signal_by_reason = {
+                        "LOW_CONFIDENCE": "escalated_after_low_confidence",
+                        "TOOL_FAILURE": "escalated_after_tool_failure",
+                        "LATENCY_BREACH": "escalated_after_timeout",
+                        "ANSWER_CONFLICT": "escalated_after_conflict",
+                    }
+                    mapped_signal = signal_by_reason.get(reason_code)
+                    if mapped_signal:
+                        auto_routing_signals.append(mapped_signal)
+                    if local_failed and profile_name == "balance" and all(item.status == "OK" for item in results):
+                        auto_routing_signals.append("local_failed_then_balance_succeeded")
+            elif all(item.status == "OK" for item in results):
+                auto_routing_signals.append("local_completed_without_escalation")
         try:
             _save_run_history(
                 run_id,
@@ -3980,6 +4326,8 @@ async def run_magi(payload: RunRequest) -> RunResponse:
         if routing_event_saved:
             execution_result = _build_execution_result_snapshot(profile_name, results, consensus=consensus)
             _update_routing_event_execution(run_id, execution_result, config)
+            for signal in auto_routing_signals:
+                _update_routing_event_signal(thread_id, run_id, signal, config)
     except HTTPException:
         if routing_event_saved:
             failure_result = _build_execution_result_snapshot(
@@ -4047,6 +4395,7 @@ async def chat_magi(payload: ChatRequest) -> ChatResponse:
         "reason": "local_draft",
     }
     routing_event_saved = False
+    auto_routing_signals: list[str] = []
     ollama_system_prompt = _normalize_ollama_system_prompt(payload.ollama_system_prompt)
     selected_profile_name = "local_only"
 
@@ -4099,6 +4448,10 @@ async def chat_magi(payload: ChatRequest) -> ChatResponse:
                     complexity="low" if _local_intent_fast_path(prompt) == "smalltalk" else None,
                     safety="low",
                     execution_tier="local",
+                    needs_web=_is_fresh_sensitive_prompt(prompt),
+                    needs_tools=False,
+                    estimated_steps=1,
+                    ambiguity=0.1,
                 ),
                 fallback_profile_name,
             )
@@ -4112,7 +4465,70 @@ async def chat_magi(payload: ChatRequest) -> ChatResponse:
                 "candidates": candidates,
                 "policy_key": policy_key,
                 "reason": f"local_draft_sufficient:{sufficiency_reason}",
+                "router_confidence": 95,
             }
+
+            if selected_profile_name == "local_only" and config.profiles:
+                policy = _get_routing_policy(policy_key) if policy_key else {"escalation_policy": _default_escalation_policy()}
+                escalation_policy = _normalize_escalation_policy(policy.get("escalation_policy"))
+                estimated_steps = max(1, _coerce_int(router_input.get("estimated_steps"), 1))
+                ambiguity = max(0.0, min(1.0, _coerce_float(router_input.get("ambiguity"), 0.0)))
+                escalation_state = {
+                    "needs_web": _coerce_bool(router_input.get("needs_web"), default=_is_fresh_sensitive_prompt(prompt)),
+                    "local_confidence": 0.95,
+                    "retry_count": sum(1 for item in results if item.status == "ERROR"),
+                    "tool_call_count": max(0, estimated_steps if _coerce_bool(router_input.get("needs_tools"), default=False) else 0),
+                    "elapsed_ms": max((item.latency_ms for item in results), default=0),
+                    "estimated_remaining_steps": max(0, estimated_steps - 1),
+                    "has_conflict": ambiguity >= 0.65,
+                }
+                escalation = _evaluate_escalation(escalation_state, escalation_policy, set(config.profiles.keys()), selected_profile_name)
+                if escalation.get("action") == "escalate":
+                    escalated_profile_name = _safe_str(escalation.get("profile"))
+                    escalated_profile = config.profiles.get(escalated_profile_name)
+                    if escalated_profile:
+                        if _coerce_bool(escalation.get("enable_fresh_mode"), default=False) and not fresh_mode:
+                            fresh_mode = True
+                        effective_prompt = await _build_effective_prompt(prompt, fresh_mode, payload.source_urls)
+                        if _thread_context_enabled():
+                            effective_prompt = _build_prompt_with_thread_context(effective_prompt, thread_id)
+                        should_apply_history = (
+                            _history_enabled()
+                            and not url_anchored_request
+                            and turn_index > 1
+                            and fast_intent != "smalltalk"
+                        )
+                        if should_apply_history:
+                            effective_prompt = await _build_prompt_with_history(prompt, effective_prompt, config)
+                        escalated_agents = [_apply_ollama_system_prompt(agent, ollama_system_prompt) for agent in escalated_profile.agents]
+                        escalated_tasks = [_run_single_agent(agent, effective_prompt, escalated_profile.timeout_seconds) for agent in escalated_agents]
+                        results = await asyncio.gather(*escalated_tasks)
+                        selected_profile_name = escalated_profile_name
+                        consensus = await _run_consensus(escalated_profile, effective_prompt, results)
+                        reason_code = _safe_str(escalation.get("reason_code")) or "UNKNOWN"
+                        router_output["escalation"] = {
+                            "from": "local_only",
+                            "to": selected_profile_name,
+                            "reason_code": reason_code,
+                            "enable_fresh_mode": bool(escalation.get("enable_fresh_mode")),
+                        }
+                        base_reason = _safe_str(router_output.get("reason"))
+                        router_output["reason"] = (
+                            f"{base_reason} | Escalation: {reason_code} -> {selected_profile_name}"
+                            if base_reason
+                            else f"Escalation: {reason_code} -> {selected_profile_name}"
+                        )
+                        signal_by_reason = {
+                            "LOW_CONFIDENCE": "escalated_after_low_confidence",
+                            "TOOL_FAILURE": "escalated_after_tool_failure",
+                            "LATENCY_BREACH": "escalated_after_timeout",
+                            "ANSWER_CONFLICT": "escalated_after_conflict",
+                        }
+                        mapped_signal = signal_by_reason.get(reason_code)
+                        if mapped_signal:
+                            auto_routing_signals.append(mapped_signal)
+                elif all(item.status == "OK" for item in results):
+                    auto_routing_signals.append("local_completed_without_escalation")
             _save_routing_event(thread_id, run_id, router_input, router_output)
             routing_event_saved = True
         else:
@@ -4146,6 +4562,8 @@ async def chat_magi(payload: ChatRequest) -> ChatResponse:
         if routing_event_saved:
             execution_result = _build_execution_result_snapshot(selected_profile_name, results, consensus=consensus)
             _update_routing_event_execution(run_id, execution_result, config)
+            for signal in auto_routing_signals:
+                _update_routing_event_signal(thread_id, run_id, signal, config)
     except HTTPException:
         if routing_event_saved:
             failure_result = _build_execution_result_snapshot(

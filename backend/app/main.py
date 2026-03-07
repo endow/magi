@@ -9,7 +9,7 @@ import uuid
 import warnings
 from collections import defaultdict
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from time import perf_counter
@@ -116,6 +116,19 @@ class RoutingLearningConfig(BaseModel):
     stats_ema_beta: float = 0.0
 
 
+class SemanticMemoryConfig(BaseModel):
+    enabled: bool = False
+    max_references: int = 2
+    min_confidence: float = 0.75
+    default_ttl_days: int = 180
+    use_llm_extractor: bool = True
+    extractor_provider: str | None = None
+    extractor_model: str | None = None
+    extractor_timeout_seconds: int = 6
+    extractor_max_items: int = 3
+    merge_similarity_threshold: float = 0.88
+
+
 class RouteDecision(BaseModel):
     profile: str
     confidence: int
@@ -141,6 +154,7 @@ class AppConfig(BaseModel):
     request_router: RequestRouterConfig | None = None
     router_rules: RouterRulesConfig | None = None
     routing_learning: RoutingLearningConfig | None = None
+    semantic_memory: SemanticMemoryConfig | None = None
 
 
 HistoryContextConfig.model_rebuild()
@@ -316,6 +330,31 @@ class HistoryListResponse(BaseModel):
     items: list[HistoryItem]
 
 
+class SemanticMemoryItem(BaseModel):
+    memory_id: str
+    thread_id: str
+    source_run_id: str
+    kind: Literal["user_preference", "project_fact", "project_decision"]
+    content: str
+    confidence: float
+    status: Literal["active", "stale", "superseded", "invalid"]
+    last_verified_at: str | None = None
+    expires_at: str | None = None
+    created_at: str
+    updated_at: str
+
+
+class SemanticMemoryListResponse(BaseModel):
+    total: int
+    items: list[SemanticMemoryItem]
+
+
+class SemanticMemoryPatchRequest(BaseModel):
+    status: Literal["active", "stale", "superseded", "invalid"] | None = None
+    confidence: float | None = None
+    expires_at: str | None = None
+
+
 class RoutingFeedbackRequest(BaseModel):
     thread_id: str
     request_id: str
@@ -405,7 +444,7 @@ async def app_lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="MAGI v1.4 Backend", lifespan=app_lifespan)
+app = FastAPI(title="MAGI v1.5 Backend", lifespan=app_lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -1909,6 +1948,72 @@ def _history_max_references() -> int:
         return 2
 
 
+def _semantic_memory_config(app_config: AppConfig | None = None) -> SemanticMemoryConfig:
+    if app_config and app_config.semantic_memory:
+        return app_config.semantic_memory
+    return SemanticMemoryConfig()
+
+
+def _semantic_memory_enabled(app_config: AppConfig | None = None) -> bool:
+    return bool(_semantic_memory_config(app_config).enabled)
+
+
+def _semantic_memory_max_references(app_config: AppConfig | None = None) -> int:
+    cfg = _semantic_memory_config(app_config)
+    return max(1, min(5, int(cfg.max_references)))
+
+
+def _semantic_memory_min_confidence(app_config: AppConfig | None = None) -> float:
+    cfg = _semantic_memory_config(app_config)
+    return max(0.0, min(1.0, float(cfg.min_confidence)))
+
+
+def _semantic_memory_default_ttl_days(app_config: AppConfig | None = None) -> int:
+    cfg = _semantic_memory_config(app_config)
+    return max(1, min(3650, int(cfg.default_ttl_days)))
+
+
+def _semantic_memory_extractor_max_items(app_config: AppConfig | None = None) -> int:
+    cfg = _semantic_memory_config(app_config)
+    return max(1, min(5, int(cfg.extractor_max_items)))
+
+
+def _semantic_memory_extractor_timeout_seconds(app_config: AppConfig | None = None) -> int:
+    cfg = _semantic_memory_config(app_config)
+    return max(2, min(20, int(cfg.extractor_timeout_seconds)))
+
+
+def _semantic_memory_use_llm_extractor(app_config: AppConfig | None = None) -> bool:
+    cfg = _semantic_memory_config(app_config)
+    return bool(cfg.use_llm_extractor)
+
+
+def _semantic_memory_merge_similarity_threshold(app_config: AppConfig | None = None) -> float:
+    cfg = _semantic_memory_config(app_config)
+    return max(0.0, min(1.0, float(cfg.merge_similarity_threshold)))
+
+
+def _semantic_memory_extractor_model(app_config: AppConfig | None = None) -> str:
+    if not app_config:
+        return ""
+    cfg = _semantic_memory_config(app_config)
+    provider = _safe_str(cfg.extractor_provider)
+    model = _safe_str(cfg.extractor_model)
+    if provider and model:
+        return f"{provider}/{model}"
+    if app_config.request_router:
+        router_provider = _safe_str(app_config.request_router.provider)
+        router_model = _safe_str(app_config.request_router.model)
+        if router_provider and router_model:
+            return f"{router_provider}/{router_model}"
+    if app_config.profiles:
+        local_profile = app_config.profiles.get("local_only")
+        if local_profile and local_profile.agents:
+            agent = local_profile.agents[0]
+            return f"{agent.provider}/{agent.model}"
+    return ""
+
+
 def _thread_context_enabled() -> bool:
     raw = os.getenv("THREAD_CONTEXT_ENABLED", "1").strip().lower()
     return raw not in {"0", "false", "off", "no"}
@@ -2289,6 +2394,409 @@ async def _build_prompt_with_history(
     return _inject_history_context(base_prompt, matches)
 
 
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _extract_semantic_memory_candidates(
+    prompt: str,
+    consensus: ConsensusResult,
+) -> list[tuple[str, str, float]]:
+    source = f"{prompt.strip()}\n{(consensus.text or '').strip()}"
+    lines = [line.strip() for line in source.splitlines() if line.strip()]
+    if not lines:
+        return []
+
+    patterns: list[tuple[str, str, float, str]] = [
+        ("user_preference", r"(?:私は|ぼくは|僕は|I\s+(?:prefer|like))(.+)", 0.78, "pref"),
+        ("project_decision", r"(?:このプロジェクト(?:では)?|本プロジェクト(?:では)?|we(?:\s+will|'ll)?)(.+)", 0.82, "decision"),
+        ("project_fact", r"(?:MAGI|システム|backend|frontend)(.+)", 0.68, "fact"),
+    ]
+
+    seen: set[str] = set()
+    extracted: list[tuple[str, str, float]] = []
+    for line in lines:
+        shortened = _trim_for_prompt(line, 220)
+        for kind, pattern, confidence, _ in patterns:
+            if len(extracted) >= 3:
+                break
+            if not re.search(pattern, shortened, flags=re.IGNORECASE):
+                continue
+            normalized = _normalize_similarity_text(f"{kind}:{shortened}")
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            extracted.append((kind, shortened, confidence))
+        if len(extracted) >= 3:
+            break
+    return extracted
+
+
+def _parse_semantic_memory_payload(raw_text: str) -> list[tuple[str, str, float]]:
+    candidate = raw_text.strip()
+    if not candidate:
+        return []
+    match = re.search(r"\[.*\]", candidate, flags=re.DOTALL)
+    if match:
+        candidate = match.group(0)
+    try:
+        payload = json.loads(candidate)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(payload, list):
+        return []
+
+    valid_kinds = {"user_preference", "project_fact", "project_decision"}
+    seen: set[str] = set()
+    items: list[tuple[str, str, float]] = []
+    for row in payload:
+        if not isinstance(row, dict):
+            continue
+        kind = _safe_str(row.get("kind"))
+        content = _safe_str(row.get("content"))
+        confidence = _coerce_float(row.get("confidence"), 0.0)
+        if kind not in valid_kinds or len(content) < 8:
+            continue
+        clamped_confidence = max(0.0, min(1.0, confidence))
+        normalized = _normalize_similarity_text(f"{kind}:{content}")
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        items.append((kind, _trim_for_prompt(content, 220), clamped_confidence))
+    return items
+
+
+async def _extract_semantic_memory_candidates_llm(
+    prompt: str,
+    consensus: ConsensusResult,
+    app_config: AppConfig | None,
+) -> list[tuple[str, str, float]]:
+    if not _semantic_memory_use_llm_extractor(app_config):
+        return []
+    full_model = _semantic_memory_extractor_model(app_config)
+    if not full_model:
+        return []
+
+    max_items = _semantic_memory_extractor_max_items(app_config)
+    extractor_prompt = (
+        "Extract long-lived memory candidates from the interaction.\n"
+        "Return strict JSON array only.\n"
+        "Each item schema:\n"
+        "{\"kind\":\"user_preference|project_fact|project_decision\",\"content\":\"short sentence\",\"confidence\":0.0}\n"
+        "Rules:\n"
+        "- Include only stable facts/preferences/decisions likely useful in future turns.\n"
+        f"- Output at most {max_items} items.\n"
+        "- Ignore transient, date-sensitive, or speculative statements.\n"
+        "- confidence must be 0.0-1.0.\n\n"
+        f"User prompt:\n{prompt}\n\n"
+        f"Consensus answer:\n{consensus.text}"
+    )
+    try:
+        raw_text, _, _ = await _call_model_text(
+            full_model,
+            extractor_prompt,
+            timeout_seconds=_semantic_memory_extractor_timeout_seconds(app_config),
+            max_tokens=280,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[magi] semantic_memory llm extractor failed: {type(exc).__name__}: {exc}")
+        return []
+    parsed = _parse_semantic_memory_payload(raw_text)
+    return parsed[:max_items]
+
+
+async def _resolve_semantic_memory_candidates(
+    prompt: str,
+    consensus: ConsensusResult,
+    app_config: AppConfig | None,
+) -> list[tuple[str, str, float]]:
+    if not _semantic_memory_enabled(app_config):
+        return []
+    llm_candidates = await _extract_semantic_memory_candidates_llm(prompt, consensus, app_config)
+    if llm_candidates:
+        return llm_candidates
+    return _extract_semantic_memory_candidates(prompt, consensus)
+
+
+def _find_semantic_memory_merge_target(
+    conn: sqlite3.Connection,
+    thread_id: str,
+    kind: str,
+    content: str,
+    app_config: AppConfig | None = None,
+) -> str | None:
+    threshold = _semantic_memory_merge_similarity_threshold(app_config)
+    if threshold <= 0.0:
+        return None
+
+    rows = conn.execute(
+        """
+        SELECT memory_id, content
+        FROM semantic_memories
+        WHERE thread_id = ?
+          AND kind = ?
+          AND status != 'invalid'
+        ORDER BY updated_at DESC
+        LIMIT 30
+        """,
+        (thread_id, kind),
+    ).fetchall()
+    if not rows:
+        return None
+
+    query_vector = _term_frequency_vector(content)
+    best_id: str | None = None
+    best_similarity = 0.0
+    for row in rows:
+        similarity = _cosine_similarity(query_vector, _term_frequency_vector(str(row["content"] or "")))
+        if similarity > best_similarity:
+            best_similarity = similarity
+            best_id = str(row["memory_id"])
+    if best_id and best_similarity >= threshold:
+        return best_id
+    return None
+
+
+def _upsert_semantic_memories(
+    thread_id: str,
+    run_id: str,
+    items: list[tuple[str, str, float]],
+    app_config: AppConfig | None = None,
+) -> int:
+    if not thread_id or not run_id or not items:
+        return 0
+
+    now = datetime.now(timezone.utc)
+    created_at = now.isoformat()
+    expires_at = (now + timedelta(days=_semantic_memory_default_ttl_days(app_config))).isoformat()
+    inserted = 0
+    with _get_db_connection() as conn:
+        for kind, content, confidence in items:
+            existing = conn.execute(
+                """
+                SELECT memory_id
+                FROM semantic_memories
+                WHERE thread_id = ?
+                  AND kind = ?
+                  AND content = ?
+                  AND status != 'invalid'
+                LIMIT 1
+                """,
+                (thread_id, kind, content),
+            ).fetchone()
+            merge_target_id = _find_semantic_memory_merge_target(conn, thread_id, kind, content, app_config)
+            target_memory_id = str(existing["memory_id"]) if existing else merge_target_id
+            if target_memory_id:
+                conn.execute(
+                    """
+                    UPDATE semantic_memories
+                    SET source_run_id = ?,
+                        content = ?,
+                        confidence = ?,
+                        status = 'active',
+                        updated_at = ?,
+                        expires_at = ?
+                    WHERE memory_id = ?
+                    """,
+                    (run_id, content, float(confidence), created_at, expires_at, target_memory_id),
+                )
+                inserted += 1
+                continue
+            conn.execute(
+                """
+                INSERT INTO semantic_memories (
+                    memory_id, thread_id, source_run_id, kind, content, embedding_json,
+                    confidence, status, last_verified_at, expires_at, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, NULL, ?, 'active', NULL, ?, ?, ?)
+                """,
+                (str(uuid.uuid4()), thread_id, run_id, kind, content, float(confidence), expires_at, created_at, created_at),
+            )
+            inserted += 1
+    return inserted
+
+
+def _load_semantic_memories(
+    thread_id: str,
+    app_config: AppConfig | None = None,
+    limit: int | None = None,
+) -> list[sqlite3.Row]:
+    if not thread_id:
+        return []
+    effective_limit = limit if limit is not None else _semantic_memory_max_references(app_config)
+    min_confidence = _semantic_memory_min_confidence(app_config)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with _get_db_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT memory_id, thread_id, source_run_id, kind, content, confidence, status,
+                   last_verified_at, expires_at, created_at, updated_at
+            FROM semantic_memories
+            WHERE thread_id = ?
+              AND status = 'active'
+              AND confidence >= ?
+              AND (expires_at IS NULL OR expires_at > ?)
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            (thread_id, float(min_confidence), now_iso, max(1, int(effective_limit))),
+        ).fetchall()
+    return rows
+
+
+def _inject_semantic_memory_context(base_prompt: str, rows: list[sqlite3.Row]) -> str:
+    if not rows:
+        return base_prompt
+    lines = [
+        "[Semantic Memory]",
+        "Use these as continuity hints. If they conflict with explicit user input, follow the latest user input.",
+    ]
+    for idx, row in enumerate(rows, start=1):
+        lines.append(
+            f"[M{idx}] kind={row['kind']} confidence={float(row['confidence']):.2f} updated_at={row['updated_at']}\n"
+            f"content={_trim_for_prompt(str(row['content']), 220)}"
+        )
+    return f"{base_prompt}\n\n" + "\n\n".join(lines)
+
+
+def _build_prompt_with_semantic_memory(
+    base_prompt: str,
+    thread_id: str | None,
+    app_config: AppConfig | None = None,
+) -> str:
+    if not _semantic_memory_enabled(app_config):
+        return base_prompt
+    if not thread_id:
+        return base_prompt
+    try:
+        rows = _load_semantic_memories(thread_id, app_config)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[magi] semantic_memory lookup failed: {type(exc).__name__}: {exc}")
+        return base_prompt
+    if not rows:
+        return base_prompt
+    print(f"[magi] semantic_memory references={len(rows)} thread_id={thread_id}")
+    return _inject_semantic_memory_context(base_prompt, rows)
+
+
+def _semantic_memory_item_from_row(row: sqlite3.Row) -> SemanticMemoryItem:
+    return SemanticMemoryItem(
+        memory_id=str(row["memory_id"]),
+        thread_id=str(row["thread_id"]),
+        source_run_id=str(row["source_run_id"]),
+        kind=str(row["kind"]),
+        content=str(row["content"]),
+        confidence=float(row["confidence"]),
+        status=str(row["status"]),
+        last_verified_at=str(row["last_verified_at"]) if row["last_verified_at"] else None,
+        expires_at=str(row["expires_at"]) if row["expires_at"] else None,
+        created_at=str(row["created_at"]),
+        updated_at=str(row["updated_at"]),
+    )
+
+
+def _list_semantic_memory(thread_id: str, limit: int, app_config: AppConfig | None = None) -> SemanticMemoryListResponse:
+    normalized_thread_id = _normalize_thread_id(thread_id, require_uuid=True)
+    if not normalized_thread_id:
+        raise HTTPException(status_code=400, detail="thread_id is required")
+    with _get_db_connection() as conn:
+        total_row = conn.execute(
+            "SELECT COUNT(1) AS count FROM semantic_memories WHERE thread_id = ?",
+            (normalized_thread_id,),
+        ).fetchone()
+        rows = conn.execute(
+            """
+            SELECT memory_id, thread_id, source_run_id, kind, content, confidence, status,
+                   last_verified_at, expires_at, created_at, updated_at
+            FROM semantic_memories
+            WHERE thread_id = ?
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            (normalized_thread_id, limit),
+        ).fetchall()
+    total = int((total_row["count"] if total_row else 0) or 0)
+    return SemanticMemoryListResponse(total=total, items=[_semantic_memory_item_from_row(row) for row in rows])
+
+
+def _update_semantic_memory(memory_id: str, payload: SemanticMemoryPatchRequest) -> SemanticMemoryItem | None:
+    normalized_id = memory_id.strip()
+    if not normalized_id:
+        return None
+    updates: list[str] = []
+    params: list[Any] = []
+    if payload.status is not None:
+        updates.append("status = ?")
+        params.append(payload.status)
+    if payload.confidence is not None:
+        clamped = max(0.0, min(1.0, float(payload.confidence)))
+        updates.append("confidence = ?")
+        params.append(clamped)
+    if payload.expires_at is not None:
+        value = payload.expires_at.strip() if payload.expires_at else None
+        if value:
+            if _parse_iso_datetime(value) is None:
+                raise HTTPException(status_code=400, detail="expires_at must be ISO-8601 datetime")
+            updates.append("expires_at = ?")
+            params.append(value)
+        else:
+            updates.append("expires_at = NULL")
+    if not updates:
+        raise HTTPException(status_code=400, detail="no fields to update")
+    updates.append("updated_at = ?")
+    params.append(datetime.now(timezone.utc).isoformat())
+    params.append(normalized_id)
+
+    with _get_db_connection() as conn:
+        result = conn.execute(
+            f"UPDATE semantic_memories SET {', '.join(updates)} WHERE memory_id = ?",
+            params,
+        )
+        if int(result.rowcount or 0) == 0:
+            return None
+        row = conn.execute(
+            """
+            SELECT memory_id, thread_id, source_run_id, kind, content, confidence, status,
+                   last_verified_at, expires_at, created_at, updated_at
+            FROM semantic_memories
+            WHERE memory_id = ?
+            """,
+            (normalized_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    return _semantic_memory_item_from_row(row)
+
+
+def _invalidate_semantic_memory(memory_id: str) -> bool:
+    normalized_id = memory_id.strip()
+    if not normalized_id:
+        return False
+    with _get_db_connection() as conn:
+        result = conn.execute(
+            """
+            UPDATE semantic_memories
+            SET status = 'invalid',
+                updated_at = ?
+            WHERE memory_id = ?
+            """,
+            (datetime.now(timezone.utc).isoformat(), normalized_id),
+        )
+    return int(result.rowcount or 0) > 0
+
+
 def _next_turn_index(thread_id: str) -> int:
     try:
         with _get_db_connection() as conn:
@@ -2485,13 +2993,31 @@ def _init_db() -> None:
                 escalate_on_conflict INTEGER NOT NULL DEFAULT 1,
                 escalate_to_profile TEXT NOT NULL DEFAULT 'balance'
             );
+            CREATE TABLE IF NOT EXISTS semantic_memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                memory_id TEXT NOT NULL UNIQUE,
+                thread_id TEXT NOT NULL,
+                source_run_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                content TEXT NOT NULL,
+                embedding_json TEXT,
+                confidence REAL NOT NULL DEFAULT 0.5,
+                status TEXT NOT NULL DEFAULT 'active',
+                last_verified_at TEXT,
+                expires_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             CREATE INDEX IF NOT EXISTS idx_routing_events_thread_id ON routing_events(thread_id);
             CREATE INDEX IF NOT EXISTS idx_routing_events_request_id ON routing_events(request_id);
+            CREATE INDEX IF NOT EXISTS idx_semantic_memories_thread_updated ON semantic_memories(thread_id, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_semantic_memories_status_updated ON semantic_memories(status, updated_at DESC);
             """
         )
         _ensure_runs_columns(conn)
         _ensure_agent_result_columns(conn)
         _ensure_routing_columns(conn)
+        _ensure_semantic_memory_columns(conn)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_validity_state ON runs(validity_state)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_thread_turn ON runs(thread_id, turn_index)")
 
@@ -2572,6 +3098,50 @@ def _ensure_agent_result_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE agent_results ADD COLUMN total_tokens INTEGER")
     if "cost_estimate_usd" not in columns:
         conn.execute("ALTER TABLE agent_results ADD COLUMN cost_estimate_usd REAL")
+
+
+def _ensure_semantic_memory_columns(conn: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(semantic_memories)").fetchall()}
+    if not columns:
+        return
+    if "memory_id" not in columns:
+        conn.execute("ALTER TABLE semantic_memories ADD COLUMN memory_id TEXT")
+    if "thread_id" not in columns:
+        conn.execute("ALTER TABLE semantic_memories ADD COLUMN thread_id TEXT")
+    if "source_run_id" not in columns:
+        conn.execute("ALTER TABLE semantic_memories ADD COLUMN source_run_id TEXT")
+    if "kind" not in columns:
+        conn.execute("ALTER TABLE semantic_memories ADD COLUMN kind TEXT")
+    if "content" not in columns:
+        conn.execute("ALTER TABLE semantic_memories ADD COLUMN content TEXT")
+    if "embedding_json" not in columns:
+        conn.execute("ALTER TABLE semantic_memories ADD COLUMN embedding_json TEXT")
+    if "confidence" not in columns:
+        conn.execute("ALTER TABLE semantic_memories ADD COLUMN confidence REAL NOT NULL DEFAULT 0.5")
+    if "status" not in columns:
+        conn.execute("ALTER TABLE semantic_memories ADD COLUMN status TEXT NOT NULL DEFAULT 'active'")
+    if "last_verified_at" not in columns:
+        conn.execute("ALTER TABLE semantic_memories ADD COLUMN last_verified_at TEXT")
+    if "expires_at" not in columns:
+        conn.execute("ALTER TABLE semantic_memories ADD COLUMN expires_at TEXT")
+    if "created_at" not in columns:
+        conn.execute("ALTER TABLE semantic_memories ADD COLUMN created_at TEXT")
+    if "updated_at" not in columns:
+        conn.execute("ALTER TABLE semantic_memories ADD COLUMN updated_at TEXT")
+    conn.execute(
+        """
+        UPDATE semantic_memories
+        SET status = COALESCE(NULLIF(TRIM(status), ''), 'active')
+        WHERE status IS NULL OR TRIM(status) = ''
+        """
+    )
+    conn.execute(
+        """
+        UPDATE semantic_memories
+        SET confidence = 0.5
+        WHERE confidence IS NULL
+        """
+    )
 
 
 def _json_dump(payload: dict[str, Any]) -> str:
@@ -3284,6 +3854,7 @@ def _save_run_history(
     app_config: AppConfig | None = None,
     thread_id: str | None = None,
     turn_index: int | None = None,
+    semantic_memory_candidates: list[tuple[str, str, float]] | None = None,
 ) -> None:
     created_at = datetime.now(timezone.utc).isoformat()
     normalized_thread_id = thread_id or run_id
@@ -3344,6 +3915,14 @@ def _save_run_history(
             ],
         )
         _apply_history_deprecations(conn, run_id, prompt, app_config)
+    try:
+        if _semantic_memory_enabled(app_config):
+            candidates = semantic_memory_candidates or _extract_semantic_memory_candidates(prompt, consensus)
+            if candidates:
+                upserted = _upsert_semantic_memories(normalized_thread_id, run_id, candidates, app_config)
+                print(f"[magi] semantic_memory upserted={upserted} thread_id={normalized_thread_id}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[magi] semantic_memory upsert failed run_id={run_id}: {type(exc).__name__}: {exc}")
 
 
 def _update_run_consensus(run_id: str, consensus: ConsensusResult) -> bool:
@@ -4227,6 +4806,43 @@ async def delete_all_history() -> dict[str, int]:
     return {"deleted_runs": deleted_runs, "deleted_threads": deleted_threads}
 
 
+@app.get("/api/magi/memory", response_model=SemanticMemoryListResponse)
+async def list_semantic_memory(thread_id: str, limit: int = 20) -> SemanticMemoryListResponse:
+    if limit < 1 or limit > 100:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 100")
+    try:
+        config = load_config()
+        return _list_semantic_memory(thread_id, limit, config)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"failed to load semantic memory: {exc}") from exc
+
+
+@app.patch("/api/magi/memory/{memory_id}", response_model=SemanticMemoryItem)
+async def patch_semantic_memory(memory_id: str, payload: SemanticMemoryPatchRequest) -> SemanticMemoryItem:
+    try:
+        updated = _update_semantic_memory(memory_id, payload)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"failed to update semantic memory: {exc}") from exc
+    if updated is None:
+        raise HTTPException(status_code=404, detail="memory not found")
+    return updated
+
+
+@app.delete("/api/magi/memory/{memory_id}")
+async def delete_semantic_memory(memory_id: str) -> dict[str, str]:
+    try:
+        deleted = _invalidate_semantic_memory(memory_id)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"failed to invalidate semantic memory: {exc}") from exc
+    if not deleted:
+        raise HTTPException(status_code=404, detail="memory not found")
+    return {"memory_id": memory_id, "status": "invalid"}
+
+
 @app.post("/api/magi/routing/feedback", response_model=RoutingFeedbackResponse)
 async def submit_routing_feedback(payload: RoutingFeedbackRequest) -> RoutingFeedbackResponse:
     normalized_thread_id = _normalize_thread_id(payload.thread_id, require_uuid=True)
@@ -4349,11 +4965,13 @@ async def run_magi(payload: RunRequest) -> RunResponse:
     try:
         resolved_source_urls = _resolve_source_urls_for_prompt(prompt, payload.source_urls)
         url_anchored_request = bool(resolved_source_urls)
+        semantic_memory_candidates: list[tuple[str, str, float]] = []
         effective_prompt = await _build_effective_prompt(prompt, fresh_mode, payload.source_urls)
         if _should_apply_thread_context(profile_name):
             effective_prompt = _build_prompt_with_thread_context(effective_prompt, thread_id)
         else:
             print(f"[magi] thread_context skipped profile={profile_name}")
+        effective_prompt = _build_prompt_with_semantic_memory(effective_prompt, thread_id, config)
         if _should_apply_history_context(profile_name) and not url_anchored_request:
             effective_prompt = await _build_prompt_with_history(prompt, effective_prompt, config)
         elif url_anchored_request:
@@ -4395,6 +5013,7 @@ async def run_magi(payload: RunRequest) -> RunResponse:
                     effective_prompt = await _build_effective_prompt(prompt, fresh_mode, payload.source_urls)
                     if _should_apply_thread_context(escalated_profile_name):
                         effective_prompt = _build_prompt_with_thread_context(effective_prompt, thread_id)
+                    effective_prompt = _build_prompt_with_semantic_memory(effective_prompt, thread_id, config)
                     if _should_apply_history_context(escalated_profile_name) and not url_anchored_request:
                         effective_prompt = await _build_prompt_with_history(prompt, effective_prompt, config)
                     escalated_agents = [_apply_ollama_system_prompt(agent, ollama_system_prompt) for agent in escalated_profile.agents]
@@ -4429,6 +5048,8 @@ async def run_magi(payload: RunRequest) -> RunResponse:
                         auto_routing_signals.append("local_failed_then_balance_succeeded")
             elif all(item.status == "OK" for item in results):
                 auto_routing_signals.append("local_completed_without_escalation")
+        if _semantic_memory_enabled(config):
+            semantic_memory_candidates = await _resolve_semantic_memory_candidates(prompt, consensus, config)
         try:
             _save_run_history(
                 run_id,
@@ -4439,6 +5060,7 @@ async def run_magi(payload: RunRequest) -> RunResponse:
                 config,
                 thread_id=thread_id,
                 turn_index=turn_index,
+                semantic_memory_candidates=semantic_memory_candidates,
             )
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=f"failed to persist history: {exc}") from exc
@@ -4522,10 +5144,12 @@ async def chat_magi(payload: ChatRequest) -> ChatResponse:
     try:
         resolved_source_urls = _resolve_source_urls_for_prompt(prompt, payload.source_urls)
         url_anchored_request = bool(resolved_source_urls)
+        semantic_memory_candidates: list[tuple[str, str, float]] = []
         effective_prompt = await _build_effective_prompt(prompt, fresh_mode, payload.source_urls)
 
         if _thread_context_enabled():
             effective_prompt = _build_prompt_with_thread_context(effective_prompt, thread_id)
+        effective_prompt = _build_prompt_with_semantic_memory(effective_prompt, thread_id, config)
         should_apply_history = (
             _history_enabled()
             and not url_anchored_request
@@ -4612,6 +5236,7 @@ async def chat_magi(payload: ChatRequest) -> ChatResponse:
                         effective_prompt = await _build_effective_prompt(prompt, fresh_mode, payload.source_urls)
                         if _thread_context_enabled():
                             effective_prompt = _build_prompt_with_thread_context(effective_prompt, thread_id)
+                        effective_prompt = _build_prompt_with_semantic_memory(effective_prompt, thread_id, config)
                         should_apply_history = (
                             _history_enabled()
                             and not url_anchored_request
@@ -4668,6 +5293,8 @@ async def chat_magi(payload: ChatRequest) -> ChatResponse:
                 else await _run_consensus(profile, effective_prompt, results)
             )
 
+        if _semantic_memory_enabled(config):
+            semantic_memory_candidates = await _resolve_semantic_memory_candidates(prompt, consensus, config)
         _save_run_history(
             run_id,
             selected_profile_name,
@@ -4677,6 +5304,7 @@ async def chat_magi(payload: ChatRequest) -> ChatResponse:
             config,
             thread_id=thread_id,
             turn_index=turn_index,
+            semantic_memory_candidates=semantic_memory_candidates,
         )
 
         if routing_event_saved:

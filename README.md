@@ -1,11 +1,22 @@
-# MAGI v1.4（ローカル利用）
+# MAGI v1.5（ローカル利用）
 
 ![MAGI Command Chamber](docs/images/magi-command-chamber.png)
 
 MAGI は、単一プロンプトを入口ルーターで自動振り分けし、軽量タスクは `local_only`（ローカル1モデル）、それ以外は複数LLMの並列実行と合議で処理するローカル実行向けアプリです。  
-v1.4 では「初期ルーティング + 段階的昇格ゲート」を導入し、`local_only` から必要時のみ `balance` へ昇格できるようにしました。Fresh mode（Web最新情報の補強）、SQLiteへの履歴永続化、`thread_id` ベースの会話継続は継続して利用できます。
+v1.5 では、`v1.4` の段階的昇格ゲートを維持しつつ、semantic memory（長期記憶）の抽出・注入・運用APIを追加しました。
 
-## v1.4 ハイライト
+## v1.5 ハイライト
+
+- semantic memory（長期記憶）:
+  - `run/chat` 結果から記憶候補を抽出し、`semantic_memories` に保存
+  - 同一 `thread_id` の後続ターンで、信頼度/期限を満たす記憶をプロンプトへ注入
+  - 同義文は類似度しきい値で統合し、重複蓄積を抑制
+- semantic memory API:
+  - `GET /api/magi/memory`
+  - `PATCH /api/magi/memory/{memory_id}`
+  - `DELETE /api/magi/memory/{memory_id}`
+
+## v1.4 ハイライト（継続）
 
 - 段階的昇格ゲート:
   - `run/chat` で `local_only` 実行後に `evaluate_escalation(...)` を評価

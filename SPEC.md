@@ -1,4 +1,4 @@
-# MAGI v1.4 実装仕様（現行）
+# MAGI v1.5 実装仕様（現行）
 
 本書は、MVPから拡張された現行版「MAGI」の実装仕様を定義する。  
 実装・改修時は、本仕様を正とする。
@@ -22,12 +22,12 @@
 
 ---
 
-## 要件（v1.4）
+## 要件（v1.5）
 
 ### 1) バックエンド
 
 - `POST /api/magi/run` を実装する。
-- `POST /api/magi/chat` を実装する（v1.4 のUI主要導線）。
+- `POST /api/magi/chat` を実装する（v1.5 のUI主要導線）。
 
 #### リクエスト
 ```json
@@ -185,6 +185,18 @@ messages = [{"role": "user", "content": prompt}]
       }
     ]
   },
+  "semantic_memory": {
+    "enabled": false,
+    "max_references": 2,
+    "min_confidence": 0.75,
+    "default_ttl_days": 180,
+    "use_llm_extractor": true,
+    "extractor_provider": "ollama",
+    "extractor_model": "qwen2.5:7b-instruct-q4_K_M",
+    "extractor_timeout_seconds": 6,
+    "extractor_max_items": 3,
+    "merge_similarity_threshold": 0.88
+  },
   "profiles": {
     "local_only": { "...": "..." },
     "cost": { "...": "..." },
@@ -206,6 +218,10 @@ messages = [{"role": "user", "content": prompt}]
   - 最終profileは `base_score + policy_weight` で選択する
   - feedback / 実行結果を契機に `weight += alpha * reward` で更新し、`[weight_min, weight_max]` でclampする
 - `history_context.strategy=embedding` の場合、履歴類似検索は外部埋め込みモデルを使う（失敗時は lexical にフォールバック）。
+- `semantic_memory.enabled=true` の場合、実行結果から抽出した記憶を `semantic_memories` に保存し、同一 `thread_id` の後続実行時に最大 `max_references` 件を補助コンテキストとして注入する。
+- `use_llm_extractor=true` の場合、抽出は LLM を優先し、JSON パース失敗/空結果時はルールベース抽出にフォールバックする。
+- 保存時は `thread_id + kind` 内で `merge_similarity_threshold` 以上の同義文を同一 memory として統合し、重複蓄積を抑制する。
+- semantic memory 抽出/保存に失敗しても本リクエストは失敗させない（best-effort）。
 - 履歴は削除せず保持し、`validity_state(active|stale|superseded)` と鮮度減衰を使って参照重みを調整する。
 - `deprecations_source.enabled=true` の場合、外部JSONを取得して `deprecations` を `merge|replace` で解決する。取得失敗時はローカル `deprecations` へフォールバックする。
 - `deprecations` で技術移行ルール（legacy/current）を定義し、current語を含む新規実行時に過去legacy履歴を `superseded` に更新する。
@@ -287,7 +303,7 @@ OLLAMA_API_BASE=http://ollama:11434
 - 備考:
   - `local_only` では再合議せず、受け取ったAgent結果を consensus として返す
 
-### ルーティング学習API（v1.4）
+### ルーティング学習API（v1.5）
 
 - `POST /api/magi/routing/feedback`
   - body: `{ thread_id, request_id, rating: -1|0|1, reason? }`
@@ -300,6 +316,13 @@ OLLAMA_API_BASE=http://ollama:11434
   - body: `{ thread_id, request_id, signal }`
   - `signal`: `retry | copy_result | consensus_recalc | history_helpful | history_not_helpful | escalated_after_low_confidence | escalated_after_tool_failure | escalated_after_timeout | escalated_after_conflict | escalated_after_user_rephrase | local_completed_without_escalation | local_failed_then_balance_succeeded | balance_failed_then_performance_succeeded`
   - 暗黙シグナルを `implicit_reward` として学習報酬に加算する
+- `GET /api/magi/memory?thread_id=...&limit=...`
+  - 指定 `thread_id` の semantic memory 一覧を返す
+- `PATCH /api/magi/memory/{memory_id}`
+  - body: `{ status?, confidence?, expires_at? }`
+  - semantic memory の状態/信頼度/期限を更新する
+- `DELETE /api/magi/memory/{memory_id}`
+  - semantic memory を論理削除（`status=invalid`）する
 
 ---
 
@@ -436,6 +459,23 @@ OLLAMA_API_BASE=http://ollama:11434
   - 昇格成功/失敗の暗黙シグナルを記録して学習報酬へ反映
 - UI/レスポンス:
   - `routing.reason` に `Escalation: <REASON> -> <profile>` を含めて可観測化
+
+### v1.5（semantic memory）
+
+- semantic memory 設定を追加:
+  - `semantic_memory.enabled`, `max_references`, `min_confidence`, `default_ttl_days`
+  - `use_llm_extractor`, `extractor_provider/model`, `extractor_timeout_seconds`, `extractor_max_items`
+  - `merge_similarity_threshold`
+- DBに `semantic_memories` テーブルを追加:
+  - `memory_id`, `thread_id`, `source_run_id`, `kind`, `content`, `confidence`, `status`, `expires_at` などを保持
+- 実行フロー:
+  - `run/chat` 完了時に記憶候補を抽出（LLM優先、失敗時はルールベースにフォールバック）
+  - 保存時に同義文統合（`thread_id + kind` で類似度閾値以上を同一memoryへマージ）
+  - 後続ターンでは有効メモリを `[Semantic Memory]` として注入
+- 運用API:
+  - `GET /api/magi/memory?thread_id=...&limit=...`
+  - `PATCH /api/magi/memory/{memory_id}`
+  - `DELETE /api/magi/memory/{memory_id}`（論理削除）
 
 ---
 

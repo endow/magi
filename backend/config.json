@@ -54,6 +54,18 @@
       }
     ]
   },
+  "semantic_memory": {
+    "enabled": false,
+    "max_references": 2,
+    "min_confidence": 0.75,
+    "default_ttl_days": 180,
+    "use_llm_extractor": true,
+    "extractor_provider": "ollama",
+    "extractor_model": "qwen2.5:7b-instruct-q4_K_M",
+    "extractor_timeout_seconds": 6,
+    "extractor_max_items": 3,
+    "merge_similarity_threshold": 0.88
+  },
   "profiles": {
     "local_only": {
       "agents": [

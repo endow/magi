@@ -2097,3 +2097,177 @@ def test_single_model_consensus_sets_error_code_for_insufficient_results() -> No
     consensus = asyncio.run(main._run_single_model_consensus(cfg, "hello", results, timeout_seconds=3))
     assert consensus.status == "ERROR"
     assert consensus.error_code == "INSUFFICIENT_OK_RESULTS"
+
+
+def _semantic_memory_config_for_test() -> main.AppConfig:
+    cfg = main.AppConfig(
+        default_profile="cost",
+        semantic_memory=main.SemanticMemoryConfig(enabled=True, max_references=2, min_confidence=0.5, default_ttl_days=180),
+        profiles={
+            "cost": main.ProfileConfig(
+                agents=[main.AgentConfig(agent="A", provider="openai", model="gpt-4o-mini")],
+                consensus=main.ConsensusConfig(strategy="peer_vote", min_ok_results=1, rounds=1),
+                timeout_seconds=20,
+            )
+        },
+    )
+    return cfg
+
+
+def test_semantic_memory_saved_and_injected_in_followup_run(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("MAGI_DB_PATH", str(tmp_path / "magi-semantic-memory.db"))
+    main._init_db()
+    monkeypatch.setattr(main, "load_config", _semantic_memory_config_for_test)
+
+    captured_prompts: list[str] = []
+
+    async def fake_runner(agent_config, prompt, timeout_seconds):
+        captured_prompts.append(prompt)
+        return main.AgentResult(
+            agent=agent_config.agent,
+            provider=agent_config.provider,
+            model=agent_config.model,
+            text="ok",
+            status="OK",
+            latency_ms=10,
+        )
+
+    thread_id = str(uuid.uuid4())
+    monkeypatch.setattr(main, "_run_single_agent", fake_runner)
+
+    first = client.post(
+        "/api/magi/run",
+        json={"prompt": "このプロジェクトではpytestを使う", "profile": "cost", "thread_id": thread_id},
+    )
+    assert first.status_code == 200
+
+    second = client.post(
+        "/api/magi/run",
+        json={"prompt": "テスト方針を教えて", "profile": "cost", "thread_id": thread_id},
+    )
+    assert second.status_code == 200
+    assert any("[Semantic Memory]" in text for text in captured_prompts), captured_prompts[-1]
+
+
+def test_semantic_memory_api_list_patch_delete(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("MAGI_DB_PATH", str(tmp_path / "magi-semantic-memory-api.db"))
+    main._init_db()
+    monkeypatch.setattr(main, "load_config", _semantic_memory_config_for_test)
+
+    async def fake_runner(agent_config, prompt, timeout_seconds):
+        return main.AgentResult(
+            agent=agent_config.agent,
+            provider=agent_config.provider,
+            model=agent_config.model,
+            text="ok",
+            status="OK",
+            latency_ms=10,
+        )
+
+    monkeypatch.setattr(main, "_run_single_agent", fake_runner)
+    thread_id = str(uuid.uuid4())
+    run_response = client.post(
+        "/api/magi/run",
+        json={"prompt": "このプロジェクトではpytestを使う", "profile": "cost", "thread_id": thread_id},
+    )
+    assert run_response.status_code == 200
+
+    listed = client.get(f"/api/magi/memory?thread_id={thread_id}&limit=20")
+    assert listed.status_code == 200
+    body = listed.json()
+    assert body["total"] >= 1
+    memory_id = body["items"][0]["memory_id"]
+
+    patched = client.patch(f"/api/magi/memory/{memory_id}", json={"status": "stale", "confidence": 0.91})
+    assert patched.status_code == 200
+    patched_body = patched.json()
+    assert patched_body["status"] == "stale"
+    assert patched_body["confidence"] == 0.91
+
+    deleted = client.delete(f"/api/magi/memory/{memory_id}")
+    assert deleted.status_code == 200
+    assert deleted.json()["status"] == "invalid"
+
+
+def test_semantic_memory_llm_extractor_preferred(monkeypatch) -> None:
+    cfg = _semantic_memory_config_for_test()
+    cfg.semantic_memory.use_llm_extractor = True
+    cfg.semantic_memory.extractor_provider = "ollama"
+    cfg.semantic_memory.extractor_model = "qwen2.5:7b-instruct-q4_K_M"
+
+    async def fake_call_model_text(full_model, prompt, timeout_seconds, max_tokens=None, system_prompt=None):
+        return (
+            '[{"kind":"project_decision","content":"このプロジェクトではpytestを標準テストとして使う","confidence":0.92}]',
+            12,
+            {},
+        )
+
+    monkeypatch.setattr(main, "_call_model_text", fake_call_model_text)
+    candidates = asyncio.run(
+        main._resolve_semantic_memory_candidates(
+            "このプロジェクトではpytestを使う",
+            main.ConsensusResult(provider="magi", model="peer_vote_r1", text="pytestを使う", status="OK", latency_ms=10),
+            cfg,
+        )
+    )
+    assert candidates
+    assert candidates[0][0] == "project_decision"
+    assert "pytest" in candidates[0][1]
+    assert candidates[0][2] == 0.92
+
+
+def test_semantic_memory_llm_extractor_falls_back_to_rules(monkeypatch) -> None:
+    cfg = _semantic_memory_config_for_test()
+    cfg.semantic_memory.use_llm_extractor = True
+    cfg.semantic_memory.extractor_provider = "ollama"
+    cfg.semantic_memory.extractor_model = "qwen2.5:7b-instruct-q4_K_M"
+
+    async def fake_call_model_text(full_model, prompt, timeout_seconds, max_tokens=None, system_prompt=None):
+        return ("not-json", 12, {})
+
+    monkeypatch.setattr(main, "_call_model_text", fake_call_model_text)
+    candidates = asyncio.run(
+        main._resolve_semantic_memory_candidates(
+            "このプロジェクトではpytestを使う",
+            main.ConsensusResult(provider="magi", model="peer_vote_r1", text="pytestを使う", status="OK", latency_ms=10),
+            cfg,
+        )
+    )
+    assert candidates
+    assert any(item[0] in {"project_decision", "project_fact"} for item in candidates)
+
+
+def test_semantic_memory_upsert_merges_similar_content(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("MAGI_DB_PATH", str(tmp_path / "magi-semantic-memory-merge.db"))
+    main._init_db()
+    cfg = _semantic_memory_config_for_test()
+    cfg.semantic_memory.merge_similarity_threshold = 0.55
+
+    thread_id = str(uuid.uuid4())
+    first_items = [("project_decision", "このプロジェクトでは pytest を標準テストとして使う", 0.82)]
+    second_items = [("project_decision", "このプロジェクトは pytest を標準のテスト基盤にする", 0.88)]
+
+    inserted_first = main._upsert_semantic_memories(thread_id, "run-1", first_items, cfg)
+    inserted_second = main._upsert_semantic_memories(thread_id, "run-2", second_items, cfg)
+    assert inserted_first == 1
+    assert inserted_second == 1
+
+    with main._get_db_connection() as conn:
+        count_row = conn.execute(
+            "SELECT COUNT(1) AS count FROM semantic_memories WHERE thread_id = ? AND kind = 'project_decision' AND status != 'invalid'",
+            (thread_id,),
+        ).fetchone()
+        latest_row = conn.execute(
+            """
+            SELECT source_run_id, content, confidence
+            FROM semantic_memories
+            WHERE thread_id = ? AND kind = 'project_decision'
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (thread_id,),
+        ).fetchone()
+    assert int(count_row["count"]) == 1
+    assert latest_row["source_run_id"] == "run-2"
+    assert "pytest" in latest_row["content"]
+    assert float(latest_row["confidence"]) == 0.88

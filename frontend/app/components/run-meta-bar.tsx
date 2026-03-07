@@ -5,6 +5,7 @@ type RunMetaBarProps = {
   threadId: string;
   turnIndex: number;
   selectedProfile: string;
+  resolvedProfile: string;
   freshMode: boolean;
   totalTokens: number | null;
   totalCostUsd: number | null;
@@ -16,17 +17,19 @@ export default function RunMetaBar({
   threadId,
   turnIndex,
   selectedProfile,
+  resolvedProfile,
   freshMode,
   totalTokens,
   totalCostUsd,
   onCopyRunId
 }: RunMetaBarProps) {
+  const modeLabel = selectedProfile || (resolvedProfile ? `auto -> ${resolvedProfile}` : "auto");
   return (
     <div className="mt-4 flex items-center gap-2 text-xs text-terminal-dim">
       <span>run_id: {runId || "-"}</span>
       <span>thread_id: {threadId || "-"}</span>
       <span>turn: {turnIndex > 0 ? turnIndex : "-"}</span>
-      <span>mode: {selectedProfile || "auto"}</span>
+      <span>profile: {modeLabel}</span>
       <span>fresh: {freshMode ? "on" : "off"}</span>
       <span>tokens: {typeof totalTokens === "number" ? totalTokens : "-"}</span>
       <span>cost_usd_est: {typeof totalCostUsd === "number" ? totalCostUsd.toFixed(6) : "-"}</span>

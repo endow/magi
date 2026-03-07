@@ -231,7 +231,7 @@ test("local_only chat run shows conclusion elapsed time", async ({ page }) => {
   });
 
   await page.goto("/");
-  await page.locator('label:has-text("mode:") select').selectOption("local_only");
+  await page.locator('label:has-text("profile:") select').selectOption("local_only");
   const promptInput = page.getByRole("textbox", { name: "Type your prompt..." });
   const runDetails = page.locator("details").filter({ hasText: "run details / routing / feedback" }).first();
   await promptInput.fill("やあ");

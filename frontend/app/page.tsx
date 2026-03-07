@@ -1050,6 +1050,7 @@ export default function HomePage() {
               threadId={threadId}
               turnIndex={turnIndex}
               selectedProfile={selectedProfile}
+              resolvedProfile={resolvedProfile}
               freshMode={freshMode}
               totalTokens={totalTokens}
               totalCostUsd={totalCostUsd}

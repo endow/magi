@@ -57,14 +57,14 @@ export default function PromptForm({
           {prompt.length}/{maxPromptLength} chars
         </span>
         <label className="text-xs text-terminal-dim">
-          mode:
+          profile:
           <select
             className="ml-2 rounded border border-terminal-border bg-[#02060b] px-2 py-1 text-xs"
             value={selectedProfile}
             onChange={(event) => onProfileChange(event.target.value)}
             disabled={isBusy}
           >
-            <option value="">auto (unset)</option>
+            <option value="">auto (router decides)</option>
             {availableProfiles.map((profile) => (
               <option key={profile} value={profile}>
                 {profile}
@@ -93,6 +93,9 @@ export default function PromptForm({
           </span>
         ) : null}
       </div>
+      {!selectedProfile ? (
+        <p className="text-xs text-terminal-dim">auto: backend router selects profile (local_only/balance/...).</p>
+      ) : null}
       <p className="text-xs text-terminal-dim">Enter: submit / Shift+Enter: newline</p>
     </form>
   );

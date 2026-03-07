@@ -197,7 +197,7 @@ export default function ThreadSidebar({
                     >
                       <p>{new Date(item.created_at).toLocaleString()}</p>
                       <p>turn: {item.turn_index}</p>
-                      <p>mode: {item.profile}</p>
+                      <p>profile: {item.profile}</p>
                       <p>status: {statusSummary}</p>
                       <p className="truncate">prompt: {item.prompt}</p>
                     </button>

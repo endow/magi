@@ -98,16 +98,17 @@
     },
     "balance": {
       "agents": [
-        { "agent": "A", "provider": "openai", "model": "gpt-5" },
+        { "agent": "A", "provider": "openai", "model": "gpt-5-mini" },
         { "agent": "B", "provider": "anthropic", "model": "claude-sonnet-4-20250514" },
         { "agent": "C", "provider": "gemini", "model": "gemini-2.5-flash" }
       ],
       "consensus": {
-        "strategy": "peer_vote",
-        "min_ok_results": 2,
-        "rounds": 1
+        "strategy": "single_model",
+        "provider": "openai",
+        "model": "gpt-5-mini",
+        "min_ok_results": 2
       },
-      "timeout_seconds": 45
+      "timeout_seconds": 20
     },
     "performance": {
       "agents": [

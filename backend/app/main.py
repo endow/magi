@@ -1693,6 +1693,39 @@ def _is_fresh_sensitive_prompt(prompt: str) -> bool:
     return False
 
 
+def _is_time_sensitive_query(prompt: str) -> bool:
+    lowered = prompt.strip().lower()
+    if not lowered:
+        return False
+    time_markers = (
+        "today",
+        "tomorrow",
+        "this week",
+        "next week",
+        "this month",
+        "weekend",
+        "今週",
+        "来週",
+        "今月",
+        "週末",
+        "今日",
+        "明日",
+        "今週いっぱい",
+    )
+    weather_markers = (
+        "weather",
+        "forecast",
+        "temperature",
+        "rain",
+        "snow",
+        "天気",
+        "気温",
+        "予報",
+        "降水",
+    )
+    return any(token in lowered for token in time_markers) and any(token in lowered for token in weather_markers)
+
+
 def _resolve_fresh_mode(prompt: str, requested_fresh_mode: bool | None) -> bool:
     if requested_fresh_mode is True:
         return True
@@ -4281,11 +4314,12 @@ async def _run_single_agent(agent_config: AgentConfig, prompt: str, timeout_seco
     max_attempts = 2 if should_retry_on_timeout else 1
 
     for attempt in range(1, max_attempts + 1):
+        attempt_timeout = timeout_seconds if attempt == 1 else max(3, min(12, timeout_seconds // 3))
         try:
             text, latency_ms, usage = await _call_model_text(
                 full_model,
                 prompt,
-                timeout_seconds,
+                attempt_timeout,
                 system_prompt=agent_config.system_prompt,
             )
             print(f"[magi] agent={agent_config.agent} success latency_ms={latency_ms}")
@@ -4305,7 +4339,10 @@ async def _run_single_agent(agent_config: AgentConfig, prompt: str, timeout_seco
             )
         except asyncio.TimeoutError:
             if attempt < max_attempts:
-                print(f"[magi] agent={agent_config.agent} timeout attempt={attempt}; retrying once")
+                print(
+                    f"[magi] agent={agent_config.agent} timeout attempt={attempt}; "
+                    f"retrying once with timeout_seconds={max(3, min(12, timeout_seconds // 3))}"
+                )
                 continue
             print(f"[magi] agent={agent_config.agent} error=timeout")
             return AgentResult(
@@ -5142,10 +5179,14 @@ async def chat_magi(payload: ChatRequest) -> ChatResponse:
     auto_routing_signals: list[str] = []
     ollama_system_prompt = _normalize_ollama_system_prompt(payload.ollama_system_prompt)
     selected_profile_name = "local_only"
+    explicit_profile_requested = bool(payload.profile and payload.profile.strip())
 
     try:
         resolved_source_urls = _resolve_source_urls_for_prompt(prompt, payload.source_urls)
         url_anchored_request = bool(resolved_source_urls)
+        skip_local_draft = (not explicit_profile_requested) and (
+            _is_time_sensitive_query(prompt) or url_anchored_request
+        )
         semantic_memory_candidates: list[tuple[str, str, float]] = []
         effective_prompt = await _build_effective_prompt(prompt, fresh_mode, payload.source_urls)
 
@@ -5166,124 +5207,27 @@ async def chat_magi(payload: ChatRequest) -> ChatResponse:
             reason = "first_turn_or_smalltalk" if turn_index <= 1 or fast_intent == "smalltalk" else "disabled"
             print(f"[magi] history_context skipped profile=chat reason={reason}")
 
-        local_agent, local_timeout, used_local_only_profile = _resolve_chat_local_agent(config, fallback_profile)
-        local_agent = _apply_ollama_system_prompt(local_agent, ollama_system_prompt)
-        local_result = await _run_single_agent(local_agent, effective_prompt, local_timeout)
-        if used_local_only_profile:
-            local_result = _postprocess_local_only_result(prompt, local_result)
-
-        is_sufficient, sufficiency_reason = await _is_local_draft_sufficient(
-            prompt,
-            local_result,
-            local_agent,
-            local_timeout,
-        )
-        print(f"[magi] chat local_draft sufficient={is_sufficient} reason={sufficiency_reason}")
-
-        if is_sufficient:
-            results = [local_result]
-            consensus = _build_local_only_consensus(results)
-            selected_profile_name = "local_only" if used_local_only_profile else fallback_profile_name
-            router_input = _build_router_input_snapshot(
-                prompt,
-                RouteDecision(
-                    profile=selected_profile_name,
-                    confidence=95,
-                    reason=sufficiency_reason,
-                    intent=_local_intent_fast_path(prompt),
-                    complexity="low" if _local_intent_fast_path(prompt) == "smalltalk" else None,
-                    safety="low",
-                    execution_tier="local",
-                    needs_web=_is_fresh_sensitive_prompt(prompt),
-                    needs_tools=False,
-                    estimated_steps=1,
-                    ambiguity=0.1,
-                ),
-                fallback_profile_name,
-            )
-            selected_profile_name, candidates, policy_key = _select_profile_with_policy(
-                set(config.profiles.keys()) if config.profiles else {selected_profile_name},
-                selected_profile_name,
-                router_input,
-            )
-            router_output = {
-                "chosen_profile": selected_profile_name,
-                "candidates": candidates,
-                "policy_key": policy_key,
-                "reason": f"local_draft_sufficient:{sufficiency_reason}",
-                "router_confidence": 95,
-            }
-
-            if selected_profile_name == "local_only" and config.profiles:
-                policy = _get_routing_policy(policy_key) if policy_key else {"escalation_policy": _default_escalation_policy()}
-                escalation_policy = _normalize_escalation_policy(policy.get("escalation_policy"))
-                estimated_steps = max(1, _coerce_int(router_input.get("estimated_steps"), 1))
-                ambiguity = max(0.0, min(1.0, _coerce_float(router_input.get("ambiguity"), 0.0)))
-                escalation_state = {
-                    "needs_web": _coerce_bool(router_input.get("needs_web"), default=_is_fresh_sensitive_prompt(prompt)),
-                    "local_confidence": 0.95,
-                    "retry_count": sum(1 for item in results if item.status == "ERROR"),
-                    "tool_call_count": max(0, estimated_steps if _coerce_bool(router_input.get("needs_tools"), default=False) else 0),
-                    "elapsed_ms": max((item.latency_ms for item in results), default=0),
-                    "estimated_remaining_steps": max(0, estimated_steps - 1),
-                    "has_conflict": ambiguity >= 0.65,
+        if explicit_profile_requested or skip_local_draft:
+            if explicit_profile_requested:
+                selected_profile_name, profile = _resolve_profile(config, payload.profile)
+                router_input = _build_router_input_snapshot(prompt, None, selected_profile_name)
+                router_output = {
+                    "chosen_profile": selected_profile_name,
+                    "candidates": {
+                        selected_profile_name: {"base_score": 1.0, "policy_weight": 0.0, "final_score": 1.0}
+                    },
+                    "policy_key": _routing_policy_key_from_input(router_input),
+                    "reason": "profile_explicit",
+                    "router_confidence": 100,
                 }
-                escalation = _evaluate_escalation(escalation_state, escalation_policy, set(config.profiles.keys()), selected_profile_name)
-                if escalation.get("action") == "escalate":
-                    escalated_profile_name = _safe_str(escalation.get("profile"))
-                    escalated_profile = config.profiles.get(escalated_profile_name)
-                    if escalated_profile:
-                        if _coerce_bool(escalation.get("enable_fresh_mode"), default=False) and not fresh_mode:
-                            fresh_mode = True
-                        effective_prompt = await _build_effective_prompt(prompt, fresh_mode, payload.source_urls)
-                        if _thread_context_enabled():
-                            effective_prompt = _build_prompt_with_thread_context(effective_prompt, thread_id)
-                        effective_prompt = _build_prompt_with_semantic_memory(effective_prompt, thread_id, config)
-                        should_apply_history = (
-                            _history_enabled()
-                            and not url_anchored_request
-                            and turn_index > 1
-                            and fast_intent != "smalltalk"
-                        )
-                        if should_apply_history:
-                            effective_prompt = await _build_prompt_with_history(prompt, effective_prompt, config)
-                        escalated_agents = [_apply_ollama_system_prompt(agent, ollama_system_prompt) for agent in escalated_profile.agents]
-                        escalated_tasks = [_run_single_agent(agent, effective_prompt, escalated_profile.timeout_seconds) for agent in escalated_agents]
-                        results = await asyncio.gather(*escalated_tasks)
-                        selected_profile_name = escalated_profile_name
-                        consensus = await _run_consensus(escalated_profile, effective_prompt, results)
-                        reason_code = _safe_str(escalation.get("reason_code")) or "UNKNOWN"
-                        router_output["escalation"] = {
-                            "from": "local_only",
-                            "to": selected_profile_name,
-                            "reason_code": reason_code,
-                            "enable_fresh_mode": bool(escalation.get("enable_fresh_mode")),
-                        }
-                        base_reason = _safe_str(router_output.get("reason"))
-                        router_output["reason"] = (
-                            f"{base_reason} | Escalation: {reason_code} -> {selected_profile_name}"
-                            if base_reason
-                            else f"Escalation: {reason_code} -> {selected_profile_name}"
-                        )
-                        signal_by_reason = {
-                            "LOW_CONFIDENCE": "escalated_after_low_confidence",
-                            "TOOL_FAILURE": "escalated_after_tool_failure",
-                            "LATENCY_BREACH": "escalated_after_timeout",
-                            "ANSWER_CONFLICT": "escalated_after_conflict",
-                        }
-                        mapped_signal = signal_by_reason.get(reason_code)
-                        if mapped_signal:
-                            auto_routing_signals.append(mapped_signal)
-                elif all(item.status == "OK" for item in results):
-                    auto_routing_signals.append("local_completed_without_escalation")
-            _save_routing_event(thread_id, run_id, router_input, router_output)
-            routing_event_saved = True
-        else:
-            selected_profile_name, profile, router_input, router_output = await _resolve_profile_with_router_trace(
-                config,
-                payload.profile,
-                prompt,
-            )
+            else:
+                print("[magi] chat local_draft skipped reason=time_sensitive_or_fresh")
+                selected_profile_name, profile, router_input, router_output = await _resolve_profile_with_router_trace(
+                    config,
+                    payload.profile,
+                    prompt,
+                )
+                router_output["reason"] = "local_draft_skipped_time_sensitive"
             _save_routing_event(thread_id, run_id, router_input, router_output)
             routing_event_saved = True
             agents = [_apply_ollama_system_prompt(agent, ollama_system_prompt) for agent in profile.agents]
@@ -5294,6 +5238,135 @@ async def chat_magi(payload: ChatRequest) -> ChatResponse:
                 if selected_profile_name == "local_only"
                 else await _run_consensus(profile, effective_prompt, results)
             )
+        else:
+            local_agent, local_timeout, used_local_only_profile = _resolve_chat_local_agent(config, fallback_profile)
+            local_agent = _apply_ollama_system_prompt(local_agent, ollama_system_prompt)
+            local_result = await _run_single_agent(local_agent, effective_prompt, local_timeout)
+            if used_local_only_profile:
+                local_result = _postprocess_local_only_result(prompt, local_result)
+
+            is_sufficient, sufficiency_reason = await _is_local_draft_sufficient(
+                prompt,
+                local_result,
+                local_agent,
+                local_timeout,
+            )
+            print(f"[magi] chat local_draft sufficient={is_sufficient} reason={sufficiency_reason}")
+
+            if is_sufficient:
+                results = [local_result]
+                consensus = _build_local_only_consensus(results)
+                selected_profile_name = "local_only" if used_local_only_profile else fallback_profile_name
+                router_input = _build_router_input_snapshot(
+                    prompt,
+                    RouteDecision(
+                        profile=selected_profile_name,
+                        confidence=95,
+                        reason=sufficiency_reason,
+                        intent=_local_intent_fast_path(prompt),
+                        complexity="low" if _local_intent_fast_path(prompt) == "smalltalk" else None,
+                        safety="low",
+                        execution_tier="local",
+                        needs_web=_is_fresh_sensitive_prompt(prompt),
+                        needs_tools=False,
+                        estimated_steps=1,
+                        ambiguity=0.1,
+                    ),
+                    fallback_profile_name,
+                )
+                selected_profile_name, candidates, policy_key = _select_profile_with_policy(
+                    set(config.profiles.keys()) if config.profiles else {selected_profile_name},
+                    selected_profile_name,
+                    router_input,
+                )
+                router_output = {
+                    "chosen_profile": selected_profile_name,
+                    "candidates": candidates,
+                    "policy_key": policy_key,
+                    "reason": f"local_draft_sufficient:{sufficiency_reason}",
+                    "router_confidence": 95,
+                }
+
+                if selected_profile_name == "local_only" and config.profiles:
+                    policy = _get_routing_policy(policy_key) if policy_key else {"escalation_policy": _default_escalation_policy()}
+                    escalation_policy = _normalize_escalation_policy(policy.get("escalation_policy"))
+                    estimated_steps = max(1, _coerce_int(router_input.get("estimated_steps"), 1))
+                    ambiguity = max(0.0, min(1.0, _coerce_float(router_input.get("ambiguity"), 0.0)))
+                    escalation_state = {
+                        "needs_web": _coerce_bool(router_input.get("needs_web"), default=_is_fresh_sensitive_prompt(prompt)),
+                        "local_confidence": 0.95,
+                        "retry_count": sum(1 for item in results if item.status == "ERROR"),
+                        "tool_call_count": max(0, estimated_steps if _coerce_bool(router_input.get("needs_tools"), default=False) else 0),
+                        "elapsed_ms": max((item.latency_ms for item in results), default=0),
+                        "estimated_remaining_steps": max(0, estimated_steps - 1),
+                        "has_conflict": ambiguity >= 0.65,
+                    }
+                    escalation = _evaluate_escalation(escalation_state, escalation_policy, set(config.profiles.keys()), selected_profile_name)
+                    if escalation.get("action") == "escalate":
+                        escalated_profile_name = _safe_str(escalation.get("profile"))
+                        escalated_profile = config.profiles.get(escalated_profile_name)
+                        if escalated_profile:
+                            if _coerce_bool(escalation.get("enable_fresh_mode"), default=False) and not fresh_mode:
+                                fresh_mode = True
+                            effective_prompt = await _build_effective_prompt(prompt, fresh_mode, payload.source_urls)
+                            if _thread_context_enabled():
+                                effective_prompt = _build_prompt_with_thread_context(effective_prompt, thread_id)
+                            effective_prompt = _build_prompt_with_semantic_memory(effective_prompt, thread_id, config)
+                            should_apply_history = (
+                                _history_enabled()
+                                and not url_anchored_request
+                                and turn_index > 1
+                                and fast_intent != "smalltalk"
+                            )
+                            if should_apply_history:
+                                effective_prompt = await _build_prompt_with_history(prompt, effective_prompt, config)
+                            escalated_agents = [_apply_ollama_system_prompt(agent, ollama_system_prompt) for agent in escalated_profile.agents]
+                            escalated_tasks = [_run_single_agent(agent, effective_prompt, escalated_profile.timeout_seconds) for agent in escalated_agents]
+                            results = await asyncio.gather(*escalated_tasks)
+                            selected_profile_name = escalated_profile_name
+                            consensus = await _run_consensus(escalated_profile, effective_prompt, results)
+                            reason_code = _safe_str(escalation.get("reason_code")) or "UNKNOWN"
+                            router_output["escalation"] = {
+                                "from": "local_only",
+                                "to": selected_profile_name,
+                                "reason_code": reason_code,
+                                "enable_fresh_mode": bool(escalation.get("enable_fresh_mode")),
+                            }
+                            base_reason = _safe_str(router_output.get("reason"))
+                            router_output["reason"] = (
+                                f"{base_reason} | Escalation: {reason_code} -> {selected_profile_name}"
+                                if base_reason
+                                else f"Escalation: {reason_code} -> {selected_profile_name}"
+                            )
+                            signal_by_reason = {
+                                "LOW_CONFIDENCE": "escalated_after_low_confidence",
+                                "TOOL_FAILURE": "escalated_after_tool_failure",
+                                "LATENCY_BREACH": "escalated_after_timeout",
+                                "ANSWER_CONFLICT": "escalated_after_conflict",
+                            }
+                            mapped_signal = signal_by_reason.get(reason_code)
+                            if mapped_signal:
+                                auto_routing_signals.append(mapped_signal)
+                    elif all(item.status == "OK" for item in results):
+                        auto_routing_signals.append("local_completed_without_escalation")
+                _save_routing_event(thread_id, run_id, router_input, router_output)
+                routing_event_saved = True
+            else:
+                selected_profile_name, profile, router_input, router_output = await _resolve_profile_with_router_trace(
+                    config,
+                    payload.profile,
+                    prompt,
+                )
+                _save_routing_event(thread_id, run_id, router_input, router_output)
+                routing_event_saved = True
+                agents = [_apply_ollama_system_prompt(agent, ollama_system_prompt) for agent in profile.agents]
+                tasks = [_run_single_agent(agent, effective_prompt, profile.timeout_seconds) for agent in agents]
+                results = await asyncio.gather(*tasks)
+                consensus = (
+                    _build_local_only_consensus(results)
+                    if selected_profile_name == "local_only"
+                    else await _run_consensus(profile, effective_prompt, results)
+                )
 
         if _semantic_memory_enabled(config):
             semantic_memory_candidates = await _resolve_semantic_memory_candidates(prompt, consensus, config)

@@ -393,6 +393,47 @@ def test_chat_escalates_local_draft_to_balance_when_web_required(monkeypatch) ->
     assert "Escalation: WEB_REQUIRED -> balance" in (body.get("routing", {}).get("reason") or "")
 
 
+def test_chat_skips_local_draft_for_time_sensitive_weather_query(monkeypatch) -> None:
+    monkeypatch.setattr(main, "load_config", _profiled_config_with_router)
+    monkeypatch.setattr(main, "_save_run_history", lambda *args, **kwargs: None)
+
+    calls = {"count": 0}
+
+    async def fake_runner(agent_config, prompt, timeout_seconds):
+        calls["count"] += 1
+        return main.AgentResult(
+            agent=agent_config.agent,
+            provider=agent_config.provider,
+            model=agent_config.model,
+            text=f"answer-{agent_config.agent}",
+            status="OK",
+            latency_ms=30,
+        )
+
+    async def fake_consensus(config_obj, prompt, results):
+        return main.ConsensusResult(
+            provider="magi",
+            model="peer_vote_r1",
+            text="Final answer:\n今週の気温推移です。",
+            status="OK",
+            latency_ms=40,
+        )
+
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("_is_local_draft_sufficient should be skipped for time-sensitive weather query")
+
+    monkeypatch.setattr(main, "_run_single_agent", fake_runner)
+    monkeypatch.setattr(main, "_run_consensus", fake_consensus)
+    monkeypatch.setattr(main, "_is_local_draft_sufficient", fail_if_called)
+
+    response = client.post("/api/magi/chat", json={"prompt": "今週いっぱいの気温変化はどうですか"})
+    assert response.status_code == 200
+    body = response.json()
+    assert calls["count"] == 3
+    assert body["profile"] == "cost"
+    assert "local_draft_skipped_time_sensitive" in (body.get("routing", {}).get("reason") or "")
+
+
 def test_chat_first_turn_skips_history_context(monkeypatch) -> None:
     monkeypatch.setattr(main, "load_config", _profiled_config_with_router)
     monkeypatch.setattr(main, "_save_run_history", lambda *args, **kwargs: None)
@@ -419,6 +460,12 @@ def test_chat_first_turn_skips_history_context(monkeypatch) -> None:
 
     response = client.post("/api/magi/chat", json={"prompt": "はじめまして"})
     assert response.status_code == 200
+
+
+def test_is_time_sensitive_query_for_weather() -> None:
+    assert main._is_time_sensitive_query("今週いっぱいの気温変化はどうですか")
+    assert main._is_time_sensitive_query("what is the weather this week in Tokyo?")
+    assert not main._is_time_sensitive_query("Python list sort の使い方を教えて")
 
 
 def test_chat_smalltalk_skips_history_context_even_with_existing_turns(monkeypatch, tmp_path) -> None:

@@ -784,6 +784,57 @@ def test_history_list_and_get_item(monkeypatch, tmp_path) -> None:
     assert len(item_body["results"]) == 3
 
 
+def test_usage_summary_returns_totals_and_remaining(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("MAGI_DB_PATH", str(tmp_path / "magi-usage.db"))
+    main._init_db()
+
+    cfg = _profiled_config()
+    cfg.billing = main.BillingConfig(
+        provider_limits_usd={
+            "openai": 10.0,
+            "anthropic": 20.0,
+            "gemini": 30.0,
+        }
+    )
+    monkeypatch.setattr(main, "load_config", lambda: cfg)
+
+    ok_results = [
+        main.AgentResult(
+            agent="A",
+            provider="openai",
+            model="m1",
+            text="a",
+            status="OK",
+            latency_ms=10,
+            total_tokens=100,
+            cost_estimate_usd=1.25,
+        ),
+        main.AgentResult(
+            agent="B",
+            provider="anthropic",
+            model="m2",
+            text="b",
+            status="OK",
+            latency_ms=10,
+            total_tokens=120,
+            cost_estimate_usd=2.5,
+        ),
+    ]
+    consensus = main.ConsensusResult(provider="magi", model="peer_vote_v1", text="answer", status="OK", latency_ms=5)
+    main._save_run_history("run-usage-1", "cost", "p1", ok_results, consensus, thread_id="thread-u", turn_index=1)
+
+    response = client.get("/api/magi/usage/summary")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total_spent_usd"] == 3.75
+    assert body["total_budget_usd"] == 60.0
+    assert body["total_remaining_usd"] == 56.25
+    by_provider = {item["provider"]: item for item in body["providers"]}
+    assert by_provider["openai"]["remaining_usd"] == 8.75
+    assert by_provider["anthropic"]["remaining_usd"] == 17.5
+    assert by_provider["gemini"]["remaining_usd"] == 30.0
+
+
 def test_run_assigns_thread_id_and_turn_index(monkeypatch) -> None:
     monkeypatch.setattr(main, "load_config", _profiled_config)
     monkeypatch.setattr(main, "_save_run_history", lambda *args, **kwargs: None)

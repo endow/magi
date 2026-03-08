@@ -81,6 +81,15 @@ type HistoryListResponse = {
   items: RunHistoryItem[];
 };
 
+type UsageSummaryResponse = {
+  total_spent_usd: number;
+  providers?: Array<{
+    provider: string;
+    spent_usd: number;
+  }>;
+  as_of: string;
+};
+
 type RoutingFeedbackResponse = {
   thread_id: string;
   request_id: string;
@@ -186,6 +195,25 @@ function formatElapsedMsToMinSec(elapsedMs: number): string {
   return `${minutes}m ${seconds}s`;
 }
 
+function formatUsd(value: number | null | undefined): string {
+  if (typeof value !== "number" || Number.isNaN(value)) return "-";
+  return `$${value.toFixed(3)}`;
+}
+
+function formatProviderUsage(summary: UsageSummaryResponse | null): string {
+  const providers = summary?.providers ?? [];
+  if (!providers.length) return "-";
+  const cloudProviders = providers.filter((item) => (item.provider || "").toLowerCase() !== "ollama");
+  if (!cloudProviders.length) return "-";
+  return cloudProviders
+    .map((item) => {
+      const name = item.provider || "unknown";
+      const spent = formatUsd(item.spent_usd);
+      return `${name} ${spent}`;
+    })
+    .join(" | ");
+}
+
 function buildConfiguredLoadingCards(
   profileAgents: ProfilesResponse["profile_agents"],
   selectedProfile: string
@@ -253,6 +281,7 @@ export default function HomePage() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsDraft, setSettingsDraft] = useState(DEFAULT_OLLAMA_SYSTEM_PROMPT);
   const [isDeletingAllThreads, setIsDeletingAllThreads] = useState(false);
+  const [usageSummary, setUsageSummary] = useState<UsageSummaryResponse | null>(null);
   const isBusy = isLoading || isConsensusLoading;
   const isStrictDebate = selectedProfile === "performance" || selectedProfile === "ultra";
   const isUltra = selectedProfile === "ultra";
@@ -286,6 +315,17 @@ export default function HomePage() {
       setHistory(data.items);
     } catch {
       // ignore history load errors
+    }
+  }
+
+  async function fetchUsageSummary() {
+    try {
+      const response = await fetch(`${apiBaseUrl}/api/magi/usage/summary`);
+      if (!response.ok) return;
+      const data = (await response.json()) as UsageSummaryResponse;
+      setUsageSummary(data);
+    } catch {
+      // ignore usage summary load errors
     }
   }
 
@@ -475,6 +515,7 @@ export default function HomePage() {
 
   useEffect(() => {
     void fetchHistory();
+    void fetchUsageSummary();
   }, []);
 
   useEffect(() => {
@@ -631,6 +672,7 @@ export default function HomePage() {
       startNewChat();
       setSettingsOpen(false);
       setError("");
+      await fetchUsageSummary();
     } catch {
       setError("backend connection failed");
     } finally {
@@ -740,6 +782,7 @@ export default function HomePage() {
       ]);
       markConsensusClockEnd();
       await fetchHistory();
+      await fetchUsageSummary();
     } finally {
       setIsLoading(false);
       setIsConsensusLoading(nextConsensusLoading);
@@ -932,6 +975,7 @@ export default function HomePage() {
       }
       setConfirmDeleteThreadId(null);
       setError("");
+      await fetchUsageSummary();
     } catch {
       setError("backend connection failed");
     }
@@ -990,7 +1034,6 @@ export default function HomePage() {
           </button>
         </div>
         <p className="mt-2 text-sm text-terminal-dim">Command chamber: local pre-router, then three models, then one consensus core.</p>
-
         <ChamberVisualization
           setChamberRef={(el) => {
             chamberRef.current = el;
@@ -1119,6 +1162,9 @@ export default function HomePage() {
             </div>
           </div>
         </details>
+        <div className="mt-3 text-xs text-terminal-dim">
+          <p>providers: {formatProviderUsage(usageSummary)}</p>
+        </div>
 
       </section>
 

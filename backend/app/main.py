@@ -145,6 +145,10 @@ class TemporalClassifierConfig(BaseModel):
     rules: list[TemporalPolicyRule] = Field(default_factory=list)
 
 
+class BillingConfig(BaseModel):
+    provider_limits_usd: dict[str, float] = Field(default_factory=dict)
+
+
 class RouteDecision(BaseModel):
     profile: str
     confidence: int
@@ -172,6 +176,7 @@ class AppConfig(BaseModel):
     routing_learning: RoutingLearningConfig | None = None
     semantic_memory: SemanticMemoryConfig | None = None
     temporal_classifier: TemporalClassifierConfig | None = None
+    billing: BillingConfig | None = None
 
 
 class TemporalDecision(BaseModel):
@@ -336,6 +341,23 @@ class ModelHealthResponse(BaseModel):
     errors: int
     warnings: int
     items: list[ModelHealthItem]
+
+
+class UsageProviderSummary(BaseModel):
+    provider: str
+    calls: int
+    total_tokens: int
+    spent_usd: float
+    budget_usd: float | None = None
+    remaining_usd: float | None = None
+
+
+class UsageSummaryResponse(BaseModel):
+    total_spent_usd: float
+    total_budget_usd: float | None = None
+    total_remaining_usd: float | None = None
+    providers: list[UsageProviderSummary]
+    as_of: str
 
 
 class HistoryItem(BaseModel):
@@ -4576,6 +4598,80 @@ def _delete_all_history() -> tuple[int, int]:
     return run_count, thread_count
 
 
+def _normalized_provider_limits(config: AppConfig | None) -> dict[str, float]:
+    if not config or not config.billing:
+        return {}
+    normalized: dict[str, float] = {}
+    for raw_provider, raw_limit in config.billing.provider_limits_usd.items():
+        provider = _safe_str(raw_provider).lower()
+        if not provider:
+            continue
+        try:
+            limit = float(raw_limit)
+        except (TypeError, ValueError):
+            continue
+        if limit < 0:
+            continue
+        normalized[provider] = round(limit, 6)
+    return normalized
+
+
+def _load_usage_summary(config: AppConfig | None = None) -> UsageSummaryResponse:
+    limits = _normalized_provider_limits(config)
+    with _get_db_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT provider,
+                   COUNT(*) AS calls,
+                   SUM(CASE WHEN total_tokens IS NOT NULL THEN total_tokens ELSE 0 END) AS total_tokens,
+                   SUM(CASE WHEN cost_estimate_usd IS NOT NULL THEN cost_estimate_usd ELSE 0 END) AS spent_usd
+            FROM agent_results
+            GROUP BY provider
+            """
+        ).fetchall()
+
+    providers: dict[str, UsageProviderSummary] = {}
+    for row in rows:
+        provider = _safe_str(row["provider"]).lower()
+        if not provider:
+            continue
+        spent = round(float(row["spent_usd"] or 0.0), 6)
+        budget = limits.get(provider)
+        remaining = round(budget - spent, 6) if isinstance(budget, float) else None
+        providers[provider] = UsageProviderSummary(
+            provider=provider,
+            calls=int(row["calls"] or 0),
+            total_tokens=int(row["total_tokens"] or 0),
+            spent_usd=spent,
+            budget_usd=budget,
+            remaining_usd=remaining,
+        )
+
+    for provider, budget in limits.items():
+        if provider in providers:
+            continue
+        providers[provider] = UsageProviderSummary(
+            provider=provider,
+            calls=0,
+            total_tokens=0,
+            spent_usd=0.0,
+            budget_usd=budget,
+            remaining_usd=round(budget, 6),
+        )
+
+    provider_items = sorted(providers.values(), key=lambda item: (-item.spent_usd, item.provider))
+    total_spent = round(sum(item.spent_usd for item in provider_items), 6)
+    total_budget = round(sum(limits.values()), 6) if limits else None
+    total_remaining = round(total_budget - total_spent, 6) if isinstance(total_budget, float) else None
+    return UsageSummaryResponse(
+        total_spent_usd=total_spent,
+        total_budget_usd=total_budget,
+        total_remaining_usd=total_remaining,
+        providers=provider_items,
+        as_of=datetime.now(timezone.utc).isoformat(),
+    )
+
+
 def _serialize_result_for_consensus(result: AgentResult) -> str:
     if result.status == "OK":
         body = result.text.strip()
@@ -5266,6 +5362,17 @@ async def list_profiles() -> ProfilesResponse:
         profiles=[profile_key],
         profile_agents={profile_key: fallback_agents},
     )
+
+
+@app.get("/api/magi/usage/summary", response_model=UsageSummaryResponse)
+async def get_usage_summary() -> UsageSummaryResponse:
+    try:
+        config = load_config()
+        return _load_usage_summary(config)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"failed to load usage summary: {exc}") from exc
 
 
 @app.get("/api/magi/history", response_model=HistoryListResponse)

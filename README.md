@@ -181,6 +181,13 @@ URL:
 ```json
 {
   "default_profile": "balance",
+  "billing": {
+    "provider_limits_usd": {
+      "openai": 20.0,
+      "anthropic": 20.0,
+      "gemini": 20.0
+    }
+  },
   "history_context": {
     "strategy": "embedding",
     "provider": "openai",
@@ -273,6 +280,10 @@ URL:
 - `routing_policy` には profile重みに加えて昇格しきい値（`max_local_steps`, `min_local_confidence`, `max_retry_before_escalation`, `max_tool_calls_before_escalation`, `max_elapsed_ms_before_escalation`, `escalate_on_web_need`, `escalate_on_conflict`, `escalate_to_profile`）を保持
 - 主要設定: `alpha`, `weight_min`, `weight_max`, `latency_threshold_ms`, `cost_threshold`
 
+`billing`（任意）:
+- `provider_limits_usd` に provider ごとの予算上限（USD）を設定
+- `GET /api/magi/usage/summary` で累計使用額と残額（`remaining_usd`）を参照可能
+
 履歴の扱い:
 - データは削除せず保持
 - `validity_state` (`active|stale|superseded`) を保持
@@ -293,6 +304,7 @@ URL:
 - Chatレスポンスには `reply`, `results`, `consensus`, `thread_id`, `turn_index` が含まれます
 - `results` の各Agent結果には `prompt_tokens/completion_tokens/total_tokens/cost_estimate_usd` が含まれます（取得できた場合）
 - 実行結果はローカルSQLite履歴へ保存されます
+- 利用状況サマリ: `GET /api/magi/usage/summary`（累計使用額。`billing.provider_limits_usd` 設定時は残額も返却）
 - 互換エンドポイント:
   - `POST /api/magi/run`
   - `POST /api/magi/retry`

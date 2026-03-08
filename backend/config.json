@@ -29,6 +29,9 @@
     "decay_lambda_per_day": 0.05,
     "stats_ema_beta": 0.2
   },
+  "billing": {
+    "provider_limits_usd": {}
+  },
   "history_context": {
     "strategy": "embedding",
     "provider": "openai",

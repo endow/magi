@@ -220,6 +220,7 @@ messages = [{"role": "user", "content": prompt}]
 
 - `GET /api/magi/profiles` で利用可能profile一覧を返す。
 - `GET /api/magi/health/models` で設定モデルの健全性（`OK/WARN/ERROR`）を返す。
+- `GET /api/magi/usage/summary` で provider別/全体の累計使用額を返し、`billing.provider_limits_usd` 設定時は残額も返す。
 - `POST /api/magi/run` で `profile` 未指定時、`request_router.enabled=true` なら入口LLMが分類してprofileを自動選択する。
 - ルーター出力は `intent/complexity/safety/execution_tier/profile/confidence/reason/needs_web/needs_tools/estimated_steps/ambiguity/escalation_hint` のJSONを想定し、`confidence < min_confidence` は `router_rules.default_profile` にフォールバックする。
 - `profiles` は **最低1エージェント** を許容する（`local_only` は1エージェント想定）。

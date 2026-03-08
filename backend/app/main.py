@@ -1668,6 +1668,8 @@ def _is_fresh_sensitive_prompt(prompt: str) -> bool:
         "breaking",
         "news",
         "price",
+        "temperature",
+        "forecast",
         "stock",
         "weather",
         "release date",
@@ -1681,6 +1683,8 @@ def _is_fresh_sensitive_prompt(prompt: str) -> bool:
         "為替",
         "価格",
         "天気",
+        "気温",
+        "予報",
         "直近",
         "アップデート",
         "リリース",
@@ -1737,6 +1741,26 @@ def _resolve_fresh_mode(prompt: str, requested_fresh_mode: bool | None) -> bool:
     if auto_enabled:
         print("[magi] fresh_mode auto-enabled by prompt pattern")
     return auto_enabled
+
+
+def _inject_temporal_reference(prompt: str) -> str:
+    if not _is_fresh_sensitive_prompt(prompt):
+        return prompt
+    now_utc = datetime.now(timezone.utc)
+    now_local = datetime.now().astimezone()
+    local_date = now_local.date()
+    week_start = local_date - timedelta(days=local_date.weekday())
+    week_end = week_start + timedelta(days=6)
+    return (
+        f"{prompt}\n\n"
+        "[Temporal Reference]\n"
+        f"current_utc={now_utc.isoformat()}\n"
+        f"current_local={now_local.isoformat()}\n"
+        f"current_local_date={local_date.isoformat()}\n"
+        f"current_week_local={week_start.isoformat()}..{week_end.isoformat()}\n"
+        "Interpret relative date terms (today/tomorrow/this week/今週/来週) using this reference.\n"
+        "If uncertain, ask for the target timezone or state assumptions explicitly."
+    )
 
 
 def _cached_fresh_sources(query: str) -> list[FreshSource] | None:
@@ -1907,7 +1931,7 @@ def _inject_fresh_context(prompt: str, sources: list[FreshSource]) -> str:
 
 
 async def _build_effective_prompt(prompt: str, fresh_mode: bool, source_urls: list[str] | None = None) -> str:
-    effective = prompt
+    effective = _inject_temporal_reference(prompt)
     validated_urls = _resolve_source_urls_for_prompt(prompt, source_urls)
     if validated_urls:
         fetched = await _fetch_direct_sources(validated_urls)
@@ -4673,6 +4697,22 @@ def _apply_ollama_system_prompt(agent: AgentConfig, override_prompt: str | None)
     return agent.model_copy(update={"system_prompt": override_prompt})
 
 
+def _select_execution_agents(
+    profile_name: str,
+    prompt: str,
+    fresh_mode: bool,
+    agents: list[AgentConfig],
+) -> list[AgentConfig]:
+    # For time-sensitive balance runs, avoid waiting on the slow OpenAI leg when 2-model consensus is sufficient.
+    if profile_name != "balance" or not (fresh_mode or _is_time_sensitive_query(prompt)):
+        return agents
+    non_openai_agents = [agent for agent in agents if agent.provider.strip().lower() != "openai"]
+    if len(non_openai_agents) >= 2:
+        print("[magi] balance fast_path enabled: skip openai agent for time-sensitive query")
+        return non_openai_agents
+    return agents
+
+
 def _resolve_chat_local_agent(config: AppConfig, fallback_profile: ProfileConfig) -> tuple[AgentConfig, int, bool]:
     if config.profiles:
         local_profile = config.profiles.get("local_only")
@@ -5018,6 +5058,7 @@ async def run_magi(payload: RunRequest) -> RunResponse:
         else:
             print(f"[magi] history_context skipped profile={profile_name}")
         agents = [_apply_ollama_system_prompt(agent, ollama_system_prompt) for agent in profile.agents]
+        agents = _select_execution_agents(profile_name, prompt, fresh_mode, agents)
         tasks = [_run_single_agent(agent, effective_prompt, profile.timeout_seconds) for agent in agents]
         results = await asyncio.gather(*tasks)
         initial_profile_name = profile_name
@@ -5056,6 +5097,7 @@ async def run_magi(payload: RunRequest) -> RunResponse:
                     if _should_apply_history_context(escalated_profile_name) and not url_anchored_request:
                         effective_prompt = await _build_prompt_with_history(prompt, effective_prompt, config)
                     escalated_agents = [_apply_ollama_system_prompt(agent, ollama_system_prompt) for agent in escalated_profile.agents]
+                    escalated_agents = _select_execution_agents(escalated_profile_name, prompt, fresh_mode, escalated_agents)
                     escalated_tasks = [_run_single_agent(agent, effective_prompt, escalated_profile.timeout_seconds) for agent in escalated_agents]
                     results = await asyncio.gather(*escalated_tasks)
                     profile_name = escalated_profile_name
@@ -5231,6 +5273,7 @@ async def chat_magi(payload: ChatRequest) -> ChatResponse:
             _save_routing_event(thread_id, run_id, router_input, router_output)
             routing_event_saved = True
             agents = [_apply_ollama_system_prompt(agent, ollama_system_prompt) for agent in profile.agents]
+            agents = _select_execution_agents(selected_profile_name, prompt, fresh_mode, agents)
             tasks = [_run_single_agent(agent, effective_prompt, profile.timeout_seconds) for agent in agents]
             results = await asyncio.gather(*tasks)
             consensus = (
@@ -5321,6 +5364,7 @@ async def chat_magi(payload: ChatRequest) -> ChatResponse:
                             if should_apply_history:
                                 effective_prompt = await _build_prompt_with_history(prompt, effective_prompt, config)
                             escalated_agents = [_apply_ollama_system_prompt(agent, ollama_system_prompt) for agent in escalated_profile.agents]
+                            escalated_agents = _select_execution_agents(escalated_profile_name, prompt, fresh_mode, escalated_agents)
                             escalated_tasks = [_run_single_agent(agent, effective_prompt, escalated_profile.timeout_seconds) for agent in escalated_agents]
                             results = await asyncio.gather(*escalated_tasks)
                             selected_profile_name = escalated_profile_name
@@ -5360,6 +5404,7 @@ async def chat_magi(payload: ChatRequest) -> ChatResponse:
                 _save_routing_event(thread_id, run_id, router_input, router_output)
                 routing_event_saved = True
                 agents = [_apply_ollama_system_prompt(agent, ollama_system_prompt) for agent in profile.agents]
+                agents = _select_execution_agents(selected_profile_name, prompt, fresh_mode, agents)
                 tasks = [_run_single_agent(agent, effective_prompt, profile.timeout_seconds) for agent in agents]
                 results = await asyncio.gather(*tasks)
                 consensus = (

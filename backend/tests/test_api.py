@@ -389,7 +389,8 @@ def test_chat_escalates_local_draft_to_balance_when_web_required(monkeypatch) ->
     assert response.status_code == 200
     body = response.json()
     assert body["profile"] == "balance"
-    assert len(body["results"]) == 3
+    assert len(body["results"]) == 2
+    assert [item["agent"] for item in body["results"]] == ["B", "C"]
     assert "Escalation: WEB_REQUIRED -> balance" in (body.get("routing", {}).get("reason") or "")
 
 
@@ -466,6 +467,21 @@ def test_is_time_sensitive_query_for_weather() -> None:
     assert main._is_time_sensitive_query("今週いっぱいの気温変化はどうですか")
     assert main._is_time_sensitive_query("what is the weather this week in Tokyo?")
     assert not main._is_time_sensitive_query("Python list sort の使い方を教えて")
+
+
+def test_select_execution_agents_skips_openai_for_time_sensitive_balance() -> None:
+    agents = [
+        main.AgentConfig(agent="A", provider="openai", model="gpt-5-mini"),
+        main.AgentConfig(agent="B", provider="anthropic", model="claude-sonnet-4-20250514"),
+        main.AgentConfig(agent="C", provider="gemini", model="gemini-2.5-flash"),
+    ]
+    selected = main._select_execution_agents(
+        profile_name="balance",
+        prompt="東五反田の今週いっぱいの気温変化は？",
+        fresh_mode=True,
+        agents=agents,
+    )
+    assert [item.agent for item in selected] == ["B", "C"]
 
 
 def test_chat_smalltalk_skips_history_context_even_with_existing_turns(monkeypatch, tmp_path) -> None:
@@ -997,6 +1013,18 @@ def test_build_effective_prompt_auto_extracts_url_from_prompt(monkeypatch) -> No
     assert "url=https://example.com/guide" in effective
 
 
+def test_build_effective_prompt_injects_temporal_reference_for_fresh_sensitive_prompt() -> None:
+    effective = asyncio.run(main._build_effective_prompt("今週の天気は？", False))
+    assert "[Temporal Reference]" in effective
+    assert "current_utc=" in effective
+    assert "current_week_local=" in effective
+
+
+def test_build_effective_prompt_does_not_inject_temporal_reference_for_non_fresh_prompt() -> None:
+    effective = asyncio.run(main._build_effective_prompt("Pythonの辞書内包表記を説明して", False))
+    assert "[Temporal Reference]" not in effective
+
+
 def test_run_uses_request_router_when_profile_not_provided(monkeypatch) -> None:
     monkeypatch.setattr(main, "load_config", lambda: _profiled_config_with_router(enabled=True))
     monkeypatch.setattr(main, "_save_run_history", lambda *args, **kwargs: None)
@@ -1367,6 +1395,7 @@ def test_resolve_fresh_mode_respects_auto_toggle(monkeypatch) -> None:
     monkeypatch.setenv("FRESH_AUTO_MODE", "1")
     assert main._resolve_fresh_mode("latest ai news", None) is True
     assert main._resolve_fresh_mode("YouTube攻略動画も参考にして", None) is True
+    assert main._resolve_fresh_mode("東五反田の今週いっぱいの気温変化は？", None) is True
     assert main._resolve_fresh_mode("latest ai news", False) is False
     assert main._resolve_fresh_mode("hello world", True) is True
 
@@ -1375,7 +1404,8 @@ def test_build_effective_prompt_falls_back_without_tavily_key(monkeypatch) -> No
     monkeypatch.delenv("TAVILY_API_KEY", raising=False)
     prompt = "latest policy update"
     effective = asyncio.run(main._build_effective_prompt(prompt, True))
-    assert effective == prompt
+    assert prompt in effective
+    assert "[Temporal Reference]" in effective
 
 
 def test_routing_feedback_rejects_non_uuid_thread_id() -> None:

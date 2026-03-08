@@ -433,8 +433,13 @@ export default function HomePage() {
         setShowConclusion(false);
         return;
       }
+      const activeAgents = new Set(items.map((item) => item.agent));
       setLocalNodeState("RELAY");
-      setNodeStates({ A: "BLINK", B: "BLINK", C: "BLINK" });
+      setNodeStates({
+        A: activeAgents.has("A") ? "BLINK" : "IDLE",
+        B: activeAgents.has("B") ? "BLINK" : "IDLE",
+        C: activeAgents.has("C") ? "BLINK" : "IDLE"
+      });
     }, 240);
     nodeTimerRefs.current.push(localTimer);
 

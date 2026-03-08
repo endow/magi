@@ -256,6 +256,7 @@ export default function HomePage() {
   const isBusy = isLoading || isConsensusLoading;
   const isStrictDebate = selectedProfile === "performance" || selectedProfile === "ultra";
   const isUltra = selectedProfile === "ultra";
+  const activeProfile = selectedProfile || defaultProfile;
   const chamberRef = useRef<HTMLDivElement | null>(null);
   const localNodeRef = useRef<HTMLDivElement | null>(null);
   const peerGroupRef = useRef<HTMLDivElement | null>(null);
@@ -289,47 +290,57 @@ export default function HomePage() {
   }
 
   const cards = useMemo(() => {
-    if (isLoading) return buildConfiguredLoadingCards(profileAgents, selectedProfile);
+    if (isLoading) {
+      const loadingProfile = selectedProfile || (resolvedProfile && resolvedProfile !== "local_only" ? resolvedProfile : "");
+      return buildConfiguredLoadingCards(profileAgents, loadingProfile);
+    }
     if (!results.length) return [];
     const order: AgentId[] = ["A", "B", "C"];
     const byAgent = new Map(results.map((item) => [item.agent, item]));
     return order.map((agent) => byAgent.get(agent)).filter((item): item is AgentResult => Boolean(item));
-  }, [isLoading, profileAgents, results, selectedProfile]);
+  }, [isLoading, profileAgents, resolvedProfile, results, selectedProfile]);
   const displayNodes = useMemo(() => {
     if (cards.length) return cards;
-    return buildConfiguredLoadingCards(profileAgents, selectedProfile);
+    if (selectedProfile) return buildConfiguredLoadingCards(profileAgents, selectedProfile);
+    return loadingResults;
   }, [cards, profileAgents, selectedProfile]);
   const localAgent = useMemo(() => (profileAgents.local_only ?? [])[0], [profileAgents]);
-  const downstreamProfile = useMemo(() => {
+  const localOnlyHandled = useMemo(
+    () => resolvedProfile === "local_only" && (results.length > 0 || consensus?.status === "OK"),
+    [consensus?.status, resolvedProfile, results.length]
+  );
+  const nodeDisplayProfile = useMemo(() => {
     if (resolvedProfile && resolvedProfile !== "local_only") return resolvedProfile;
     if (selectedProfile && selectedProfile !== "local_only") return selectedProfile;
+    if ((showConclusion || localOnlyHandled) && defaultProfile && defaultProfile !== "local_only") {
+      return defaultProfile;
+    }
+    if (isLoading && !showConclusion && loadingElapsedMs >= 7000 && defaultProfile && defaultProfile !== "local_only") {
+      return defaultProfile;
+    }
     return "";
-  }, [resolvedProfile, selectedProfile]);
+  }, [defaultProfile, isLoading, loadingElapsedMs, localOnlyHandled, resolvedProfile, selectedProfile, showConclusion]);
   const chamberNodes = useMemo(() => {
-    if (!downstreamProfile) return buildConfiguredLoadingCards(profileAgents, "");
-    const base = buildConfiguredLoadingCards(profileAgents, downstreamProfile);
+    if (!nodeDisplayProfile) return buildConfiguredLoadingCards(profileAgents, "");
+    const base = buildConfiguredLoadingCards(profileAgents, nodeDisplayProfile);
     if (isLoading) return base;
     if (resolvedProfile === "local_only") return base;
     if (!results.length) return base;
     const byAgent = new Map(results.map((item) => [item.agent, item]));
     return base.map((node) => byAgent.get(node.agent) ?? node);
-  }, [downstreamProfile, isLoading, profileAgents, resolvedProfile, results]);
+  }, [isLoading, nodeDisplayProfile, profileAgents, resolvedProfile, results]);
   const localRouteHint = useMemo(() => {
     if (isLoading && !resolvedProfile) {
       if (loadingElapsedMs < 7000) return "routing + context prep";
       return "waiting provider responses";
     }
     if (isLoading && resolvedProfile && resolvedProfile !== "local_only") return `dispatching to ${resolvedProfile}`;
-    if (isConsensusLoading) return "consensus in progress";
+    if (isConsensusLoading || consensus?.status === "LOADING") return "consensus in progress";
     if (localNodeState === "BLINK") return "classifying";
     if (resolvedProfile === "local_only") return "handled local_only";
     if (resolvedProfile) return `routed to ${resolvedProfile}`;
     return "pre-routing";
-  }, [isConsensusLoading, isLoading, loadingElapsedMs, localNodeState, resolvedProfile]);
-  const localOnlyHandled = useMemo(
-    () => resolvedProfile === "local_only" && (results.length > 0 || consensus?.status === "OK"),
-    [consensus?.status, resolvedProfile, results.length]
-  );
+  }, [consensus?.status, isConsensusLoading, isLoading, loadingElapsedMs, localNodeState, resolvedProfile]);
   const confidenceMap = useMemo(
     () => parseConfidenceMap(consensus?.status === "OK" ? consensus.text : ""),
     [consensus]
@@ -362,6 +373,14 @@ export default function HomePage() {
       (isConsensusLoading || consensus?.status === "LOADING"),
     [consensus?.status, isConsensusLoading, resolvedProfile, showConclusion]
   );
+  const allProviderResponsesReady = useMemo(
+    () =>
+      resolvedProfile !== "" &&
+      resolvedProfile !== "local_only" &&
+      results.length > 0 &&
+      results.every((item) => item.status !== "LOADING"),
+    [resolvedProfile, results]
+  );
   const showRoutingBadge = useMemo(
     () => !showConclusion && isLoading && loadingElapsedMs < 7000,
     [isLoading, loadingElapsedMs, showConclusion]
@@ -371,8 +390,8 @@ export default function HomePage() {
       !showConclusion &&
       isLoading &&
       loadingElapsedMs >= 7000 &&
-      Boolean(resolvedProfile),
-    [isLoading, loadingElapsedMs, resolvedProfile, showConclusion]
+      activeProfile !== "local_only",
+    [activeProfile, isLoading, loadingElapsedMs, showConclusion]
   );
   const threadGroups = useMemo(() => {
     const byThread = new Map<string, RunHistoryItem[]>();
@@ -424,48 +443,15 @@ export default function HomePage() {
   ) {
     clearNodeTimers();
     setShowConclusion(false);
-    setLocalNodeState("BLINK");
-    setNodeStates({ A: "IDLE", B: "IDLE", C: "IDLE" });
-
-    const localTimer = window.setTimeout(() => {
-      if (profile === "local_only") {
-        setLocalNodeState("ON");
-        setShowConclusion(false);
-        return;
-      }
-      const activeAgents = new Set(items.map((item) => item.agent));
-      setLocalNodeState("RELAY");
-      setNodeStates({
-        A: activeAgents.has("A") ? "BLINK" : "IDLE",
-        B: activeAgents.has("B") ? "BLINK" : "IDLE",
-        C: activeAgents.has("C") ? "BLINK" : "IDLE"
-      });
-    }, 240);
-    nodeTimerRefs.current.push(localTimer);
-
-    if (profile === "local_only") return;
-
-    const maxLatency = Math.max(...items.map((item) => Math.max(1, item.latency_ms)), 1);
-    const maxDelay = 1800;
-    let doneAt = 240;
-
-    for (const item of items) {
-      const delay = Math.max(260, Math.round((item.latency_ms / maxLatency) * maxDelay));
-      doneAt = Math.max(doneAt, delay);
-      const timer = window.setTimeout(() => {
-        setNodeStates((prev) => ({
-          ...prev,
-          [item.agent]: item.status === "OK" ? "ON" : "ERROR"
-        }));
-      }, delay);
-      nodeTimerRefs.current.push(timer);
+    if (profile === "local_only") {
+      setLocalNodeState("ON");
+      setNodeStates({ A: "IDLE", B: "IDLE", C: "IDLE" });
+      setShowConclusion(false);
+      return;
     }
-
-    const endTimer = window.setTimeout(() => {
-      setLocalNodeState(consensusStatus === "LOADING" ? "RELAY" : "ON");
-      setShowConclusion(consensusStatus === "OK" && profile !== "local_only");
-    }, doneAt + 200);
-    nodeTimerRefs.current.push(endTimer);
+    setLocalNodeState(consensusStatus === "LOADING" ? "RELAY" : "ON");
+    setNodeStates(nodeStatesFromResults(items));
+    setShowConclusion(consensusStatus === "OK");
   }
 
   useEffect(() => {
@@ -546,10 +532,11 @@ export default function HomePage() {
   useEffect(() => {
     function updateLinks() {
       const chamber = chamberRef.current;
+      const localNode = localNodeRef.current;
       const nodeA = nodeRefs.current.A;
       const nodeB = nodeRefs.current.B;
       const nodeC = nodeRefs.current.C;
-      if (!chamber || !nodeA || !nodeB || !nodeC) return;
+      if (!chamber || !localNode || !nodeA || !nodeB || !nodeC) return;
 
       const chamberRect = chamber.getBoundingClientRect();
       if (window.innerWidth < 768) {
@@ -566,11 +553,14 @@ export default function HomePage() {
         };
       }
 
+      const local = centerOf(localNode);
       const a = centerOf(nodeA);
       const b = centerOf(nodeB);
       const c = centerOf(nodeC);
 
+      const localBottom = { x: local.x, y: local.y + local.rect.height / 2 };
       const aTop = { x: a.x, y: a.y - a.rect.height / 2 };
+      const bTop = { x: b.x, y: b.y - b.rect.height / 2 };
       const cTop = { x: c.x, y: c.y - c.rect.height / 2 };
       const bLeft = { x: b.x - b.rect.width / 2, y: b.y };
       const bRight = { x: b.x + b.rect.width / 2, y: b.y };
@@ -579,6 +569,7 @@ export default function HomePage() {
 
       setLinkViewBox(`0 0 ${Math.max(1, chamberRect.width)} ${Math.max(1, chamberRect.height)}`);
       setLinkPaths([
+        `M ${localBottom.x} ${localBottom.y} L ${bTop.x} ${bTop.y}`,
         `M ${bLeft.x} ${bLeft.y} L ${aTop.x} ${aTop.y}`,
         `M ${bRight.x} ${bRight.y} L ${cTop.x} ${cTop.y}`,
         `M ${aRight.x} ${aRight.y} L ${cLeft.x} ${cLeft.y}`
@@ -716,12 +707,14 @@ export default function HomePage() {
       }
     ]);
     markConsensusClockStart();
+    let nextConsensusLoading = false;
 
     try {
       const chat = await requestChat(trimmed);
       if (!chat) {
         setLocalNodeState("IDLE");
         setNodeStates({ A: "IDLE", B: "IDLE", C: "IDLE" });
+        nextConsensusLoading = false;
         return;
       }
       setResolvedProfile(chat.profile);
@@ -731,6 +724,8 @@ export default function HomePage() {
       setRoutingInfo(chat.routing ?? null);
       setResults(chat.results);
       setConsensus(chat.consensus);
+      nextConsensusLoading = chat.consensus.status === "LOADING";
+      setIsConsensusLoading(nextConsensusLoading);
       runNodeTransition(chat.profile, chat.results, chat.consensus.status);
       setChatMessages((prev) => [
         ...prev,
@@ -747,6 +742,7 @@ export default function HomePage() {
       await fetchHistory();
     } finally {
       setIsLoading(false);
+      setIsConsensusLoading(nextConsensusLoading);
     }
   }
 
@@ -798,6 +794,7 @@ export default function HomePage() {
 
   function restoreHistory(item: RunHistoryItem) {
     if (isBusy) return;
+    setIsLoading(false);
     setError("");
     setPrompt(item.prompt);
     setRunId(item.run_id);
@@ -806,6 +803,7 @@ export default function HomePage() {
     setResolvedProfile(item.profile);
     setResults(item.results);
     setConsensus(item.consensus);
+    setIsConsensusLoading(item.consensus?.status === "LOADING");
     clearNodeTimers();
     const hasLoading =
       item.consensus?.status === "LOADING" || item.results.some((result) => result.status === "LOADING");
@@ -850,6 +848,8 @@ export default function HomePage() {
     if (isBusy) return;
     clearNodeTimers();
     setError("");
+    setIsLoading(false);
+    setIsConsensusLoading(false);
     setRunId("");
     setThreadId("");
     setTurnIndex(0);
@@ -1017,6 +1017,7 @@ export default function HomePage() {
           winnerAgent={winnerAgent}
           confidenceMap={confidenceMap}
           showDiscussionBadge={showDiscussionBadge}
+          allProviderResponsesReady={allProviderResponsesReady}
           showRoutingBadge={showRoutingBadge}
           conclusionElapsedMs={conclusionElapsedMs}
           setNodeRef={(agent, el) => {

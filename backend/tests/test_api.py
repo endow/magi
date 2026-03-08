@@ -435,6 +435,90 @@ def test_chat_skips_local_draft_for_time_sensitive_weather_query(monkeypatch) ->
     assert "local_draft_skipped_time_sensitive" in (body.get("routing", {}).get("reason") or "")
 
 
+def test_chat_skips_local_draft_for_fresh_sensitive_incident_query(monkeypatch) -> None:
+    monkeypatch.setattr(main, "load_config", _profiled_config_with_router)
+    monkeypatch.setattr(main, "_save_run_history", lambda *args, **kwargs: None)
+    monkeypatch.setenv("FRESH_AUTO_MODE", "1")
+
+    calls = {"count": 0}
+
+    async def fake_runner(agent_config, prompt, timeout_seconds):
+        calls["count"] += 1
+        return main.AgentResult(
+            agent=agent_config.agent,
+            provider=agent_config.provider,
+            model=agent_config.model,
+            text=f"answer-{agent_config.agent}",
+            status="OK",
+            latency_ms=30,
+        )
+
+    async def fake_consensus(config_obj, prompt, results):
+        return main.ConsensusResult(
+            provider="magi",
+            model="peer_vote_r1",
+            text="Final answer:\n事件の経緯です。",
+            status="OK",
+            latency_ms=40,
+        )
+
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("_is_local_draft_sufficient should be skipped for fresh-sensitive incident query")
+
+    monkeypatch.setattr(main, "_run_single_agent", fake_runner)
+    monkeypatch.setattr(main, "_run_consensus", fake_consensus)
+    monkeypatch.setattr(main, "_is_local_draft_sufficient", fail_if_called)
+
+    response = client.post("/api/magi/chat", json={"prompt": "マンガワン事件について解説して"})
+    assert response.status_code == 200
+    body = response.json()
+    assert calls["count"] == 3
+    assert body["profile"] == "cost"
+    assert "local_draft_skipped_time_sensitive" in (body.get("routing", {}).get("reason") or "")
+
+
+def test_chat_skips_local_draft_for_fresh_sensitive_reporting_query(monkeypatch) -> None:
+    monkeypatch.setattr(main, "load_config", _profiled_config_with_router)
+    monkeypatch.setattr(main, "_save_run_history", lambda *args, **kwargs: None)
+    monkeypatch.setenv("FRESH_AUTO_MODE", "1")
+
+    calls = {"count": 0}
+
+    async def fake_runner(agent_config, prompt, timeout_seconds):
+        calls["count"] += 1
+        return main.AgentResult(
+            agent=agent_config.agent,
+            provider=agent_config.provider,
+            model=agent_config.model,
+            text=f"answer-{agent_config.agent}",
+            status="OK",
+            latency_ms=30,
+        )
+
+    async def fake_consensus(config_obj, prompt, results):
+        return main.ConsensusResult(
+            provider="magi",
+            model="peer_vote_r1",
+            text="Final answer:\n海外報道の概要です。",
+            status="OK",
+            latency_ms=40,
+        )
+
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("_is_local_draft_sufficient should be skipped for fresh-sensitive reporting query")
+
+    monkeypatch.setattr(main, "_run_single_agent", fake_runner)
+    monkeypatch.setattr(main, "_run_consensus", fake_consensus)
+    monkeypatch.setattr(main, "_is_local_draft_sufficient", fail_if_called)
+
+    response = client.post("/api/magi/chat", json={"prompt": "海外ではどう報道されてます？"})
+    assert response.status_code == 200
+    body = response.json()
+    assert calls["count"] == 3
+    assert body["profile"] == "cost"
+    assert "local_draft_skipped_time_sensitive" in (body.get("routing", {}).get("reason") or "")
+
+
 def test_chat_first_turn_skips_history_context(monkeypatch) -> None:
     monkeypatch.setattr(main, "load_config", _profiled_config_with_router)
     monkeypatch.setattr(main, "_save_run_history", lambda *args, **kwargs: None)
@@ -1394,10 +1478,36 @@ def test_resolve_fresh_mode_respects_auto_toggle(monkeypatch) -> None:
     assert main._resolve_fresh_mode("latest ai news", None) is False
     monkeypatch.setenv("FRESH_AUTO_MODE", "1")
     assert main._resolve_fresh_mode("latest ai news", None) is True
+    assert main._resolve_fresh_mode("マンガワン事件について解説して", None) is True
+    assert main._resolve_fresh_mode("海外ではどう報道されてます？", None) is True
     assert main._resolve_fresh_mode("YouTube攻略動画も参考にして", None) is True
     assert main._resolve_fresh_mode("東五反田の今週いっぱいの気温変化は？", None) is True
     assert main._resolve_fresh_mode("latest ai news", False) is False
     assert main._resolve_fresh_mode("hello world", True) is True
+
+
+def test_resolve_fresh_mode_with_classifier_uses_policy_decision(monkeypatch) -> None:
+    async def fake_classify(prompt: str, config=None):
+        return main.TemporalDecision(
+            needs_fresh=True,
+            domain="geopolitics",
+            confidence=0.9,
+            reason="test",
+        )
+
+    monkeypatch.setattr(main, "_classify_temporal_need", fake_classify)
+    monkeypatch.setenv("FRESH_AUTO_MODE", "1")
+    result = asyncio.run(main._resolve_fresh_mode_with_classifier("dummy", None, main.AppConfig()))
+    assert result is True
+
+
+def test_resolve_fresh_mode_with_classifier_respects_explicit_override(monkeypatch) -> None:
+    async def fail_classify(prompt: str, config=None):
+        raise AssertionError("classifier should not be called for explicit fresh_mode override")
+
+    monkeypatch.setattr(main, "_classify_temporal_need", fail_classify)
+    assert asyncio.run(main._resolve_fresh_mode_with_classifier("dummy", True, main.AppConfig())) is True
+    assert asyncio.run(main._resolve_fresh_mode_with_classifier("dummy", False, main.AppConfig())) is False
 
 
 def test_build_effective_prompt_falls_back_without_tavily_key(monkeypatch) -> None:
@@ -1671,6 +1781,86 @@ def test_fresh_query_attempts_news_primary_keeps_general_fallback() -> None:
     attempts = main._fresh_query_attempts("latest ai release", "news")
     assert attempts[0] == ("latest ai release", "news")
     assert ("latest ai release", "general") in attempts
+
+
+def test_fresh_query_attempts_incident_prioritizes_news_rewrite() -> None:
+    attempts = main._fresh_query_attempts("マンガワン事件について解説して", "general")
+    assert attempts[0][1] == "general"
+    assert any(topic == "news" for _, topic in attempts)
+    assert ("マンガワン事件について解説して", "general") in attempts
+
+
+def test_apply_temporal_answer_gate_blocks_uncited_current_denial() -> None:
+    prompt = "今イランとアメリカは戦争しています。これがどう日本に影響するか。"
+    blocked = main._apply_temporal_answer_gate(prompt, "現在、イランとアメリカが直接戦争をしている状況ではありません。")
+    assert "否定断定はできません" in blocked
+
+
+def test_fresh_query_attempts_geopolitical_prioritizes_news() -> None:
+    attempts = main._fresh_query_attempts("今イランとアメリカは戦争しています。これがどう日本に影響するか。", "general")
+    assert attempts[0][1] == "news"
+    assert attempts[1][1] == "news"
+    assert ("今イランとアメリカは戦争しています。これがどう日本に影響するか。", "general") in attempts
+
+
+def test_fresh_target_results_for_geopolitical_query_is_increased() -> None:
+    assert main._fresh_target_results_for_query("イランとアメリカの戦争は？", 3) == 5
+    assert main._fresh_target_results_for_query("latest ai release", 3) == 3
+
+
+def test_apply_temporal_answer_gate_allows_cited_current_denial() -> None:
+    prompt = "今イランとアメリカは戦争しています。これがどう日本に影響するか。"
+    text = "現在、直接戦争の確認はありません。 https://example.com/report 2026-03-08"
+    allowed = main._apply_temporal_answer_gate(prompt, text)
+    assert allowed == text
+
+
+def test_apply_temporal_answer_gate_allows_prompt_embedded_fresh_evidence() -> None:
+    prompt = (
+        "今イランとアメリカは戦争しています。これがどう日本に影響するか。\n\n"
+        "[Fresh Web Evidence]\n"
+        "retrieved_at_utc=2026-03-08T00:00:00+00:00\n"
+        "[S1] title=Example\n"
+        "url=https://example.com/report\n"
+        "published=2026-03-08\n"
+        "snippet=...\n"
+    )
+    text = "現在、直接戦争の確認はありません。"
+    allowed = main._apply_temporal_answer_gate(prompt, text)
+    assert allowed == text
+
+
+def test_apply_temporal_answer_gate_blocks_geopolitical_negative_without_strong_citation() -> None:
+    prompt = "今イランとアメリカは戦争しています。これがどう日本に影響するか。"
+    text = "時点（2026-03-08）で全面的に戦争状態にある確実な裏付けは見つかっていません。"
+    blocked = main._apply_temporal_answer_gate(prompt, text)
+    assert "否定断定はできません" in blocked
+
+
+def test_apply_temporal_answer_gate_allows_geopolitical_negative_with_strong_citation() -> None:
+    prompt = "今イランとアメリカは戦争しています。これがどう日本に影響するか。"
+    text = (
+        "[S1] https://example.com/a 2026-03-08\n"
+        "[S2] https://example.com/b 2026-03-08\n"
+        "現時点で全面戦争状態を示す一次確認はありません。"
+    )
+    allowed = main._apply_temporal_answer_gate(prompt, text)
+    assert allowed == text
+
+
+def test_apply_temporal_answer_gate_allows_geopolitical_negative_with_prompt_evidence() -> None:
+    prompt = (
+        "今イランとアメリカは戦争しています。これがどう日本に影響するか。\n\n"
+        "[Fresh Web Evidence]\n"
+        "retrieved_at_utc=2026-03-08T00:00:00+00:00\n"
+        "[S1] title=Example\n"
+        "url=https://example.com/a\n"
+        "published=2026-03-08\n"
+        "snippet=...\n"
+    )
+    text = "時点（2026-03-08）で全面的に戦争状態にある確実な裏付けは見つかっていません。"
+    allowed = main._apply_temporal_answer_gate(prompt, text)
+    assert allowed == text
 
 
 def test_run_single_agent_retries_once_for_openai_timeout(monkeypatch) -> None:

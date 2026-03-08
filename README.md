@@ -260,6 +260,13 @@ URL:
 - 例: ローカル Ollama で `provider=ollama`, `model=qwen2.5:7b-instruct-q4_K_M`
 - 現行ルール: `translation|rewrite|summarize_short` + `complexity=low` + `safety=low` + `execution_tier=local` は `local_only` へ、それ以外は `balance`
 
+`temporal_classifier`（任意）:
+- `fresh_mode` 未指定（auto）のとき、時系列依存かどうかを軽量LLMで判定して `fresh_mode` を強制ONできる
+- 判定JSONは `needs_fresh`, `domain(geopolitics|weather|finance|news|general)`, `confidence`, `reason`
+- `min_confidence` と `rules`（domain別）で強制ON条件を制御
+- 失敗時はヒューリスティックへフォールバックし、処理自体は継続
+- `timeout_seconds`, `cache_ttl_seconds` で遅延と再判定頻度を制御
+
 `routing_learning`（任意）:
 - ルーティングイベントをSQLiteに保存し、`feedback` と実行結果から profile 重みを更新
 - 最終スコアは `base_score + policy_weight`
@@ -355,7 +362,7 @@ python -m pytest backend/tests -q
 - プロンプト文字数カウンター（`0/4000`）
 - chat mode固定（`interaction` 切替なし）
 - チャットトランスクリプト表示（ユーザー/アシスタントのターン履歴）
-- Chamber上部に状態バッジ表示（`Routing / Prep`、`Executing`、`Discussion`、`Conclusion`）
+- Chamber上部に状態バッジ表示（`Routing / Prep`、`Executing`、`Discussion`、`Debating`、`Conclusion`）
 - `Conclusion` 時は経過時間（分/秒）を表示
 - Profileセレクター:
   - `auto (unset)`, `local_only`, `cost`, `balance`, `performance`, `ultra`, `performance_preview`, `ultra_preview` を選択可能
@@ -374,7 +381,8 @@ python -m pytest backend/tests -q
   - デフォルトは `auto`（未指定）
   - ON時は backend が Tavily で最新Web証拠を取得（`TAVILY_API_KEY` 設定時）
   - OFF時は自動判定を無効化（明示的にWeb取得しない）
-  - `fresh_mode` 未指定でも、`latest/最新` などの時系列語に加え `YouTube/動画/攻略動画` を含む依頼では自動で有効化される場合があります
+  - `fresh_mode` 未指定時は、`temporal_classifier` が時系列依存を判定し、policy条件（domain/confidence）を満たすと自動で有効化されます
+  - classifier失敗時はヒューリスティック判定へフォールバックします
   - `general/news` のフォールバックとクエリ拡張により、非ニュース系（ゲーム攻略など）も取得しやすくする
   - Tavily が利用不可、またはキー未設定の場合は通常プロンプトへ自動フォールバック
 - Run履歴パネル（backend SQLiteに永続化）

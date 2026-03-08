@@ -161,6 +161,17 @@ messages = [{"role": "user", "content": prompt}]
     "latency_threshold_ms": 8000,
     "cost_threshold": 2.0
   },
+  "temporal_classifier": {
+    "enabled": true,
+    "provider": "ollama",
+    "model": "qwen2.5:7b-instruct-q4_K_M",
+    "timeout_seconds": 3,
+    "cache_ttl_seconds": 300,
+    "min_confidence": 0.5,
+    "rules": [
+      { "domain": "geopolitics", "force_fresh": true, "min_confidence": 0.45 }
+    ]
+  },
   "history_context": {
     "strategy": "embedding|lexical",
     "provider": "openai",
@@ -331,7 +342,8 @@ OLLAMA_API_BASE=http://ollama:11434
 - `fresh_mode=true` のとき、backend は Tavily 検索で最新のWebソースを取得し、プロンプトに前段コンテキストとして付与する。
 - `source_urls` が未指定でも、`prompt` 内の `http/https` URL を自動抽出して直取得し、`[Direct URL Evidence]` として優先注入する。
 - 検索は `general/news` のフォールバックとクエリ拡張を行い、ニュース以外の「攻略・解説」系トピックも拾えるようにする。
-- fresh auto判定は時系列語に加え `YouTube/動画/攻略動画` などの語も対象とし、外部ソース参照を求める依頼で `fresh_mode` を有効化しやすくする。
+- `fresh_mode` 未指定時は temporal classifier（LLM判定）で `needs_fresh/domain/confidence` を推定し、policy条件（`min_confidence` と domain rules）を満たす場合に自動有効化する。
+- classifier失敗時はヒューリスティック判定へフォールバックする。
 - 取得ソースには `url` と `published_date` を含め、時系列依存の回答で出典明示を促す。
 - `TAVILY_API_KEY` 未設定、または検索失敗時は通常プロンプトへ自動フォールバックする（リクエスト自体は失敗させない）。
 
@@ -353,7 +365,7 @@ OLLAMA_API_BASE=http://ollama:11434
 ### UI
 
 - UIは **chat modeのみ**（interaction切替なし）
-- 送信中は Chamber ノードと状態バッジで進行状況を表示する
+- 送信中は Chamber ノードと状態バッジ（`Routing / Prep`、`Executing`、`Discussion`、`Debating`、`Conclusion`）で進行状況を表示する
 - **run_id表示＋コピー可能**
 - 実行メタ情報 / ルーティング情報 / フィードバック / モデル実行状態はアコーディオン内に表示する
 - 初期値: profile は **未設定（auto）**、`fresh_mode` は `auto`（未指定）

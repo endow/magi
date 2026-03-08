@@ -129,6 +129,22 @@ class SemanticMemoryConfig(BaseModel):
     merge_similarity_threshold: float = 0.88
 
 
+class TemporalPolicyRule(BaseModel):
+    domain: str
+    force_fresh: bool = True
+    min_confidence: float = 0.5
+
+
+class TemporalClassifierConfig(BaseModel):
+    enabled: bool = True
+    provider: str | None = None
+    model: str | None = None
+    timeout_seconds: int = 3
+    cache_ttl_seconds: int = 300
+    min_confidence: float = 0.5
+    rules: list[TemporalPolicyRule] = Field(default_factory=list)
+
+
 class RouteDecision(BaseModel):
     profile: str
     confidence: int
@@ -155,6 +171,14 @@ class AppConfig(BaseModel):
     router_rules: RouterRulesConfig | None = None
     routing_learning: RoutingLearningConfig | None = None
     semantic_memory: SemanticMemoryConfig | None = None
+    temporal_classifier: TemporalClassifierConfig | None = None
+
+
+class TemporalDecision(BaseModel):
+    needs_fresh: bool = False
+    domain: str = "general"
+    confidence: float = 0.0
+    reason: str | None = None
 
 
 HistoryContextConfig.model_rebuild()
@@ -460,6 +484,7 @@ app.add_middleware(
 
 _FRESH_CACHE: dict[str, tuple[float, list[FreshSource]]] = {}
 _DEPRECATIONS_SOURCE_CACHE: dict[str, tuple[float, list[HistoryDeprecationRule]]] = {}
+_TEMPORAL_CLASSIFY_CACHE: dict[str, tuple[float, TemporalDecision]] = {}
 
 
 def _extract_deprecations_rules(payload: Any) -> list[HistoryDeprecationRule]:
@@ -1653,20 +1678,47 @@ def _fresh_auto_enabled() -> bool:
     return raw not in {"0", "false", "off", "no"}
 
 
-def _is_fresh_sensitive_prompt(prompt: str) -> bool:
+def _is_temporal_verification_required(prompt: str) -> bool:
     lowered = prompt.strip().lower()
     if not lowered:
         return False
 
-    # Keep auto mode conservative: only enable when user explicitly requests recency.
-    latest_keywords = (
+    recency_markers = (
         "latest",
         "today",
         "current",
         "now",
         "as of",
         "breaking",
+        "currently",
+        "recent",
+        "this week",
+        "next week",
+        "this month",
+        "速報",
+        "最新",
+        "今日",
+        "明日",
+        "現在",
+        "現時点",
+        "今週",
+        "来週",
+        "今月",
+        "直近",
+        "最近",
+        "youtube",
+        "動画",
+        "攻略動画",
+    )
+    if any(token in lowered for token in recency_markers):
+        return True
+
+    dynamic_domain_markers = (
         "news",
+        "ニュース",
+        "coverage",
+        "reported",
+        "reporting",
         "price",
         "temperature",
         "forecast",
@@ -1674,27 +1726,185 @@ def _is_fresh_sensitive_prompt(prompt: str) -> bool:
         "weather",
         "release date",
         "version",
-        "速報",
-        "最新",
-        "今日",
-        "現在",
-        "ニュース",
+        "war",
+        "conflict",
+        "ceasefire",
+        "sanction",
+        "invasion",
+        "election",
+        "tariff",
+        "outage",
+        "incident",
+        "scandal",
+        "controversy",
+        "報道",
+        "戦争",
+        "紛争",
+        "停戦",
+        "制裁",
+        "侵攻",
+        "選挙",
+        "関税",
+        "事件",
+        "炎上",
+        "騒動",
+        "不祥事",
+        "障害",
+        "問題",
         "株価",
         "為替",
         "価格",
         "天気",
         "気温",
         "予報",
-        "直近",
-        "アップデート",
-        "リリース",
-        "youtube",
-        "動画",
-        "攻略動画",
     )
-    if any(token in lowered for token in latest_keywords):
+    if not any(token in lowered for token in dynamic_domain_markers):
+        return False
+
+    query_intent_markers = (
+        "?",
+        "？",
+        "どう",
+        "影響",
+        "現状",
+        "状況",
+        "今",
+        "解説",
+        "説明",
+        "教えて",
+        "まとめ",
+        "what",
+        "how",
+        "impact",
+        "status",
+    )
+    if any(token in lowered for token in query_intent_markers):
         return True
     return False
+
+
+def _is_fresh_sensitive_prompt(prompt: str) -> bool:
+    return _is_temporal_verification_required(prompt)
+
+
+def _contains_strong_current_claim(text: str) -> bool:
+    lowered = text.strip().lower()
+    if not lowered:
+        return False
+    patterns = (
+        r"現在[^。\n]{0,80}(?:ではありません|していません|ありません)",
+        r"現時点[^。\n]{0,80}(?:ではありません|していません|ありません)",
+        r"\b(currently|as of now|at present)\b[^.\n]{0,80}\b(is not|are not|no)\b",
+    )
+    return any(re.search(pattern, lowered, flags=re.IGNORECASE) for pattern in patterns)
+
+
+def _contains_negative_current_claim(text: str) -> bool:
+    lowered = text.strip().lower()
+    if not lowered:
+        return False
+    patterns = (
+        r"見つかっていません",
+        r"確認できません",
+        r"確認されていません",
+        r"ではありません",
+        r"していません",
+        r"\bnot found\b",
+        r"\bno evidence\b",
+        r"\bis not\b",
+        r"\bare not\b",
+    )
+    return any(re.search(pattern, lowered, flags=re.IGNORECASE) for pattern in patterns)
+
+
+def _is_geopolitical_conflict_query(prompt: str) -> bool:
+    lowered = prompt.strip().lower()
+    if not lowered:
+        return False
+    markers = (
+        "war",
+        "conflict",
+        "ceasefire",
+        "invasion",
+        "military",
+        "missile",
+        "iran",
+        "israel",
+        "ukraine",
+        "russia",
+        "戦争",
+        "紛争",
+        "停戦",
+        "侵攻",
+        "軍事",
+        "ミサイル",
+        "イラン",
+        "イスラエル",
+        "ウクライナ",
+        "ロシア",
+    )
+    return any(token in lowered for token in markers)
+
+
+def _has_verifiable_source_signal(text: str) -> bool:
+    if re.search(r"https?://", text):
+        return True
+    if re.search(r"\[S\d+\]", text):
+        return True
+    if re.search(r"\b(19|20)\d{2}[-/年]\d{1,2}([-/月]\d{1,2})?\b", text):
+        return True
+    return False
+
+
+def _has_strong_temporal_citation(text: str) -> bool:
+    urls = len(re.findall(r"https?://", text))
+    markers = len(re.findall(r"\[S\d+\]", text))
+    dates = len(re.findall(r"\b(19|20)\d{2}[-/年]\d{1,2}([-/月]\d{1,2})?\b", text))
+    return urls >= 1 and markers >= 2 and dates >= 1
+
+
+def _prompt_has_verifiable_evidence(prompt: str) -> bool:
+    if "[Fresh Web Evidence]" in prompt and re.search(r"\[S\d+\].*url=https?://", prompt, flags=re.DOTALL):
+        return True
+    if "[Direct URL Evidence]" in prompt and re.search(r"\[U\d+\].*url=https?://", prompt, flags=re.DOTALL):
+        return True
+    return False
+
+
+def _apply_temporal_answer_gate(prompt: str, text: str) -> str:
+    if not _is_temporal_verification_required(prompt):
+        return text
+    if _is_geopolitical_conflict_query(prompt) and _contains_negative_current_claim(text):
+        if _has_strong_temporal_citation(text):
+            return text
+        if _prompt_has_verifiable_evidence(prompt):
+            return text
+        language = _detect_language(prompt)
+        if language == "en":
+            return (
+                "This is a rapidly changing geopolitical situation, so I cannot make a negative assertion without "
+                "explicit, recent primary-source citations (URL + published date). Please verify with the latest sources."
+            )
+        return (
+            "地政学・戦争情勢は急変するため、URLと公開日付きの一次情報を明示しない否定断定はできません。"
+            " 最新の一次報道を確認したうえで判断してください。"
+        )
+    if not _contains_strong_current_claim(text):
+        return text
+    if _has_verifiable_source_signal(text):
+        return text
+    if _prompt_has_verifiable_evidence(prompt):
+        return text
+    language = _detect_language(prompt)
+    if language == "en":
+        return (
+            "I cannot verify this as a current fact from the provided evidence. "
+            "Please confirm with up-to-date primary sources before making a definitive conclusion."
+        )
+    return (
+        "この質問は最新性の検証が必要ですが、回答内に確認可能な出典（URL・日付）が不足しているため断定できません。"
+        " 最新の一次情報を確認したうえで判断してください。"
+    )
 
 
 def _is_time_sensitive_query(prompt: str) -> bool:
@@ -1737,14 +1947,189 @@ def _resolve_fresh_mode(prompt: str, requested_fresh_mode: bool | None) -> bool:
         return False
     if not _fresh_auto_enabled():
         return False
-    auto_enabled = _is_fresh_sensitive_prompt(prompt)
+    auto_enabled = _is_temporal_verification_required(prompt)
     if auto_enabled:
         print("[magi] fresh_mode auto-enabled by prompt pattern")
     return auto_enabled
 
 
+def _temporal_classifier_config(config: AppConfig | None = None) -> TemporalClassifierConfig:
+    if config and config.temporal_classifier:
+        return config.temporal_classifier
+    return TemporalClassifierConfig()
+
+
+def _temporal_classifier_enabled(config: AppConfig | None = None) -> bool:
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return False
+    cfg = _temporal_classifier_config(config)
+    if not cfg.enabled:
+        return False
+    raw = os.getenv("TEMPORAL_CLASSIFIER_ENABLED")
+    if raw is None:
+        return True
+    return raw.strip().lower() not in {"0", "false", "off", "no"}
+
+
+def _temporal_classifier_timeout_seconds(config: AppConfig | None = None) -> int:
+    cfg = _temporal_classifier_config(config)
+    env_raw = os.getenv("TEMPORAL_CLASSIFIER_TIMEOUT_SECONDS")
+    if env_raw:
+        try:
+            return max(1, min(8, int(env_raw)))
+        except ValueError:
+            pass
+    return max(1, min(8, int(cfg.timeout_seconds)))
+
+
+def _temporal_classifier_cache_ttl_seconds(config: AppConfig | None = None) -> int:
+    cfg = _temporal_classifier_config(config)
+    env_raw = os.getenv("TEMPORAL_CLASSIFIER_CACHE_TTL_SECONDS")
+    if env_raw:
+        try:
+            return max(0, min(3600, int(env_raw)))
+        except ValueError:
+            pass
+    return max(0, min(3600, int(cfg.cache_ttl_seconds)))
+
+
+def _temporal_classifier_model(config: AppConfig | None = None) -> str | None:
+    env_model = (os.getenv("TEMPORAL_CLASSIFIER_MODEL") or "").strip()
+    if env_model:
+        return env_model
+    cfg = _temporal_classifier_config(config)
+    if cfg.provider and cfg.model:
+        return f"{cfg.provider}/{cfg.model}"
+    if config and config.request_router and config.request_router.provider and config.request_router.model:
+        return f"{config.request_router.provider}/{config.request_router.model}"
+    return "ollama/qwen2.5:7b-instruct-q4_K_M"
+
+
+def _heuristic_temporal_domain(prompt: str) -> str:
+    lowered = prompt.strip().lower()
+    if _is_geopolitical_conflict_query(prompt):
+        return "geopolitics"
+    if _is_time_sensitive_query(prompt):
+        return "weather"
+    if any(token in lowered for token in ("stock", "price", "株価", "為替", "価格", "金利")):
+        return "finance"
+    if any(token in lowered for token in ("news", "ニュース", "報道", "速報")):
+        return "news"
+    return "general"
+
+
+def _heuristic_temporal_decision(prompt: str) -> TemporalDecision:
+    needs = _is_temporal_verification_required(prompt)
+    return TemporalDecision(
+        needs_fresh=needs,
+        domain=_heuristic_temporal_domain(prompt),
+        confidence=0.55 if needs else 0.25,
+        reason="heuristic_fallback",
+    )
+
+
+def _extract_temporal_decision(text: str) -> TemporalDecision | None:
+    payload: dict[str, Any] = {}
+    match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+    candidate = match.group(0) if match else text
+    try:
+        loaded = json.loads(candidate)
+        if isinstance(loaded, dict):
+            payload = loaded
+    except json.JSONDecodeError:
+        return None
+    if not payload:
+        return None
+    needs_fresh = _coerce_bool(payload.get("needs_fresh"), default=False)
+    domain = (_safe_str(payload.get("domain")) or "general").strip().lower()
+    confidence = max(0.0, min(1.0, _coerce_float(payload.get("confidence"), 0.0)))
+    reason = _safe_str(payload.get("reason")) or None
+    return TemporalDecision(
+        needs_fresh=needs_fresh,
+        domain=domain or "general",
+        confidence=confidence,
+        reason=reason,
+    )
+
+
+async def _classify_temporal_need(prompt: str, config: AppConfig | None = None) -> TemporalDecision:
+    key = prompt.strip().lower()
+    ttl = _temporal_classifier_cache_ttl_seconds(config)
+    if key and ttl > 0:
+        cached = _TEMPORAL_CLASSIFY_CACHE.get(key)
+        if cached and (perf_counter() - cached[0]) <= ttl:
+            return cached[1]
+    fallback = _heuristic_temporal_decision(prompt)
+    if not _temporal_classifier_enabled(config):
+        return fallback
+    full_model = _temporal_classifier_model(config)
+    if not full_model:
+        return fallback
+    classifier_prompt = (
+        "Classify whether a user query requires fresh web verification.\n"
+        "Return strict JSON only with keys:\n"
+        '{"needs_fresh": boolean, "domain": "geopolitics|weather|finance|news|general", "confidence": 0.0, "reason": "short"}\n'
+        "Use confidence 0.0-1.0.\n"
+        "Mark needs_fresh=true for rapidly-changing facts.\n\n"
+        f"Query:\n{prompt}"
+    )
+    try:
+        raw, _, _ = await _call_model_text(
+            full_model=full_model,
+            prompt=classifier_prompt,
+            timeout_seconds=_temporal_classifier_timeout_seconds(config),
+            max_tokens=180,
+        )
+        parsed = _extract_temporal_decision(raw)
+        if parsed is None:
+            return fallback
+        decision = parsed
+    except Exception as exc:  # noqa: BLE001
+        print(f"[magi] temporal_classifier failed: {type(exc).__name__}: {exc}")
+        decision = fallback
+
+    if key and ttl > 0:
+        _TEMPORAL_CLASSIFY_CACHE[key] = (perf_counter(), decision)
+    return decision
+
+
+def _should_force_fresh_by_policy(decision: TemporalDecision, config: AppConfig | None = None) -> bool:
+    cfg = _temporal_classifier_config(config)
+    min_conf = max(0.0, min(1.0, float(cfg.min_confidence)))
+    if decision.needs_fresh and decision.confidence >= min_conf:
+        return True
+    for rule in cfg.rules:
+        if decision.domain == rule.domain.strip().lower() and decision.confidence >= max(0.0, min(1.0, float(rule.min_confidence))):
+            return bool(rule.force_fresh)
+    # Safe defaults when no explicit rules are configured.
+    if not cfg.rules and decision.domain in {"geopolitics", "weather", "finance", "news"} and decision.confidence >= 0.45:
+        return True
+    return False
+
+
+async def _resolve_fresh_mode_with_classifier(
+    prompt: str,
+    requested_fresh_mode: bool | None,
+    config: AppConfig | None = None,
+) -> bool:
+    if requested_fresh_mode is True:
+        return True
+    if requested_fresh_mode is False:
+        return False
+    if not _fresh_auto_enabled():
+        return False
+    decision = await _classify_temporal_need(prompt, config)
+    forced = _should_force_fresh_by_policy(decision, config)
+    if forced:
+        print(
+            "[magi] fresh_mode auto-enabled by temporal_classifier "
+            f"domain={decision.domain} confidence={decision.confidence:.2f} reason={decision.reason or '-'}"
+        )
+    return forced
+
+
 def _inject_temporal_reference(prompt: str) -> str:
-    if not _is_fresh_sensitive_prompt(prompt):
+    if not _is_temporal_verification_required(prompt):
         return prompt
     now_utc = datetime.now(timezone.utc)
     now_local = datetime.now().astimezone()
@@ -1785,8 +2170,41 @@ def _cache_fresh_sources(query: str, sources: list[FreshSource]) -> None:
 def _fresh_query_attempts(query: str, primary_topic: Literal["general", "news"]) -> list[tuple[str, Literal["general", "news"]]]:
     q = query.strip()
     attempts: list[tuple[str, Literal["general", "news"]]] = []
+    temporal_required = _is_temporal_verification_required(q)
+    geopolitical = _is_geopolitical_conflict_query(q)
 
-    if primary_topic == "general":
+    if temporal_required:
+        if geopolitical:
+            attempts.extend(
+                [
+                    (f"{q} 最新 戦況 公式 発表", "news"),
+                    (f"{q} latest war update official statement", "news"),
+                    (q, "news"),
+                    (q, "general"),
+                ]
+            )
+        elif primary_topic == "news":
+            attempts.extend(
+                [
+                    (q, "news"),
+                    (f"{q} latest update official sources", "news"),
+                    (f"{q} 最新 動向 報道", "news"),
+                    (q, "general"),
+                ]
+            )
+        else:
+            attempts.extend(
+                [
+                    (q, "general"),
+                    (f"{q} latest update official sources", "news"),
+                    (f"{q} 最新 動向 報道", "news"),
+                    (q, "news"),
+                ]
+            )
+        lowered = q.lower()
+        if "ff14" in lowered or "ffxiv" in lowered:
+            attempts.append(("ffxiv savage floor 4 guide latest", "general"))
+    elif primary_topic == "general":
         attempts.extend(
             [
                 (q, "general"),
@@ -1815,6 +2233,13 @@ def _fresh_query_attempts(query: str, primary_topic: Literal["general", "news"])
         seen.add(key)
         deduped.append((attempt_query, topic))
     return deduped
+
+
+def _fresh_target_results_for_query(query: str, configured_max_results: int) -> int:
+    target = max(1, min(10, int(configured_max_results)))
+    if _is_geopolitical_conflict_query(query):
+        return max(target, 5)
+    return target
 
 
 async def _tavily_search(
@@ -1940,7 +2365,7 @@ async def _build_effective_prompt(prompt: str, fresh_mode: bool, source_urls: li
         effective = _inject_direct_source_context(effective, fetched)
     if not fresh_mode:
         return effective
-    sources = await _fetch_fresh_sources(prompt, _fresh_max_results())
+    sources = await _fetch_fresh_sources(prompt, _fresh_target_results_for_query(prompt, _fresh_max_results()))
     if not sources:
         return effective
     print(f"[magi] fresh_mode sources={len(sources)}")
@@ -4346,6 +4771,7 @@ async def _run_single_agent(agent_config: AgentConfig, prompt: str, timeout_seco
                 attempt_timeout,
                 system_prompt=agent_config.system_prompt,
             )
+            text = _apply_temporal_answer_gate(prompt, text)
             print(f"[magi] agent={agent_config.agent} success latency_ms={latency_ms}")
             return AgentResult(
                 agent=agent_config.agent,
@@ -5019,7 +5445,7 @@ async def get_routing_events(thread_id: str | None = None, limit: int = 20) -> R
 @app.post("/api/magi/run", response_model=RunResponse)
 async def run_magi(payload: RunRequest) -> RunResponse:
     prompt = _validate_prompt(payload.prompt)
-    fresh_mode = _resolve_fresh_mode(prompt, payload.fresh_mode)
+    fresh_mode = False
     thread_id = _normalize_thread_id(payload.thread_id) or str(uuid.uuid4())
     run_id = str(uuid.uuid4())
     turn_index = _next_turn_index(thread_id)
@@ -5033,6 +5459,7 @@ async def run_magi(payload: RunRequest) -> RunResponse:
 
     try:
         config = load_config()
+        fresh_mode = await _resolve_fresh_mode_with_classifier(prompt, payload.fresh_mode, config)
         profile_name, profile, router_input, router_output = await _resolve_profile_with_router_trace(config, payload.profile, prompt)
         _save_routing_event(thread_id, run_id, router_input, router_output)
         routing_event_saved = True
@@ -5196,7 +5623,7 @@ async def run_magi(payload: RunRequest) -> RunResponse:
 @app.post("/api/magi/chat", response_model=ChatResponse)
 async def chat_magi(payload: ChatRequest) -> ChatResponse:
     prompt = _validate_prompt(payload.prompt)
-    fresh_mode = _resolve_fresh_mode(prompt, payload.fresh_mode)
+    fresh_mode = False
     thread_id = _normalize_thread_id(payload.thread_id) or str(uuid.uuid4())
     run_id = str(uuid.uuid4())
     turn_index = _next_turn_index(thread_id)
@@ -5204,6 +5631,7 @@ async def chat_magi(payload: ChatRequest) -> ChatResponse:
 
     try:
         config = load_config()
+        fresh_mode = await _resolve_fresh_mode_with_classifier(prompt, payload.fresh_mode, config)
         fallback_profile_name, fallback_profile = _resolve_profile(config, payload.profile)
     except HTTPException:
         raise
@@ -5227,7 +5655,13 @@ async def chat_magi(payload: ChatRequest) -> ChatResponse:
         resolved_source_urls = _resolve_source_urls_for_prompt(prompt, payload.source_urls)
         url_anchored_request = bool(resolved_source_urls)
         skip_local_draft = (not explicit_profile_requested) and (
-            _is_time_sensitive_query(prompt) or url_anchored_request
+            _is_time_sensitive_query(prompt)
+            or url_anchored_request
+            or (
+                _is_temporal_verification_required(prompt)
+                and fresh_mode
+                and fast_intent not in {"summarize_short", "translation", "rewrite"}
+            )
         )
         semantic_memory_candidates: list[tuple[str, str, float]] = []
         effective_prompt = await _build_effective_prompt(prompt, fresh_mode, payload.source_urls)
@@ -5480,12 +5914,13 @@ async def chat_magi(payload: ChatRequest) -> ChatResponse:
 @app.post("/api/magi/retry", response_model=RetryResponse)
 async def retry_agent(payload: RetryRequest) -> RetryResponse:
     prompt = _validate_prompt(payload.prompt)
-    fresh_mode = _resolve_fresh_mode(prompt, payload.fresh_mode)
+    fresh_mode = False
     thread_id = _normalize_thread_id(payload.thread_id) or str(uuid.uuid4())
     ollama_system_prompt = _normalize_ollama_system_prompt(payload.ollama_system_prompt)
 
     try:
         config = load_config()
+        fresh_mode = await _resolve_fresh_mode_with_classifier(prompt, payload.fresh_mode, config)
         profile_name, profile = _resolve_profile(config, payload.profile)
     except HTTPException:
         raise
@@ -5511,7 +5946,7 @@ async def retry_agent(payload: RetryRequest) -> RetryResponse:
 @app.post("/api/magi/consensus", response_model=ConsensusResponse)
 async def recalc_consensus(payload: ConsensusRequest) -> ConsensusResponse:
     prompt = _validate_prompt(payload.prompt)
-    fresh_mode = _resolve_fresh_mode(prompt, payload.fresh_mode)
+    fresh_mode = False
     requested_run_id = payload.run_id.strip() if payload.run_id else None
     if requested_run_id == "":
         requested_run_id = None
@@ -5527,6 +5962,7 @@ async def recalc_consensus(payload: ConsensusRequest) -> ConsensusResponse:
 
     try:
         config = load_config()
+        fresh_mode = await _resolve_fresh_mode_with_classifier(prompt, payload.fresh_mode, config)
         profile_name, profile = _resolve_profile(config, payload.profile)
     except HTTPException:
         raise

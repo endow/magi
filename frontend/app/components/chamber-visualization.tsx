@@ -30,6 +30,7 @@ type ChamberVisualizationProps = {
   winnerAgent: AgentId | null;
   confidenceMap: ConfidenceMap;
   showDiscussionBadge: boolean;
+  allProviderResponsesReady: boolean;
   showRoutingBadge: boolean;
   conclusionElapsedMs: number | null;
   setNodeRef: (agent: AgentId, el: HTMLDivElement | null) => void;
@@ -70,6 +71,7 @@ export default function ChamberVisualization({
   winnerAgent,
   confidenceMap,
   showDiscussionBadge,
+  allProviderResponsesReady,
   showRoutingBadge,
   conclusionElapsedMs,
   setNodeRef,
@@ -114,6 +116,18 @@ export default function ChamberVisualization({
         {chamberNodes.map((node) => {
           const displayNodeState: NodeState =
             showExecutingBadge && !resolvedProfile && !localOnlyHandled ? "BLINK" : nodeStates[node.agent];
+          const providerStateHint =
+            displayNodeState === "BLINK"
+              ? "querying provider..."
+              : displayNodeState === "ON"
+                ? showDiscussionBadge && allProviderResponsesReady
+                  ? "response received / debating"
+                  : "response received"
+                : displayNodeState === "ERROR"
+                  ? "provider timeout/error"
+                  : displayNodeState === "IDLE"
+                    ? "not selected"
+                    : "";
           return (
             <div
               key={`node-${node.agent}`}
@@ -144,6 +158,9 @@ export default function ChamberVisualization({
                   ) : (
                     <p className="mt-1 text-[11px] font-semibold opacity-0">confidence --</p>
                   )}
+                  {!localOnlyHandled && providerStateHint ? (
+                    <p className="mt-1 text-[10px] font-semibold text-terminal-dim">{providerStateHint}</p>
+                  ) : null}
                   {!localOnlyHandled && displayNodeState === "BLINK" ? <div className="magi-node-progress" /> : null}
                 </div>
               </div>
@@ -163,7 +180,15 @@ export default function ChamberVisualization({
                       : "magi-discussion-badge"
               }
             >
-              {showConclusion || localOnlyHandled ? "Conclusion" : showRoutingBadge ? "Routing / Prep" : showExecutingBadge ? "Executing" : "Discussion"}
+              {showConclusion || localOnlyHandled
+                ? "Conclusion"
+                : showRoutingBadge
+                  ? "Routing / Prep"
+                  : showExecutingBadge
+                    ? "Executing"
+                    : showDiscussionBadge && allProviderResponsesReady
+                      ? "Debating"
+                      : "Discussion"}
             </div>
             {(showConclusion || localOnlyHandled) && conclusionElapsedMs !== null ? (
               <div className="magi-conclusion-time">elapsed {formatElapsedMsToMinSec(conclusionElapsedMs)}</div>

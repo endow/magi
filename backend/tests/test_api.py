@@ -73,6 +73,21 @@ def _profiled_config_with_router(enabled: bool = True, min_confidence: int = 75)
     return cfg
 
 
+def _profiled_config_with_repo_knowledge(root: str) -> main.AppConfig:
+    cfg = _profiled_config()
+    cfg.repo_knowledge = main.RepoKnowledgeConfig(
+        enabled=True,
+        root=root,
+        include_globs=["**/*.md", "**/*.py", "**/*.json"],
+        exclude_globs=[],
+        max_files=3,
+        max_file_chars=5000,
+        snippet_chars=240,
+        min_score=0.01,
+    )
+    return cfg
+
+
 def test_profiles_endpoint_returns_profile_list(monkeypatch) -> None:
     monkeypatch.setattr(main, "load_config", _profiled_config)
     response = client.get("/api/magi/profiles")
@@ -1569,6 +1584,52 @@ def test_build_effective_prompt_falls_back_without_tavily_key(monkeypatch) -> No
     assert "[Temporal Reference]" in effective
 
 
+def test_search_repo_knowledge_returns_relevant_files(tmp_path) -> None:
+    (tmp_path / "README.md").write_text(
+        "# MAGI\n\nBackend health check is available at http://localhost:8000/health.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "notes.md").write_text("shopping list and unrelated notes", encoding="utf-8")
+    cfg = _profiled_config_with_repo_knowledge(str(tmp_path))
+
+    matches = main._search_repo_knowledge("How do I check backend health?", cfg)
+
+    assert matches
+    assert matches[0]["path"] == "README.md"
+    assert "health" in str(matches[0]["snippet"]).lower()
+
+
+def test_run_injects_repo_knowledge_context(monkeypatch, tmp_path) -> None:
+    (tmp_path / "README.md").write_text(
+        "# MAGI\n\nThe backend health endpoint is http://localhost:8000/health.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(main, "load_config", lambda: _profiled_config_with_repo_knowledge(str(tmp_path)))
+    monkeypatch.setattr(main, "_save_run_history", lambda *args, **kwargs: None)
+
+    async def fake_effective(prompt: str, fresh_mode: bool, source_urls: list[str] | None = None) -> str:
+        return prompt
+
+    async def fake_runner(agent_config, prompt, timeout_seconds):
+        assert "[System Knowledge]" in prompt
+        assert "README.md" in prompt
+        assert "localhost:8000/health" in prompt
+        return main.AgentResult(
+            agent=agent_config.agent,
+            provider=agent_config.provider,
+            model=agent_config.model,
+            text=f"ok-{agent_config.agent}",
+            status="OK",
+            latency_ms=100,
+        )
+
+    monkeypatch.setattr(main, "_build_effective_prompt", fake_effective)
+    monkeypatch.setattr(main, "_run_single_agent", fake_runner)
+
+    response = client.post("/api/magi/run", json={"prompt": "バックエンドのhealth確認方法は？", "profile": "cost"})
+    assert response.status_code == 200
+
+
 def test_routing_feedback_rejects_non_uuid_thread_id() -> None:
     response = client.post(
         "/api/magi/routing/feedback",
@@ -2084,7 +2145,7 @@ def test_policy_update_weight_increase_and_decrease(monkeypatch, tmp_path) -> No
     main._init_db()
     config = main.AppConfig(
         default_profile="cost",
-        routing_learning=main.RoutingLearningConfig(alpha=0.5, weight_min=-2.0, weight_max=2.0),
+        routing_learning=main.RoutingLearningConfig(alpha=0.5, weight_min=-2.0, weight_max=2.0, epsilon=0.0),
     )
     main._save_routing_event(
         thread_id="thread-1",
@@ -2124,7 +2185,7 @@ def test_policy_update_clamps_weight(monkeypatch, tmp_path) -> None:
     main._init_db()
     config = main.AppConfig(
         default_profile="cost",
-        routing_learning=main.RoutingLearningConfig(alpha=1.0, weight_min=-0.1, weight_max=0.1),
+        routing_learning=main.RoutingLearningConfig(alpha=1.0, weight_min=-0.1, weight_max=0.1, epsilon=0.0),
     )
     main._save_routing_event(
         thread_id="thread-1",
@@ -2168,6 +2229,7 @@ def test_policy_update_applies_time_decay(monkeypatch, tmp_path) -> None:
             weight_max=2.0,
             decay_lambda_per_day=1.0,
             stats_ema_beta=0.0,
+            epsilon=0.0,
         ),
     )
     key = "intent=qa|complexity=high|lang=en"
@@ -2195,7 +2257,7 @@ def test_policy_update_applies_time_decay(monkeypatch, tmp_path) -> None:
 def test_policy_stats_ema_is_used_when_configured() -> None:
     config = main.AppConfig(
         default_profile="cost",
-        routing_learning=main.RoutingLearningConfig(stats_ema_beta=0.2),
+        routing_learning=main.RoutingLearningConfig(stats_ema_beta=0.2, epsilon=0.0),
     )
     updated = main._next_policy_stats({"n": 2, "avg_reward": 0.5}, reward=-1.0, config=config)
     assert updated["n"] == 3
@@ -2254,7 +2316,7 @@ def test_routing_feedback_affects_next_auto_route(monkeypatch, tmp_path) -> None
         timeout_seconds=20,
     )
     config.default_profile = "cost"
-    config.routing_learning = main.RoutingLearningConfig(alpha=1.5, weight_min=-2.0, weight_max=2.0)
+    config.routing_learning = main.RoutingLearningConfig(alpha=1.5, weight_min=-2.0, weight_max=2.0, epsilon=0.0)
     monkeypatch.setattr(main, "load_config", lambda: config)
 
     async def fake_route_llm(full_model: str, prompt: str, timeout_seconds: int, max_tokens: int | None = None):
@@ -2339,6 +2401,33 @@ def test_routing_signal_updates_implicit_reward(monkeypatch, tmp_path) -> None:
     items = events.json()["items"]
     assert items
     assert items[0]["implicit_signals"].get("copy_result") == 1
+
+
+def test_select_profile_with_policy_uses_epsilon_greedy_exploration(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("MAGI_DB_PATH", str(tmp_path / "magi-routing-epsilon.db"))
+    main._init_db()
+    config = main.AppConfig(
+        default_profile="cost",
+        routing_learning=main.RoutingLearningConfig(epsilon=0.5),
+    )
+    main._upsert_routing_policy(
+        "intent=qa|complexity=high|lang=en",
+        {"cost": 0.8, "balance": 0.2, "performance": -0.1},
+        {"n": 1, "avg_reward": 0.3},
+    )
+    monkeypatch.setattr(main.random, "random", lambda: 0.1)
+    monkeypatch.setattr(main.random, "choice", lambda seq: "balance")
+
+    selected, candidates, policy_key = main._select_profile_with_policy(
+        {"local_only", "cost", "balance", "performance"},
+        "cost",
+        {"intent": "qa", "complexity": "high", "language": "en"},
+        config,
+    )
+
+    assert policy_key == "intent=qa|complexity=high|lang=en"
+    assert candidates["cost"]["final_score"] > candidates["balance"]["final_score"]
+    assert selected == "balance"
 
 
 def test_run_escalates_local_only_to_balance_on_low_confidence(monkeypatch, tmp_path) -> None:

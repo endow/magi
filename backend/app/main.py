@@ -1,8 +1,10 @@
 import asyncio
+import fnmatch
 import html
 import json
 import math
 import os
+import random
 import re
 import sqlite3
 import uuid
@@ -112,8 +114,9 @@ class RoutingLearningConfig(BaseModel):
     weight_max: float = 2.0
     latency_threshold_ms: int = 8000
     cost_threshold: float = 2.0
-    decay_lambda_per_day: float = 0.0
-    stats_ema_beta: float = 0.0
+    decay_lambda_per_day: float = 0.05
+    stats_ema_beta: float = 0.2
+    epsilon: float = 0.05
 
 
 class SemanticMemoryConfig(BaseModel):
@@ -127,6 +130,52 @@ class SemanticMemoryConfig(BaseModel):
     extractor_timeout_seconds: int = 6
     extractor_max_items: int = 3
     merge_similarity_threshold: float = 0.88
+
+
+class RepoKnowledgeConfig(BaseModel):
+    enabled: bool = False
+    root: str = "."
+    include_globs: list[str] = Field(
+        default_factory=lambda: [
+            "README.md",
+            "SPEC.md",
+            "RUNBOOK.md",
+            "docker-compose.yml",
+            "backend/**/*.py",
+            "backend/**/*.json",
+            "backend/**/*.md",
+            "frontend/**/*.ts",
+            "frontend/**/*.tsx",
+            "frontend/**/*.js",
+            "frontend/**/*.jsx",
+            "frontend/**/*.json",
+            "frontend/**/*.md",
+        ]
+    )
+    exclude_globs: list[str] = Field(
+        default_factory=lambda: [
+            ".git/**",
+            "**/.git/**",
+            "backend/data/**",
+            "frontend/.next/**",
+            "frontend/node_modules/**",
+            "**/__pycache__/**",
+            "**/*.db",
+            "**/*.sqlite",
+            "**/*.png",
+            "**/*.jpg",
+            "**/*.jpeg",
+            "**/*.gif",
+            "**/*.webp",
+            "**/*.ico",
+            "**/*.pdf",
+            "**/*.lock",
+        ]
+    )
+    max_files: int = 4
+    max_file_chars: int = 20000
+    snippet_chars: int = 900
+    min_score: float = 0.08
 
 
 class TemporalPolicyRule(BaseModel):
@@ -175,6 +224,7 @@ class AppConfig(BaseModel):
     router_rules: RouterRulesConfig | None = None
     routing_learning: RoutingLearningConfig | None = None
     semantic_memory: SemanticMemoryConfig | None = None
+    repo_knowledge: RepoKnowledgeConfig | None = None
     temporal_classifier: TemporalClassifierConfig | None = None
     billing: BillingConfig | None = None
 
@@ -844,6 +894,7 @@ def _select_profile_with_policy(
     available_profiles: set[str],
     base_selected: str,
     router_input: dict[str, Any],
+    config: AppConfig | None = None,
 ) -> tuple[str, dict[str, dict[str, float]], str]:
     profile_names = sorted(available_profiles)
     base_scores = {name: (1.0 if name == base_selected else 0.0) for name in profile_names}
@@ -868,6 +919,13 @@ def _select_profile_with_policy(
             continue
         if contender["final_score"] == current["final_score"] and contender["base_score"] > current["base_score"]:
             selected = name
+    epsilon = _routing_epsilon(config)
+    if epsilon > 0.0 and len(profile_names) > 1 and base_selected != "local_only" and random.random() < epsilon:
+        exploration_candidates = [name for name in profile_names if name not in {selected, "local_only"}]
+        if not exploration_candidates:
+            exploration_candidates = [name for name in profile_names if name != selected]
+        if exploration_candidates:
+            selected = random.choice(exploration_candidates)
     return selected, candidates, policy_key
 
 
@@ -1155,6 +1213,7 @@ async def _route_profile_with_trace(
             set(config.profiles.keys()),
             config.default_profile,
             router_input,
+            config,
         )
         return chosen, router_input, {"chosen_profile": chosen, "candidates": candidates, "policy_key": policy_key}
 
@@ -1182,6 +1241,7 @@ async def _route_profile_with_trace(
             available_profiles,
             "local_only",
             router_input,
+            config,
         )
         print(
             "[magi] request_router fast_path "
@@ -1247,6 +1307,7 @@ async def _route_profile_with_trace(
                 available_profiles,
                 base_profile,
                 router_input,
+                config,
             )
 
             if decision.confidence < router.min_confidence:
@@ -1291,6 +1352,7 @@ async def _route_profile_with_trace(
                 available_profiles,
                 fallback_profile,
                 router_input,
+                config,
             )
             if attempt < max_attempts:
                 print(f"[magi] request_router timeout attempt={attempt}; retrying once")
@@ -1312,6 +1374,7 @@ async def _route_profile_with_trace(
                 available_profiles,
                 fallback_profile,
                 router_input,
+                config,
             )
             print(f"[magi] request_router failed {type(exc).__name__}: {exc}; fallback={fallback_profile}")
             return (
@@ -1330,6 +1393,7 @@ async def _route_profile_with_trace(
         available_profiles,
         fallback_profile,
         router_input,
+        config,
     )
     return (
         selected_profile,
@@ -1368,6 +1432,7 @@ async def _resolve_profile_with_router_trace(
             available_profiles,
             profile_name,
             router_input,
+            config,
         )
         # Explicit profile selection must remain authoritative.
         if requested_profile:
@@ -3197,6 +3262,165 @@ def _build_prompt_with_semantic_memory(
     return _inject_semantic_memory_context(base_prompt, rows)
 
 
+def _repo_knowledge_config(app_config: AppConfig | None = None) -> RepoKnowledgeConfig:
+    if app_config and app_config.repo_knowledge:
+        return app_config.repo_knowledge
+    return RepoKnowledgeConfig()
+
+
+def _repo_knowledge_enabled(app_config: AppConfig | None = None) -> bool:
+    return bool(_repo_knowledge_config(app_config).enabled)
+
+
+def _repo_knowledge_root(app_config: AppConfig | None = None) -> Path:
+    cfg = _repo_knowledge_config(app_config)
+    candidate = (Path(__file__).resolve().parents[2] / cfg.root).resolve()
+    return candidate
+
+
+def _match_any_glob(path_value: str, patterns: list[str]) -> bool:
+    normalized = path_value.replace("\\", "/")
+    return any(fnmatch.fnmatch(normalized, pattern) for pattern in patterns if pattern.strip())
+
+
+def _iter_repo_knowledge_files(app_config: AppConfig | None = None) -> list[Path]:
+    cfg = _repo_knowledge_config(app_config)
+    root = _repo_knowledge_root(app_config)
+    if not root.exists() or not root.is_dir():
+        return []
+
+    include_patterns = [pattern.strip() for pattern in cfg.include_globs if pattern.strip()]
+    exclude_patterns = [pattern.strip() for pattern in cfg.exclude_globs if pattern.strip()]
+    collected: dict[str, Path] = {}
+
+    for pattern in include_patterns:
+        for path in root.glob(pattern):
+            if not path.is_file():
+                continue
+            try:
+                relative = path.relative_to(root).as_posix()
+            except ValueError:
+                continue
+            if _match_any_glob(relative, exclude_patterns):
+                continue
+            collected[relative] = path
+
+    return [collected[key] for key in sorted(collected.keys())]
+
+
+def _read_repo_knowledge_text(path: Path, max_chars: int) -> str:
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return ""
+    if b"\x00" in raw:
+        return ""
+    decoded = raw.decode("utf-8", errors="ignore")
+    compact = decoded.strip()
+    if len(compact) <= max_chars:
+        return compact
+    return compact[:max_chars]
+
+
+def _extract_repo_knowledge_snippet(content: str, prompt: str, max_chars: int) -> str:
+    text = content.strip()
+    if not text:
+        return ""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return _trim_for_prompt(text, max_chars)
+
+    prompt_vector = _term_frequency_vector(prompt)
+    best_index = 0
+    best_score = 0.0
+    for idx, line in enumerate(lines):
+        score = _cosine_similarity(prompt_vector, _term_frequency_vector(line))
+        if score > best_score:
+            best_score = score
+            best_index = idx
+
+    start = max(0, best_index - 1)
+    end = min(len(lines), best_index + 3)
+    snippet = "\n".join(lines[start:end]).strip()
+    return _trim_for_prompt(snippet or text, max_chars)
+
+
+def _search_repo_knowledge(prompt: str, app_config: AppConfig | None = None) -> list[dict[str, str | float]]:
+    if not _repo_knowledge_enabled(app_config):
+        return []
+
+    cfg = _repo_knowledge_config(app_config)
+    root = _repo_knowledge_root(app_config)
+    prompt_vector = _term_frequency_vector(prompt)
+    if not prompt_vector:
+        return []
+
+    matches: list[dict[str, str | float]] = []
+    for path in _iter_repo_knowledge_files(app_config):
+        try:
+            relative = path.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        content = _read_repo_knowledge_text(path, max(1000, int(cfg.max_file_chars)))
+        if not content:
+            continue
+        path_score = _cosine_similarity(prompt_vector, _term_frequency_vector(relative))
+        content_score = _cosine_similarity(prompt_vector, _term_frequency_vector(content))
+        score = (content_score * 0.85) + (path_score * 0.15)
+        if score < float(cfg.min_score):
+            continue
+        snippet = _extract_repo_knowledge_snippet(content, prompt, max(160, int(cfg.snippet_chars)))
+        if not snippet:
+            continue
+        matches.append(
+            {
+                "path": relative,
+                "score": score,
+                "path_score": path_score,
+                "content_score": content_score,
+                "snippet": snippet,
+            }
+        )
+
+    matches.sort(key=lambda item: float(item["score"]), reverse=True)
+    return matches[: max(1, int(cfg.max_files))]
+
+
+def _inject_repo_knowledge_context(base_prompt: str, matches: list[dict[str, str | float]]) -> str:
+    if not matches:
+        return base_prompt
+
+    lines = [
+        "[System Knowledge]",
+        "Use this repository context as the current source of truth for system-specific questions.",
+        "If repository context conflicts with explicit user instructions in this turn, follow the latest user instructions.",
+    ]
+    for idx, item in enumerate(matches, start=1):
+        lines.append(
+            f"[K{idx}] path={item['path']} score={float(item['score']):.2f}\n"
+            f"snippet={item['snippet']}"
+        )
+    return f"{base_prompt}\n\n" + "\n\n".join(lines)
+
+
+def _build_prompt_with_repo_knowledge(
+    original_prompt: str,
+    base_prompt: str,
+    app_config: AppConfig | None = None,
+) -> str:
+    if not _repo_knowledge_enabled(app_config):
+        return base_prompt
+    try:
+        matches = _search_repo_knowledge(original_prompt, app_config)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[magi] repo_knowledge lookup failed: {type(exc).__name__}: {exc}")
+        return base_prompt
+    if not matches:
+        return base_prompt
+    print(f"[magi] repo_knowledge references={len(matches)}")
+    return _inject_repo_knowledge_context(base_prompt, matches)
+
+
 def _semantic_memory_item_from_row(row: sqlite3.Row) -> SemanticMemoryItem:
     return SemanticMemoryItem(
         memory_id=str(row["memory_id"]),
@@ -3703,6 +3927,10 @@ def _routing_decay_lambda_per_day(config: AppConfig | None = None) -> float:
 
 def _routing_stats_ema_beta(config: AppConfig | None = None) -> float:
     return max(0.0, min(1.0, float(_routing_learning_config(config).stats_ema_beta)))
+
+
+def _routing_epsilon(config: AppConfig | None = None) -> float:
+    return max(0.0, min(1.0, float(_routing_learning_config(config).epsilon)))
 
 
 def _routing_clamp_range(config: AppConfig | None = None) -> tuple[float, float]:
@@ -5591,6 +5819,7 @@ async def run_magi(payload: RunRequest) -> RunResponse:
             print(f"[magi] history_context skipped profile={profile_name} reason=url_anchored")
         else:
             print(f"[magi] history_context skipped profile={profile_name}")
+        effective_prompt = _build_prompt_with_repo_knowledge(prompt, effective_prompt, config)
         agents = [_apply_ollama_system_prompt(agent, ollama_system_prompt) for agent in profile.agents]
         agents = _select_execution_agents(profile_name, prompt, fresh_mode, agents)
         tasks = [_run_single_agent(agent, effective_prompt, profile.timeout_seconds) for agent in agents]
@@ -5630,6 +5859,7 @@ async def run_magi(payload: RunRequest) -> RunResponse:
                     effective_prompt = _build_prompt_with_semantic_memory(effective_prompt, thread_id, config)
                     if _should_apply_history_context(escalated_profile_name) and not url_anchored_request:
                         effective_prompt = await _build_prompt_with_history(prompt, effective_prompt, config)
+                    effective_prompt = _build_prompt_with_repo_knowledge(prompt, effective_prompt, config)
                     escalated_agents = [_apply_ollama_system_prompt(agent, ollama_system_prompt) for agent in escalated_profile.agents]
                     escalated_agents = _select_execution_agents(escalated_profile_name, prompt, fresh_mode, escalated_agents)
                     escalated_tasks = [_run_single_agent(agent, effective_prompt, escalated_profile.timeout_seconds) for agent in escalated_agents]
@@ -5789,6 +6019,7 @@ async def chat_magi(payload: ChatRequest) -> ChatResponse:
         else:
             reason = "first_turn_or_smalltalk" if turn_index <= 1 or fast_intent == "smalltalk" else "disabled"
             print(f"[magi] history_context skipped profile=chat reason={reason}")
+        effective_prompt = _build_prompt_with_repo_knowledge(prompt, effective_prompt, config)
 
         if explicit_profile_requested or skip_local_draft:
             if explicit_profile_requested:
@@ -5862,6 +6093,7 @@ async def chat_magi(payload: ChatRequest) -> ChatResponse:
                     set(config.profiles.keys()) if config.profiles else {selected_profile_name},
                     selected_profile_name,
                     router_input,
+                    config,
                 )
                 router_output = {
                     "chosen_profile": selected_profile_name,
@@ -5904,6 +6136,7 @@ async def chat_magi(payload: ChatRequest) -> ChatResponse:
                             )
                             if should_apply_history:
                                 effective_prompt = await _build_prompt_with_history(prompt, effective_prompt, config)
+                            effective_prompt = _build_prompt_with_repo_knowledge(prompt, effective_prompt, config)
                             escalated_agents = [_apply_ollama_system_prompt(agent, ollama_system_prompt) for agent in escalated_profile.agents]
                             escalated_agents = _select_execution_agents(escalated_profile_name, prompt, fresh_mode, escalated_agents)
                             escalated_tasks = [_run_single_agent(agent, effective_prompt, escalated_profile.timeout_seconds) for agent in escalated_agents]
@@ -6044,6 +6277,7 @@ async def retry_agent(payload: RetryRequest) -> RetryResponse:
         effective_prompt = _build_prompt_with_thread_context(effective_prompt, thread_id)
     else:
         print(f"[magi] thread_context skipped profile={profile_name}")
+    effective_prompt = _build_prompt_with_repo_knowledge(prompt, effective_prompt, config)
     result = await _run_single_agent(target_agent, effective_prompt, profile.timeout_seconds)
     if profile_name == "local_only":
         result = _postprocess_local_only_result(prompt, result)
@@ -6081,6 +6315,7 @@ async def recalc_consensus(payload: ConsensusRequest) -> ConsensusResponse:
         effective_prompt = _build_prompt_with_thread_context(effective_prompt, thread_id)
     else:
         print(f"[magi] thread_context skipped profile={profile_name}")
+    effective_prompt = _build_prompt_with_repo_knowledge(prompt, effective_prompt, config)
     if profile_name == "local_only":
         consensus = _build_local_only_consensus(payload.results)
     else:

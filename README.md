@@ -11,6 +11,9 @@ v1.5 では、`v1.4` の段階的昇格ゲートを維持しつつ、semantic me
   - `run/chat` 結果から記憶候補を抽出し、`semantic_memories` に保存
   - 同一 `thread_id` の後続ターンで、信頼度/期限を満たす記憶をプロンプトへ注入
   - 同義文は類似度しきい値で統合し、重複蓄積を抑制
+- repository knowledge（ローカルRAG）:
+  - `README.md`、`SPEC.md`、`RUNBOOK.md`、主要な `backend/` と `frontend/` のファイルを質問ごとに検索
+  - 一致した断片を `[System Knowledge]` として注入し、システム固有質問の精度を上げる
 - semantic memory API:
   - `GET /api/magi/memory`
   - `PATCH /api/magi/memory/{memory_id}`
@@ -248,6 +251,16 @@ URL:
       }
     ]
   },
+  "repo_knowledge": {
+    "enabled": true,
+    "root": ".",
+    "include_globs": ["README.md", "SPEC.md", "RUNBOOK.md", "backend/**/*.py", "frontend/**/*.tsx"],
+    "exclude_globs": ["backend/data/**", "frontend/.next/**", "frontend/node_modules/**"],
+    "max_files": 4,
+    "max_file_chars": 20000,
+    "snippet_chars": 900,
+    "min_score": 0.08
+  },
   "profiles": {
     "cost": { "...": "..." },
     "balance": { "...": "..." },
@@ -277,8 +290,9 @@ URL:
 `routing_learning`（任意）:
 - ルーティングイベントをSQLiteに保存し、`feedback` と実行結果から profile 重みを更新
 - 最終スコアは `base_score + policy_weight`
+- 非 `local_only` の自動ルーティングでは `epsilon-greedy` 探索を行い、低確率で別profileを試す
 - `routing_policy` には profile重みに加えて昇格しきい値（`max_local_steps`, `min_local_confidence`, `max_retry_before_escalation`, `max_tool_calls_before_escalation`, `max_elapsed_ms_before_escalation`, `escalate_on_web_need`, `escalate_on_conflict`, `escalate_to_profile`）を保持
-- 主要設定: `alpha`, `weight_min`, `weight_max`, `latency_threshold_ms`, `cost_threshold`
+- 主要設定: `alpha`, `weight_min`, `weight_max`, `latency_threshold_ms`, `cost_threshold`, `decay_lambda_per_day`, `stats_ema_beta`, `epsilon`
 
 `billing`（任意）:
 - `provider_limits_usd` に provider ごとの予算上限（USD）を設定

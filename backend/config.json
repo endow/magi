@@ -27,7 +27,8 @@
     "latency_threshold_ms": 8000,
     "cost_threshold": 2.0,
     "decay_lambda_per_day": 0.05,
-    "stats_ema_beta": 0.2
+    "stats_ema_beta": 0.2,
+    "epsilon": 0.05
   },
   "billing": {
     "provider_limits_usd": {}
@@ -68,6 +69,47 @@
     "extractor_timeout_seconds": 6,
     "extractor_max_items": 3,
     "merge_similarity_threshold": 0.88
+  },
+  "repo_knowledge": {
+    "enabled": true,
+    "root": ".",
+    "include_globs": [
+      "README.md",
+      "SPEC.md",
+      "RUNBOOK.md",
+      "docker-compose.yml",
+      "backend/**/*.py",
+      "backend/**/*.json",
+      "backend/**/*.md",
+      "frontend/**/*.ts",
+      "frontend/**/*.tsx",
+      "frontend/**/*.js",
+      "frontend/**/*.jsx",
+      "frontend/**/*.json",
+      "frontend/**/*.md"
+    ],
+    "exclude_globs": [
+      ".git/**",
+      "**/.git/**",
+      "backend/data/**",
+      "frontend/.next/**",
+      "frontend/node_modules/**",
+      "**/__pycache__/**",
+      "**/*.db",
+      "**/*.sqlite",
+      "**/*.png",
+      "**/*.jpg",
+      "**/*.jpeg",
+      "**/*.gif",
+      "**/*.webp",
+      "**/*.ico",
+      "**/*.pdf",
+      "**/*.lock"
+    ],
+    "max_files": 4,
+    "max_file_chars": 20000,
+    "snippet_chars": 900,
+    "min_score": 0.08
   },
   "profiles": {
     "local_only": {

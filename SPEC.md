@@ -159,7 +159,10 @@ messages = [{"role": "user", "content": prompt}]
     "weight_min": -2.0,
     "weight_max": 2.0,
     "latency_threshold_ms": 8000,
-    "cost_threshold": 2.0
+    "cost_threshold": 2.0,
+    "decay_lambda_per_day": 0.05,
+    "stats_ema_beta": 0.2,
+    "epsilon": 0.05
   },
   "temporal_classifier": {
     "enabled": true,
@@ -208,6 +211,16 @@ messages = [{"role": "user", "content": prompt}]
     "extractor_max_items": 3,
     "merge_similarity_threshold": 0.88
   },
+  "repo_knowledge": {
+    "enabled": true,
+    "root": ".",
+    "include_globs": ["README.md", "SPEC.md", "RUNBOOK.md", "backend/**/*.py", "frontend/**/*.tsx"],
+    "exclude_globs": ["backend/data/**", "frontend/.next/**", "frontend/node_modules/**"],
+    "max_files": 4,
+    "max_file_chars": 20000,
+    "snippet_chars": 900,
+    "min_score": 0.08
+  },
   "profiles": {
     "local_only": { "...": "..." },
     "cost": { "...": "..." },
@@ -228,12 +241,16 @@ messages = [{"role": "user", "content": prompt}]
   - `routing_events` に router入出力・実行結果・user feedback を保存する
   - `routing_policy` に key別の profile weight/stats と昇格しきい値を保存する
   - 最終profileは `base_score + policy_weight` で選択する
+  - 非 `local_only` の自動ルーティングでは `epsilon-greedy` 探索を行い、低確率で別profileを試す
   - feedback / 実行結果を契機に `weight += alpha * reward` で更新し、`[weight_min, weight_max]` でclampする
+  - 重みは `decay_lambda_per_day` で時間減衰し、`stats.avg_reward` は `stats_ema_beta` 指定時にEMAで更新する
 - `history_context.strategy=embedding` の場合、履歴類似検索は外部埋め込みモデルを使う（失敗時は lexical にフォールバック）。
 - `semantic_memory.enabled=true` の場合、実行結果から抽出した記憶を `semantic_memories` に保存し、同一 `thread_id` の後続実行時に最大 `max_references` 件を補助コンテキストとして注入する。
 - `use_llm_extractor=true` の場合、抽出は LLM を優先し、JSON パース失敗/空結果時はルールベース抽出にフォールバックする。
 - 保存時は `thread_id + kind` 内で `merge_similarity_threshold` 以上の同義文を同一 memory として統合し、重複蓄積を抑制する。
 - semantic memory 抽出/保存に失敗しても本リクエストは失敗させない（best-effort）。
+- `repo_knowledge.enabled=true` の場合、ローカルリポジトリ内の許可ファイルを質問ごとに検索し、一致した断片を `[System Knowledge]` としてプロンプトへ注入する。
+- repository knowledge は会話履歴ではなく、ローカルファイルを現在のシステム事実ソースとして扱う。
 - 履歴は削除せず保持し、`validity_state(active|stale|superseded)` と鮮度減衰を使って参照重みを調整する。
 - `deprecations_source.enabled=true` の場合、外部JSONを取得して `deprecations` を `merge|replace` で解決する。取得失敗時はローカル `deprecations` へフォールバックする。
 - `deprecations` で技術移行ルール（legacy/current）を定義し、current語を含む新規実行時に過去legacy履歴を `superseded` に更新する。
@@ -489,6 +506,10 @@ OLLAMA_API_BASE=http://ollama:11434
   - `GET /api/magi/memory?thread_id=...&limit=...`
   - `PATCH /api/magi/memory/{memory_id}`
   - `DELETE /api/magi/memory/{memory_id}`（論理削除）
+- repository knowledge（ローカルRAG）:
+  - `README.md`、`SPEC.md`、`RUNBOOK.md`、主要コードを対象に質問ごとにローカル検索する
+  - 一致した断片を `[System Knowledge]` として実行プロンプトへ注入する
+  - 除外対象（`node_modules`, `.next`, DB, バイナリ等）は設定で制御する
 
 ---
 

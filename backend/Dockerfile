@@ -5,11 +5,14 @@ WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-COPY requirements.txt .
+COPY backend/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app ./app
-COPY config.json ./config.json
+COPY backend/app ./app
+COPY backend/config.json ./config.json
+COPY README.md ./README.md
+COPY SPEC.md ./SPEC.md
+COPY RUNBOOK.md ./RUNBOOK.md
 
 EXPOSE 8000
 

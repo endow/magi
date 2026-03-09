@@ -239,6 +239,202 @@ class TemporalDecision(BaseModel):
 HistoryContextConfig.model_rebuild()
 
 
+class SemanticMemoryStore:
+    def upsert_memories(
+        self,
+        thread_id: str,
+        run_id: str,
+        items: list[tuple[str, str, float]],
+        app_config: AppConfig | None = None,
+    ) -> int:
+        raise NotImplementedError
+
+    def load_references(
+        self,
+        thread_id: str,
+        min_confidence: float,
+        limit: int,
+        now_iso: str,
+    ) -> list[sqlite3.Row]:
+        raise NotImplementedError
+
+    def list_memories(self, thread_id: str, limit: int) -> tuple[int, list[sqlite3.Row]]:
+        raise NotImplementedError
+
+    def update_memory(self, memory_id: str, payload: "SemanticMemoryPatchRequest") -> sqlite3.Row | None:
+        raise NotImplementedError
+
+    def invalidate_memory(self, memory_id: str) -> bool:
+        raise NotImplementedError
+
+
+class SQLiteSemanticMemoryStore(SemanticMemoryStore):
+    def upsert_memories(
+        self,
+        thread_id: str,
+        run_id: str,
+        items: list[tuple[str, str, float]],
+        app_config: AppConfig | None = None,
+    ) -> int:
+        if not thread_id or not run_id or not items:
+            return 0
+
+        now = datetime.now(timezone.utc)
+        created_at = now.isoformat()
+        expires_at = (now + timedelta(days=_semantic_memory_default_ttl_days(app_config))).isoformat()
+        inserted = 0
+        with _get_db_connection() as conn:
+            for kind, content, confidence in items:
+                existing = conn.execute(
+                    """
+                    SELECT memory_id
+                    FROM semantic_memories
+                    WHERE thread_id = ?
+                      AND kind = ?
+                      AND content = ?
+                      AND status != 'invalid'
+                    LIMIT 1
+                    """,
+                    (thread_id, kind, content),
+                ).fetchone()
+                merge_target_id = _find_semantic_memory_merge_target(conn, thread_id, kind, content, app_config)
+                target_memory_id = str(existing["memory_id"]) if existing else merge_target_id
+                if target_memory_id:
+                    conn.execute(
+                        """
+                        UPDATE semantic_memories
+                        SET source_run_id = ?,
+                            content = ?,
+                            confidence = ?,
+                            status = 'active',
+                            updated_at = ?,
+                            expires_at = ?
+                        WHERE memory_id = ?
+                        """,
+                        (run_id, content, float(confidence), created_at, expires_at, target_memory_id),
+                    )
+                    inserted += 1
+                    continue
+                conn.execute(
+                    """
+                    INSERT INTO semantic_memories (
+                        memory_id, thread_id, source_run_id, kind, content, embedding_json,
+                        confidence, status, last_verified_at, expires_at, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, NULL, ?, 'active', NULL, ?, ?, ?)
+                    """,
+                    (str(uuid.uuid4()), thread_id, run_id, kind, content, float(confidence), expires_at, created_at, created_at),
+                )
+                inserted += 1
+        return inserted
+
+    def load_references(
+        self,
+        thread_id: str,
+        min_confidence: float,
+        limit: int,
+        now_iso: str,
+    ) -> list[sqlite3.Row]:
+        with _get_db_connection() as conn:
+            return conn.execute(
+                """
+                SELECT memory_id, thread_id, source_run_id, kind, content, confidence, status,
+                       last_verified_at, expires_at, created_at, updated_at
+                FROM semantic_memories
+                WHERE thread_id = ?
+                  AND status = 'active'
+                  AND confidence >= ?
+                  AND (expires_at IS NULL OR expires_at > ?)
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (thread_id, float(min_confidence), now_iso, max(1, int(limit))),
+            ).fetchall()
+
+    def list_memories(self, thread_id: str, limit: int) -> tuple[int, list[sqlite3.Row]]:
+        with _get_db_connection() as conn:
+            total_row = conn.execute(
+                "SELECT COUNT(1) AS count FROM semantic_memories WHERE thread_id = ?",
+                (thread_id,),
+            ).fetchone()
+            rows = conn.execute(
+                """
+                SELECT memory_id, thread_id, source_run_id, kind, content, confidence, status,
+                       last_verified_at, expires_at, created_at, updated_at
+                FROM semantic_memories
+                WHERE thread_id = ?
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (thread_id, limit),
+            ).fetchall()
+        total = int((total_row["count"] if total_row else 0) or 0)
+        return total, rows
+
+    def update_memory(self, memory_id: str, payload: "SemanticMemoryPatchRequest") -> sqlite3.Row | None:
+        normalized_id = memory_id.strip()
+        if not normalized_id:
+            return None
+        updates: list[str] = []
+        params: list[Any] = []
+        if payload.status is not None:
+            updates.append("status = ?")
+            params.append(payload.status)
+        if payload.confidence is not None:
+            clamped = max(0.0, min(1.0, float(payload.confidence)))
+            updates.append("confidence = ?")
+            params.append(clamped)
+        if payload.expires_at is not None:
+            value = payload.expires_at.strip() if payload.expires_at else None
+            if value:
+                if _parse_iso_datetime(value) is None:
+                    raise HTTPException(status_code=400, detail="expires_at must be ISO-8601 datetime")
+                updates.append("expires_at = ?")
+                params.append(value)
+            else:
+                updates.append("expires_at = NULL")
+        if not updates:
+            raise HTTPException(status_code=400, detail="no fields to update")
+        updates.append("updated_at = ?")
+        params.append(datetime.now(timezone.utc).isoformat())
+        params.append(normalized_id)
+
+        with _get_db_connection() as conn:
+            result = conn.execute(
+                f"UPDATE semantic_memories SET {', '.join(updates)} WHERE memory_id = ?",
+                params,
+            )
+            if int(result.rowcount or 0) == 0:
+                return None
+            return conn.execute(
+                """
+                SELECT memory_id, thread_id, source_run_id, kind, content, confidence, status,
+                       last_verified_at, expires_at, created_at, updated_at
+                FROM semantic_memories
+                WHERE memory_id = ?
+                """,
+                (normalized_id,),
+            ).fetchone()
+
+    def invalidate_memory(self, memory_id: str) -> bool:
+        normalized_id = memory_id.strip()
+        if not normalized_id:
+            return False
+        with _get_db_connection() as conn:
+            result = conn.execute(
+                """
+                UPDATE semantic_memories
+                SET status = 'invalid',
+                    updated_at = ?
+                WHERE memory_id = ?
+                """,
+                (datetime.now(timezone.utc).isoformat(), normalized_id),
+            )
+        return int(result.rowcount or 0) > 0
+
+
+_SEMANTIC_MEMORY_STORE: SemanticMemoryStore = SQLiteSemanticMemoryStore()
+
+
 class RunRequest(BaseModel):
     prompt: str
     profile: str | None = None
@@ -3147,56 +3343,7 @@ def _upsert_semantic_memories(
     items: list[tuple[str, str, float]],
     app_config: AppConfig | None = None,
 ) -> int:
-    if not thread_id or not run_id or not items:
-        return 0
-
-    now = datetime.now(timezone.utc)
-    created_at = now.isoformat()
-    expires_at = (now + timedelta(days=_semantic_memory_default_ttl_days(app_config))).isoformat()
-    inserted = 0
-    with _get_db_connection() as conn:
-        for kind, content, confidence in items:
-            existing = conn.execute(
-                """
-                SELECT memory_id
-                FROM semantic_memories
-                WHERE thread_id = ?
-                  AND kind = ?
-                  AND content = ?
-                  AND status != 'invalid'
-                LIMIT 1
-                """,
-                (thread_id, kind, content),
-            ).fetchone()
-            merge_target_id = _find_semantic_memory_merge_target(conn, thread_id, kind, content, app_config)
-            target_memory_id = str(existing["memory_id"]) if existing else merge_target_id
-            if target_memory_id:
-                conn.execute(
-                    """
-                    UPDATE semantic_memories
-                    SET source_run_id = ?,
-                        content = ?,
-                        confidence = ?,
-                        status = 'active',
-                        updated_at = ?,
-                        expires_at = ?
-                    WHERE memory_id = ?
-                    """,
-                    (run_id, content, float(confidence), created_at, expires_at, target_memory_id),
-                )
-                inserted += 1
-                continue
-            conn.execute(
-                """
-                INSERT INTO semantic_memories (
-                    memory_id, thread_id, source_run_id, kind, content, embedding_json,
-                    confidence, status, last_verified_at, expires_at, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, NULL, ?, 'active', NULL, ?, ?, ?)
-                """,
-                (str(uuid.uuid4()), thread_id, run_id, kind, content, float(confidence), expires_at, created_at, created_at),
-            )
-            inserted += 1
-    return inserted
+    return _SEMANTIC_MEMORY_STORE.upsert_memories(thread_id, run_id, items, app_config)
 
 
 def _load_semantic_memories(
@@ -3209,22 +3356,7 @@ def _load_semantic_memories(
     effective_limit = limit if limit is not None else _semantic_memory_max_references(app_config)
     min_confidence = _semantic_memory_min_confidence(app_config)
     now_iso = datetime.now(timezone.utc).isoformat()
-    with _get_db_connection() as conn:
-        rows = conn.execute(
-            """
-            SELECT memory_id, thread_id, source_run_id, kind, content, confidence, status,
-                   last_verified_at, expires_at, created_at, updated_at
-            FROM semantic_memories
-            WHERE thread_id = ?
-              AND status = 'active'
-              AND confidence >= ?
-              AND (expires_at IS NULL OR expires_at > ?)
-            ORDER BY updated_at DESC
-            LIMIT ?
-            """,
-            (thread_id, float(min_confidence), now_iso, max(1, int(effective_limit))),
-        ).fetchall()
-    return rows
+    return _SEMANTIC_MEMORY_STORE.load_references(thread_id, min_confidence, effective_limit, now_iso)
 
 
 def _inject_semantic_memory_context(base_prompt: str, rows: list[sqlite3.Row]) -> str:
@@ -3441,90 +3573,19 @@ def _list_semantic_memory(thread_id: str, limit: int, app_config: AppConfig | No
     normalized_thread_id = _normalize_thread_id(thread_id, require_uuid=True)
     if not normalized_thread_id:
         raise HTTPException(status_code=400, detail="thread_id is required")
-    with _get_db_connection() as conn:
-        total_row = conn.execute(
-            "SELECT COUNT(1) AS count FROM semantic_memories WHERE thread_id = ?",
-            (normalized_thread_id,),
-        ).fetchone()
-        rows = conn.execute(
-            """
-            SELECT memory_id, thread_id, source_run_id, kind, content, confidence, status,
-                   last_verified_at, expires_at, created_at, updated_at
-            FROM semantic_memories
-            WHERE thread_id = ?
-            ORDER BY updated_at DESC
-            LIMIT ?
-            """,
-            (normalized_thread_id, limit),
-        ).fetchall()
-    total = int((total_row["count"] if total_row else 0) or 0)
+    total, rows = _SEMANTIC_MEMORY_STORE.list_memories(normalized_thread_id, limit)
     return SemanticMemoryListResponse(total=total, items=[_semantic_memory_item_from_row(row) for row in rows])
 
 
 def _update_semantic_memory(memory_id: str, payload: SemanticMemoryPatchRequest) -> SemanticMemoryItem | None:
-    normalized_id = memory_id.strip()
-    if not normalized_id:
-        return None
-    updates: list[str] = []
-    params: list[Any] = []
-    if payload.status is not None:
-        updates.append("status = ?")
-        params.append(payload.status)
-    if payload.confidence is not None:
-        clamped = max(0.0, min(1.0, float(payload.confidence)))
-        updates.append("confidence = ?")
-        params.append(clamped)
-    if payload.expires_at is not None:
-        value = payload.expires_at.strip() if payload.expires_at else None
-        if value:
-            if _parse_iso_datetime(value) is None:
-                raise HTTPException(status_code=400, detail="expires_at must be ISO-8601 datetime")
-            updates.append("expires_at = ?")
-            params.append(value)
-        else:
-            updates.append("expires_at = NULL")
-    if not updates:
-        raise HTTPException(status_code=400, detail="no fields to update")
-    updates.append("updated_at = ?")
-    params.append(datetime.now(timezone.utc).isoformat())
-    params.append(normalized_id)
-
-    with _get_db_connection() as conn:
-        result = conn.execute(
-            f"UPDATE semantic_memories SET {', '.join(updates)} WHERE memory_id = ?",
-            params,
-        )
-        if int(result.rowcount or 0) == 0:
-            return None
-        row = conn.execute(
-            """
-            SELECT memory_id, thread_id, source_run_id, kind, content, confidence, status,
-                   last_verified_at, expires_at, created_at, updated_at
-            FROM semantic_memories
-            WHERE memory_id = ?
-            """,
-            (normalized_id,),
-        ).fetchone()
+    row = _SEMANTIC_MEMORY_STORE.update_memory(memory_id, payload)
     if row is None:
         return None
     return _semantic_memory_item_from_row(row)
 
 
 def _invalidate_semantic_memory(memory_id: str) -> bool:
-    normalized_id = memory_id.strip()
-    if not normalized_id:
-        return False
-    with _get_db_connection() as conn:
-        result = conn.execute(
-            """
-            UPDATE semantic_memories
-            SET status = 'invalid',
-                updated_at = ?
-            WHERE memory_id = ?
-            """,
-            (datetime.now(timezone.utc).isoformat(), normalized_id),
-        )
-    return int(result.rowcount or 0) > 0
+    return _SEMANTIC_MEMORY_STORE.invalidate_memory(memory_id)
 
 
 def _next_turn_index(thread_id: str) -> int:

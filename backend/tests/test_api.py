@@ -2301,6 +2301,49 @@ def test_evaluate_escalation_web_required() -> None:
     assert decision["reason_code"] == "WEB_REQUIRED"
 
 
+def test_evaluate_escalation_stays_on_policy_boundaries() -> None:
+    policy = main._default_escalation_policy()
+    decision = main._evaluate_escalation(
+        state={
+            "needs_web": False,
+            "needs_tools": False,
+            "local_confidence": policy["min_local_confidence"],
+            "retry_count": policy["max_retry_before_escalation"],
+            "tool_call_count": policy["max_tool_calls_before_escalation"],
+            "elapsed_ms": policy["max_elapsed_ms_before_escalation"],
+            "estimated_remaining_steps": policy["max_local_steps"],
+            "has_conflict": False,
+            "ambiguity": 1.0,
+            "escalation_hint": "router-guess",
+        },
+        policy=policy,
+        available_profiles={"local_only", "balance"},
+        current_profile="local_only",
+    )
+    assert decision == {"action": "stay"}
+
+
+def test_evaluate_escalation_does_not_escalate_for_ambiguity_or_tools_only() -> None:
+    decision = main._evaluate_escalation(
+        state={
+            "needs_web": False,
+            "needs_tools": True,
+            "local_confidence": 0.95,
+            "retry_count": 0,
+            "tool_call_count": 0,
+            "elapsed_ms": 100,
+            "estimated_remaining_steps": 0,
+            "has_conflict": False,
+            "ambiguity": 0.99,
+            "escalation_hint": "might-need-tools",
+        },
+        policy=main._default_escalation_policy(),
+        available_profiles={"local_only", "balance"},
+        current_profile="local_only",
+    )
+    assert decision == {"action": "stay"}
+
+
 def test_routing_feedback_affects_next_auto_route(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("MAGI_DB_PATH", str(tmp_path / "magi-routing-integration.db"))
     main._init_db()
@@ -2680,3 +2723,43 @@ def test_semantic_memory_upsert_merges_similar_content(monkeypatch, tmp_path) ->
     assert latest_row["source_run_id"] == "run-2"
     assert "pytest" in latest_row["content"]
     assert float(latest_row["confidence"]) == 0.88
+
+
+def test_semantic_memory_uses_store_abstraction(monkeypatch) -> None:
+    class FakeStore(main.SemanticMemoryStore):
+        def __init__(self) -> None:
+            self.loaded: tuple[str, float, int, str] | None = None
+            self.upserted: tuple[str, str, list[tuple[str, str, float]], main.AppConfig | None] | None = None
+
+        def upsert_memories(self, thread_id, run_id, items, app_config=None):
+            self.upserted = (thread_id, run_id, items, app_config)
+            return 7
+
+        def load_references(self, thread_id, min_confidence, limit, now_iso):
+            self.loaded = (thread_id, min_confidence, limit, now_iso)
+            return []
+
+        def list_memories(self, thread_id, limit):
+            raise AssertionError("not used in this test")
+
+        def update_memory(self, memory_id, payload):
+            raise AssertionError("not used in this test")
+
+        def invalidate_memory(self, memory_id):
+            raise AssertionError("not used in this test")
+
+    cfg = _semantic_memory_config_for_test()
+    store = FakeStore()
+    monkeypatch.setattr(main, "_SEMANTIC_MEMORY_STORE", store)
+
+    upserted = main._upsert_semantic_memories("thread-1", "run-1", [("project_fact", "pytest を使う", 0.8)], cfg)
+    loaded = main._load_semantic_memories("thread-1", cfg, limit=3)
+
+    assert upserted == 7
+    assert loaded == []
+    assert store.upserted is not None
+    assert store.upserted[0] == "thread-1"
+    assert store.loaded is not None
+    assert store.loaded[0] == "thread-1"
+    assert store.loaded[1] == cfg.semantic_memory.min_confidence
+    assert store.loaded[2] == 3
